@@ -1,8 +1,7 @@
 """Orchestrator — main iteration loop.
 
-Wires agents together according to the selected FeedbackCondition.
-Drives iterations, triggers co-evolution reflections every N iterations,
-and delegates to stores for persistence.
+Wires agents together and drives the plan → execute → mediate → update loop.
+Triggers co-evolution reflections every N iterations.
 """
 
 from __future__ import annotations
@@ -15,9 +14,8 @@ from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.agents.mediator import MediatorAgent
-from mediated_coevo.conditions import FeedbackCondition
 from mediated_coevo.config import Config
-from mediated_coevo.evolution.compactor import build_planner_signal, deterministic_mediator_signal
+from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import SkillUpdate
@@ -29,14 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
-    """Runs the plan → execute → feedback → update loop."""
+    """Runs the plan → execute → mediate → update loop."""
 
     def __init__(
         self,
         planner: PlannerAgent,
         executor: ExecutorAgent,
-        mediator: MediatorAgent | None,
-        condition: FeedbackCondition,
+        mediator: MediatorAgent,
         skill_store: SkillStore,
         artifact_store: ArtifactStore,
         history_store: HistoryStore,
@@ -47,7 +44,6 @@ class Orchestrator:
         self.planner = planner
         self.executor = executor
         self.mediator = mediator
-        self.condition = condition
         self.skill_store = skill_store
         self.artifact_store = artifact_store
         self.history_store = history_store
@@ -73,8 +69,8 @@ class Orchestrator:
         for iteration in range(num_iterations):
             for task_id in task_ids:
                 logger.info(
-                    "=== Iteration %d/%d | Task: %s | Condition: %s ===",
-                    iteration + 1, num_iterations, task_id, self.condition.name,
+                    "=== Iteration %d/%d | Task: %s ===",
+                    iteration + 1, num_iterations, task_id,
                 )
                 record = await self._run_iteration(task_id, iteration)
                 records.append(record)
@@ -82,8 +78,7 @@ class Orchestrator:
 
             # Co-evolution checkpoint
             if (iteration + 1) % self.config.experiment.coevo_interval == 0:
-                if self.condition.supports_coevolution():
-                    await self._coevolve(iteration)
+                await self._coevolve(iteration)
 
             # Snapshot skills
             self.skill_store.snapshot(iteration, self._snapshots_dir)
@@ -108,7 +103,6 @@ class Orchestrator:
             skill_refiner=planner_skill_text,
         )
 
-        # Executor sees only its own skill
         skill_texts = [executor_skill_text] if executor_skill_text else []
 
         # 1. PLAN
@@ -125,14 +119,11 @@ class Orchestrator:
         trace = await self.executor.execute_task(task_spec, skill_texts)
         self.artifact_store.store_trace(trace)
 
-        # 3. FEEDBACK (condition-dependent)
-        logger.info("Step 3: Producing feedback via %s...", self.condition.name)
-        feedback = await self.condition.produce_feedback(
-            trace=trace,
-            task_context=task_spec,
-            artifact_store=self.artifact_store,
-            mediator=self.mediator,
-        )
+        # 3. MEDIATE
+        logger.info("Step 3: Mediator processing trace...")
+        report = await self.mediator.process_trace(trace, task_spec)
+        self.artifact_store.store_report(report)
+        feedback: str | None = None if report.withheld else report.content
 
         # 4. UPDATE SKILL — only when there is feedback to act on
         skill_update: SkillUpdate | None = None
@@ -168,26 +159,10 @@ class Orchestrator:
                 reward=trace.reward,
             )
 
-        # Fetch the underlying MediatorReport (learned_mediator only) once, so
-        # both the history payload and `_previous_report` share the same object.
-        current_report: MediatorReport | None = None
-        if feedback and self.condition.supports_coevolution():
-            reports = self.artifact_store.query_reports(task_id=task_id, recent=1)
-            current_report = reports[0] if reports else None
-
-        # Record history entries with structured payloads. When a MediatorAgent
-        # is present, it owns its own compaction (and may make one extra LLM
-        # call on its own client for long reports). For non-mediator conditions
-        # we use the deterministic path — no LLM call.
+        # Record history entries
+        current_report: MediatorReport | None = report if not report.withheld else None
         if feedback:
-            if self.mediator:
-                mediator_signal = await self.mediator.compact_feedback(
-                    feedback, current_report
-                )
-            else:
-                mediator_signal = deterministic_mediator_signal(
-                    feedback, current_report
-                )
+            mediator_signal = await self.mediator.compact_feedback(feedback, current_report)
             self.history_store.add(HistoryEntry(
                 iteration=iteration,
                 agent_role=AgentRole.MEDIATOR,
@@ -211,7 +186,7 @@ class Orchestrator:
         record = IterationRecord(
             iteration=iteration,
             task_id=task_id,
-            condition=self.condition.name,
+            condition="learned_mediator",
             task_spec=task_spec,
             execution_trace=trace,
             mediator_report=self._previous_report,
@@ -234,10 +209,9 @@ class Orchestrator:
         reflector = Reflector(self.history_store, self.skill_store)
 
         # Mediator reflects on reporting history
-        if self.mediator:
-            new_protocol = await reflector.reflect(AgentRole.MEDIATOR, self.mediator.llm_client)
-            if new_protocol:
-                self.mediator.load_protocol(new_protocol)
+        new_protocol = await reflector.reflect(AgentRole.MEDIATOR, self.mediator.llm_client)
+        if new_protocol:
+            self.mediator.load_protocol(new_protocol)
 
         # Planner reflects on skill-edit history
         await reflector.reflect(AgentRole.PLANNER, self.planner.llm_client)
