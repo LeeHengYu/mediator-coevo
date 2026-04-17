@@ -18,8 +18,8 @@ Planner signals are always built deterministically here — there is no
 LLM call involved in turning a ``SkillUpdate`` into a ``PlannerSignal``.
 
 The helpers below (``first_sentence``, ``head_tail_text``,
-``parse_json_object``, ``abstraction_level_str``) are shared between
-this module and ``MediatorAgent.compact_feedback``.
+``abstraction_level_str``) are shared between this module and
+``MediatorAgent.compact_feedback``.
 """
 
 from __future__ import annotations
@@ -68,14 +68,6 @@ def deterministic_mediator_signal(
     feedback: str,
     report: "MediatorReport | None" = None,
 ) -> MediatorSignal:
-    """Build a ``MediatorSignal`` with no LLM call.
-
-    Short feedback is kept verbatim in ``evidence``. Long feedback is
-    reduced to a head+tail excerpt. This is the only path available for
-    conditions without a ``MediatorAgent``, and the fallback path used
-    by ``MediatorAgent.compact_feedback`` when the feedback is short
-    enough that an LLM call would be wasted.
-    """
     raw_length = len(feedback)
     evidence = (
         feedback
@@ -92,20 +84,14 @@ def deterministic_mediator_signal(
     )
 
 
-def build_planner_signal(update: "SkillUpdate") -> PlannerSignal:
-    """Build a ``PlannerSignal`` from a ``SkillUpdate``. No LLM call."""
+def build_planner_signal(update: SkillUpdate) -> PlannerSignal:
     added, removed, excerpt = _diff_parts(update.old_content, update.new_content)
     return PlannerSignal(
         reasoning=update.reasoning,
         lines_added=added,
         lines_removed=removed,
         diff_excerpt=excerpt,
-        exploration=update.exploration,
     )
-
-
-# ── Shared helpers (also used by MediatorAgent.compact_feedback) ────────
-
 
 def first_sentence(text: str, max_chars: int) -> str:
     """Return the first sentence or line of text, bounded by max_chars."""
@@ -128,10 +114,6 @@ def head_tail_text(text: str, budget: int) -> str:
     return f"{text[:half].rstrip()}\n…\n{text[-half:].lstrip()}"
 
 
-# Re-export from utils for backward compatibility with existing callers.
-from mediated_coevo.utils import parse_json_object as parse_json_object  # noqa: F401
-
-
 def abstraction_level_str(report: "MediatorReport | None") -> str:
     """Return the report's abstraction_level as a string, or ''."""
     if report is None:
@@ -140,7 +122,6 @@ def abstraction_level_str(report: "MediatorReport | None") -> str:
 
 
 # ── Planner diff helper (internal) ──────────────────────────────────────
-
 
 def _diff_parts(old: str, new: str) -> tuple[int, int, str]:
     """Compute a unified diff, return (added, removed, head+tail excerpt)."""

@@ -46,6 +46,12 @@ User → Claude (plans) ──── task (unmodified) ───► Gemini (exec
 3. Mediator: Process the trace and summarize the feedback over the last few runs.
 4. Planner + Mediator: Coevolve by querying the `contrasive pairs`, a contrasive pair is by pairing good and bad performance and the improvement with harness diff can be used to reflect on skill improvement.
 
+## Current Implementation
+
+- Planner now grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
+- Executor now runs a vendored local SkillsBench-style Harbor task and parses the resulting `reward`, verifier output, and agent logs into `ExecutionTrace`.
+- The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
+
 ## Further Direction
 
 1. Overall flow of the information, who sees what?

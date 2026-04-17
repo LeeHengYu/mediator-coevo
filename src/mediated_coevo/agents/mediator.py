@@ -192,9 +192,9 @@ class MediatorAgent(BaseAgent):
             deterministic_mediator_signal,
             first_sentence,
             head_tail_text,
-            parse_json_object,
         )
         from mediated_coevo.models.history_signals import MediatorSignal
+        from mediated_coevo.utils import parse_json_object
 
         raw_length = len(feedback)
         if raw_length <= RAW_PASSTHROUGH_CHARS:

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime
 from pathlib import Path
 
+import tomli_w
 import typer
 from rich.console import Console
 from rich.logging import RichHandler
@@ -14,6 +16,7 @@ from rich.logging import RichHandler
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository
 from mediated_coevo.conditions import create_condition
 from mediated_coevo.config import load_config
 from mediated_coevo.llm.client import LLMClient
@@ -40,7 +43,7 @@ def _setup_logging(verbose: bool = False) -> None:
 @app.command()
 def run(
     condition: str = typer.Option("learned_mediator", help="Experimental condition"),
-    tasks: str = typer.Option("task-001", help="Comma-separated task IDs"),
+    tasks: str = typer.Option("fix-build-google-auto", help="Comma-separated task IDs"),
     iterations: int = typer.Option(30, help="Number of iterations"),
     seed: int = typer.Option(42, help="Random seed"),
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
@@ -48,7 +51,6 @@ def run(
 ) -> None:
     """Run a single experiment with the specified condition."""
     _setup_logging(verbose)
-    import random
     random.seed(seed)
 
     config = load_config(config_dir, condition=condition)
@@ -68,7 +70,6 @@ def run(
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     # Save frozen config
-    import tomli_w
     with open(experiment_dir / "config.toml", "wb") as f:
         tomli_w.dump(config.model_dump(), f)
 
@@ -77,6 +78,14 @@ def run(
     skill_store = SkillStore(skills_dir=skills_dir)
     artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
     history_store = HistoryStore(history_dir=experiment_dir / "history")
+    benchmark_repo = SkillsBenchRepository(
+        root_dir=PROJECT_ROOT / config.paths.benchmarks_dir,
+        task_dirs=config.executor_runtime.task_dirs,
+    )
+    harbor_runner = HarborRunner(
+        agent_name=config.executor_runtime.agent_name,
+        jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
+    )
 
     # Initialize LLM clients
     planner_llm = LLMClient(model=config.models.planner)
@@ -84,7 +93,14 @@ def run(
 
     # Initialize agents
     planner = PlannerAgent(llm_client=planner_llm)
-    executor = ExecutorAgent(llm_client=executor_llm, sandbox_config=config.sandbox.model_dump())
+    executor = ExecutorAgent(
+        llm_client=executor_llm,
+        benchmark_repo=benchmark_repo,
+        harbor_runner=harbor_runner,
+        workspace_root=experiment_dir / "benchmarks",
+        injected_skill_name=config.executor_runtime.injected_skill_name,
+        sandbox_config=config.sandbox.model_dump(),
+    )
 
     # Initialize mediator only for conditions that need it
     mediator: MediatorAgent | None = None
@@ -112,6 +128,7 @@ def run(
         skill_store=skill_store,
         artifact_store=artifact_store,
         history_store=history_store,
+        benchmark_repo=benchmark_repo,
         config=config,
         experiment_dir=experiment_dir,
     )
@@ -133,7 +150,7 @@ def run(
 
 @app.command()
 def sweep(
-    tasks: str = typer.Option("task-001", help="Comma-separated task IDs"),
+    tasks: str = typer.Option("fix-build-google-auto", help="Comma-separated task IDs"),
     iterations: int = typer.Option(30, help="Number of iterations per condition"),
     seeds: str = typer.Option("42,43,44", help="Comma-separated seeds"),
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),

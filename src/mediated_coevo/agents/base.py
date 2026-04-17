@@ -1,7 +1,8 @@
 """Base agent class.
 
-Adapted from OpenSpace's openspace/agents/base.py — provides the core
-contract (process + construct_messages) that all agents implement.
+Provides shared infrastructure (LLM client, step counter, JSON parsing)
+for the three role-specific agents. Each subclass defines its own entry
+point — there is no uniform `process` contract across roles.
 """
 
 from __future__ import annotations
@@ -10,29 +11,13 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from pydantic import BaseModel
-
 from mediated_coevo.llm.client import CompletionResult, LLMClient
 
 logger = logging.getLogger(__name__)
 
 
-class AgentResponse(BaseModel):
-    """Structured response from any agent LLM call."""
-
-    content: str = ""
-    input_tokens: int = 0
-    output_tokens: int = 0
-    model: str = ""
-
-
 class BaseAgent(ABC):
-    """Base class for all agents in the mediated co-evolution system.
-
-    Each agent wraps an LLMClient and exposes two abstract methods:
-      - construct_messages(): build provider-agnostic message list from context
-      - process(): main entry point — plan, execute, or mediate
-    """
+    """Base class for all agents in the mediated co-evolution system."""
 
     def __init__(self, name: str, llm_client: LLMClient) -> None:
         self._name = name
@@ -55,22 +40,6 @@ class BaseAgent(ABC):
     @abstractmethod
     def role(self) -> str:
         """One of 'planner', 'executor', 'mediator'."""
-        ...
-
-    @abstractmethod
-    def construct_messages(self, context: dict[str, Any]) -> list[dict[str, Any]]:
-        """Build the LLM message list from context.
-
-        Each agent constructs its own system prompt + user message(s).
-        """
-        ...
-
-    @abstractmethod
-    async def process(self, context: dict[str, Any]) -> dict[str, Any]:
-        """Main entry point. Takes context dict, returns structured result.
-
-        Typical flow: construct_messages() → get_llm_response() → parse.
-        """
         ...
 
     async def get_llm_response(

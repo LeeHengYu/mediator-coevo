@@ -36,12 +36,17 @@ class FeedbackCondition(ABC):
         ...
 
     @abstractmethod
-    def supports_coevolution(self) -> bool: ...
+    def supports_coevolution(self) -> bool:
+        """True iff the condition runs a MediatorAgent.
 
-    @property
-    def uses_mediator_reports(self) -> bool:
-        """Whether this condition produces MediatorReports stored in ArtifactStore."""
-        return False
+        A mediator is what produces `MediatorReport` artifacts and what
+        co-evolves (via Reflector) against its own reporting history, so
+        "has a mediator in the loop" and "supports co-evolution" are the
+        same predicate. The orchestrator uses this flag both to decide
+        whether to carry a prior `MediatorReport` into the next plan and
+        to decide whether to run co-evolution at checkpoints.
+        """
+        ...
 
 
 # Import conditions after base class is defined

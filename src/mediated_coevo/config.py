@@ -15,7 +15,7 @@ except ModuleNotFoundError:
 
 class ModelsConfig(BaseModel):
     planner: str = "anthropic/claude-opus-4"
-    executor: str = "gemini/gemini-2.5-pro"
+    executor: str = "gemini/gemini-3-flash-preview"
     mediator: str = "openai/gpt-5.4"
 
 
@@ -28,7 +28,6 @@ class ExperimentConfig(BaseModel):
     condition: str = "learned_mediator"
     num_iterations: int = 30
     coevo_interval: int = 5
-    epsilon: float = 0.2
     seed: int = 42
 
 
@@ -40,6 +39,15 @@ class SandboxConfig(BaseModel):
 class PathsConfig(BaseModel):
     skills_dir: str = "skills"
     data_dir: str = "data"
+    benchmarks_dir: str = "benchmarks/skillsbench"
+
+
+class ExecutorRuntimeConfig(BaseModel):
+    backend: str = "skillsbench"
+    agent_name: str = "codex"
+    jobs_dir: str = "jobs"
+    task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
+    injected_skill_name: str = "executor-evolved"
 
 
 class Config(BaseModel):
@@ -50,6 +58,7 @@ class Config(BaseModel):
     experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
+    executor_runtime: ExecutorRuntimeConfig = Field(default_factory=ExecutorRuntimeConfig)
 
 
 def load_config(
@@ -75,13 +84,5 @@ def load_config(
                     data[section].update(values)
                 else:
                     data[section] = values
-
-    # Env var overrides for model strings
-    if env_planner := os.environ.get("MEDCOEVO_PLANNER_MODEL"):
-        data.setdefault("models", {})["planner"] = env_planner
-    if env_executor := os.environ.get("MEDCOEVO_EXECUTOR_MODEL"):
-        data.setdefault("models", {})["executor"] = env_executor
-    if env_mediator := os.environ.get("MEDCOEVO_MEDIATOR_MODEL"):
-        data.setdefault("models", {})["mediator"] = env_mediator
 
     return Config(**data)

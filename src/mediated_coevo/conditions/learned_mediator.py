@@ -55,7 +55,3 @@ class LearnedMediatorCondition(FeedbackCondition):
 
     def supports_coevolution(self) -> bool:
         return True
-
-    @property
-    def uses_mediator_reports(self) -> bool:
-        return True

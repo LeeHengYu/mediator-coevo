@@ -270,8 +270,6 @@ def _format_planner_entry(entry: "HistoryEntry") -> str:
     if p.reasoning:
         lines.append(f"- Reasoning: {p.reasoning}")
     diff_line = f"- Diff: +{p.lines_added}/-{p.lines_removed}"
-    if p.exploration:
-        diff_line += " (exploration edit)"
     lines.append(diff_line)
     if p.diff_excerpt.strip():
         lines.append("- Diff excerpt:")

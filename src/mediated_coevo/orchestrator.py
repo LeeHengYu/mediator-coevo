@@ -10,17 +10,14 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any
 
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.executor import ExecutorAgent
+from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.conditions import FeedbackCondition
 from mediated_coevo.config import Config
-from mediated_coevo.evolution.compactor import (
-    build_planner_signal,
-    deterministic_mediator_signal,
-)
+from mediated_coevo.evolution.compactor import build_planner_signal, deterministic_mediator_signal
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import SkillUpdate
@@ -43,6 +40,7 @@ class Orchestrator:
         skill_store: SkillStore,
         artifact_store: ArtifactStore,
         history_store: HistoryStore,
+        benchmark_repo: SkillsBenchRepository,
         config: Config,
         experiment_dir: Path,
     ) -> None:
@@ -53,6 +51,7 @@ class Orchestrator:
         self.skill_store = skill_store
         self.artifact_store = artifact_store
         self.history_store = history_store
+        self.benchmark_repo = benchmark_repo
         self.config = config
         self.experiment_dir = experiment_dir
 
@@ -102,6 +101,7 @@ class Orchestrator:
         # Load executor skills for the planner's context
         executor_skill_text = self.skill_store.read_skill("executor") or ""
         planner_skill_text = self.skill_store.read_skill("planner") or None
+        benchmark_task = self.benchmark_repo.resolve(task_id)
 
         self.planner.set_skill_context(
             executor_skills=executor_skill_text,
@@ -115,6 +115,7 @@ class Orchestrator:
         logger.info("Step 1: Planner planning task...")
         task_spec = await self.planner.plan_task(
             task_id=task_id,
+            base_instruction=benchmark_task.instruction,
             mediator_report=self._previous_report,
             current_skills=skill_texts,
         )
@@ -147,9 +148,8 @@ class Orchestrator:
                 edit_history=edit_history,
             )
             if skill_update:
-                skill_update.exploration = _should_explore(self.config.experiment.epsilon)
                 self.skill_store.write_skill("executor", skill_update.new_content)
-                logger.info("Skill updated (exploration=%s)", skill_update.exploration)
+                logger.info("Skill updated")
             else:
                 logger.info("Planner decided: no skill update needed.")
         else:
@@ -171,7 +171,7 @@ class Orchestrator:
         # Fetch the underlying MediatorReport (learned_mediator only) once, so
         # both the history payload and `_previous_report` share the same object.
         current_report: MediatorReport | None = None
-        if feedback and self.condition.uses_mediator_reports:
+        if feedback and self.condition.supports_coevolution():
             reports = self.artifact_store.query_reports(task_id=task_id, recent=1)
             current_report = reports[0] if reports else None
 
@@ -246,9 +246,3 @@ class Orchestrator:
         """Append an iteration record to metrics.jsonl."""
         with open(self._metrics_path, "a") as f:
             f.write(record.model_dump_json() + "\n")
-
-
-def _should_explore(epsilon: float) -> bool:
-    """Epsilon-greedy: return True with probability epsilon."""
-    import random
-    return random.random() < epsilon

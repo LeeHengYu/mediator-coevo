@@ -70,9 +70,6 @@ class PlannerSignal(BaseModel):
     diff_excerpt: str = ""
     """Head + tail of the unified diff with an explicit gap marker."""
 
-    exploration: bool = False
-    """True iff this was an epsilon-explore edit."""
-
 
 HistorySignal = Annotated[
     Union[MediatorSignal, PlannerSignal],

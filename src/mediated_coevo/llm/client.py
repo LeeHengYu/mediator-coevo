@@ -176,8 +176,8 @@ class LLMClient:
 
         return {
             "content": choice.message.content or "",
-            "input_tokens": getattr(usage, "prompt_tokens", 0),
-            "output_tokens": getattr(usage, "completion_tokens", 0),
+            "input_tokens": usage.prompt_tokens,
+            "output_tokens": usage.completion_tokens,
             "model": self.model,
-            "raw": response.model_dump() if hasattr(response, "model_dump") else {},
+            "raw": response.model_dump(),
         }

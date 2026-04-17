@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository, parse_execution_trace
 
 from .base import BaseAgent
 
@@ -18,16 +21,6 @@ if TYPE_CHECKING:
     from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
-
-EXECUTOR_SYSTEM_PROMPT = """\
-You are the Executor in a multi-agent skill co-evolution system.
-
-Your responsibilities:
-1. Execute the task exactly as instructed by the Planner.
-2. Follow any skill guidelines provided to you.
-3. Report your results, including any errors encountered.
-
-Execute the task thoroughly and report all outputs."""
 
 
 class ExecutorAgent(BaseAgent):
@@ -40,74 +33,43 @@ class ExecutorAgent(BaseAgent):
     def __init__(
         self,
         llm_client: LLMClient,
+        benchmark_repo: SkillsBenchRepository,
+        harbor_runner: HarborRunner,
+        workspace_root: Path,
+        injected_skill_name: str,
         sandbox_config: dict | None = None,
     ) -> None:
         super().__init__("executor", llm_client)
+        self._benchmark_repo = benchmark_repo
+        self._harbor_runner = harbor_runner
+        self._workspace_root = workspace_root
+        self._injected_skill_name = injected_skill_name
         self._sandbox_config = sandbox_config or {}
-
-    def construct_messages(self, context: dict[str, Any]) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": EXECUTOR_SYSTEM_PROMPT},
-        ]
-
-        if skills := context.get("skills"):
-            messages.append({"role": "system", "content": (
-                "# Active Skills\n\n"
-                "The following skills provide **verified procedures** for "
-                "this task. Follow step-by-step instructions where given.\n\n"
-                + "\n\n---\n\n".join(skills)
-            )})
-
-        messages.append({"role": "user", "content": context.get("instruction", "")})
-        return messages
-
-    async def process(self, context: dict[str, Any]) -> dict[str, Any]:
-        messages = self.construct_messages(context)
-        response = await self.get_llm_response(messages)
-        self.increment_step()
-        return {
-            "content": response["content"],
-            "input_tokens": response["input_tokens"],
-            "output_tokens": response["output_tokens"],
-        }
 
     async def execute_task(
         self,
         task_spec: TaskSpec,
         skills: list[str],
     ) -> ExecutionTrace:
-        """Execute a task and return an ExecutionTrace.
-
-        In the full system, this submits the task to a Harbor sandbox
-        and parses result.json. For now, it calls the Gemini LLM
-        directly and wraps the output as a trace.
-        """
-        from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
-
+        """Execute a local SkillsBench task and return an ExecutionTrace."""
         start = time.time()
-        context = {
-            "instruction": task_spec.instruction,
-            "skills": skills,
-        }
-        result = await self.process(context)
+        task = self._benchmark_repo.resolve(task_spec.task_id)
+        skill_text = skills[0] if skills else None
+        task_run_dir = self._benchmark_repo.prepare_run_workspace(
+            task=task,
+            destination_root=self._workspace_root,
+            planner_instruction=task_spec.instruction,
+            injected_skill_text=skill_text,
+            injected_skill_name=self._injected_skill_name,
+        )
+        run_result = await self._harbor_runner.run(
+            task_dir=task_run_dir,
+            model=self.llm_client.model,
+        )
         duration = time.time() - start
-
-        # TODO: When Harbor integration is ready, replace this with
-        # actual subprocess execution + result.json parsing.
-        # For now, the LLM response simulates execution output.
-        content = result["content"]
-
-        return ExecutionTrace(
+        return parse_execution_trace(
+            run_result=run_result,
             task_id=task_spec.task_id,
             iteration=task_spec.iteration,
-            stdout=content,
-            stderr="",
-            exit_code=0,
-            test_results=None,
-            reward=0.0,  # Placeholder — real reward from test results
-            token_usage=TokenUsage(
-                input_tokens=result["input_tokens"],
-                output_tokens=result["output_tokens"],
-            ),
             duration_sec=duration,
         )

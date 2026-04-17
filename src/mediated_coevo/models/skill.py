@@ -12,5 +12,4 @@ class SkillUpdate(BaseModel):
     old_content: str
     new_content: str
     reasoning: str = ""
-    exploration: bool = False  # True if this was an epsilon-explore edit
     iteration: int = 0

@@ -105,6 +105,7 @@ class PlannerAgent(BaseAgent):
     async def plan_task(
         self,
         task_id: str,
+        base_instruction: str,
         mediator_report: MediatorReport | None,
         current_skills: list[str],
     ) -> TaskSpec:
@@ -113,6 +114,7 @@ class PlannerAgent(BaseAgent):
         context: dict[str, Any] = {
             "action": "plan_task",
             "task_id": task_id,
+            "base_instruction": base_instruction,
             "current_skills": current_skills,
         }
         if mediator_report and not mediator_report.withheld:
@@ -122,7 +124,7 @@ class PlannerAgent(BaseAgent):
         parsed = result["parsed"]
         return TaskSpec(
             task_id=task_id,
-            instruction=parsed.get("instruction", result["content"]),
+            instruction=parsed.get("instruction", base_instruction),
             skills_context=current_skills,
             planner_reasoning=parsed.get("reasoning"),
             iteration=self.step,
@@ -172,8 +174,13 @@ class PlannerAgent(BaseAgent):
     @staticmethod
     def _build_plan_prompt(context: dict[str, Any]) -> str:
         parts = [f"Plan a task for task_id: {context.get('task_id', 'unknown')}"]
-        if desc := context.get("task_description"):
-            parts.append(f"\n## Task Description\n{desc}")
+        if instruction := context.get("base_instruction"):
+            parts.append(
+                "\n## Benchmark Instruction\n"
+                "Use the following as the base task instruction. You may clarify or "
+                "restructure it for the Executor, but do not change the task goal.\n\n"
+                f"{instruction}"
+            )
         if report := context.get("mediator_report"):
             parts.append(f"\n## Feedback from previous execution\n{report}")
         parts.append(
