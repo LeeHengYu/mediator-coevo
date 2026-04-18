@@ -18,7 +18,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
-from mediated_coevo.stores.history_store import AgentRole
 
 if TYPE_CHECKING:
     from mediated_coevo.llm.client import LLMClient
@@ -47,7 +46,7 @@ class Reflector:
 
     async def reflect(
         self,
-        agent_role: AgentRole,
+        agent_role: str,
         llm_client: LLMClient,
         max_pairs: int = 5,
     ) -> str | None:
@@ -64,7 +63,7 @@ class Reflector:
 
         current_skill = self._skill_store.read_skill(agent_role) or ""
 
-        if agent_role == AgentRole.MEDIATOR:
+        if agent_role == "mediator":
             messages = self._build_mediator_prompt(current_skill, pairs)
         else:
             messages = self._build_planner_prompt(current_skill, pairs)

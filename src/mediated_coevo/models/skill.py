@@ -1,15 +1,28 @@
-"""Skill update model."""
+"""Skill update models."""
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 
 
-class SkillUpdate(BaseModel):
-    """A proposed skill edit from the Planner."""
+class SkillEdit(BaseModel):
+    """Shared base for any skill edit — draft or committed."""
 
-    skill_id: str
     old_content: str
     new_content: str
     reasoning: str = ""
+
+
+class SkillUpdate(SkillEdit):
+    """A committed skill edit written to disk after advisor approval."""
+
+    skill_id: str
     iteration: int = 0
+
+
+class SkillProposal(SkillEdit):
+    """Buffered, unreviewed proposal — never written to HistoryStore."""
+
+    iteration: int
+    task_id: str
+    reward: float | None = None

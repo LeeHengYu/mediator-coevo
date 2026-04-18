@@ -14,7 +14,7 @@ from .base import BaseAgent
 if TYPE_CHECKING:
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.report import MediatorReport
-    from mediated_coevo.models.skill import SkillUpdate
+    from mediated_coevo.models.skill import SkillProposal
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.stores.history_store import HistoryEntry
 
@@ -130,13 +130,20 @@ class PlannerAgent(BaseAgent):
             iteration=self.step,
         )
 
-    async def update_skill(
+    async def propose_skill_update(
         self,
         current_skill_content: str,
         feedback: str | None,
         edit_history: list[HistoryEntry],
-    ) -> SkillUpdate | None:
-        from mediated_coevo.models.skill import SkillUpdate
+        task_id: str = "",
+        iteration: int = 0,
+    ) -> SkillProposal | None:
+        """Propose a skill update without writing to disk.
+
+        Returns a SkillProposal for the advisor buffer, or None if the
+        Planner decides no change is needed.
+        """
+        from mediated_coevo.models.skill import SkillProposal
 
         context: dict[str, Any] = {
             "action": "update_skill",
@@ -161,12 +168,12 @@ class PlannerAgent(BaseAgent):
         if not new_content:
             return None
 
-        return SkillUpdate(
-            skill_id=parsed.get("skill_id", ""),
+        return SkillProposal(
+            iteration=iteration,
+            task_id=task_id,
             old_content=current_skill_content,
             new_content=new_content,
             reasoning=parsed.get("reasoning", ""),
-            iteration=self.step,
         )
 
     # ── Prompt builders ──
@@ -202,6 +209,6 @@ class PlannerAgent(BaseAgent):
         parts.append(
             "\nDecide whether to update the skill. Respond with JSON:\n"
             '{"no_update": true} if no change needed, or\n'
-            '{"new_content": "...", "reasoning": "...", "skill_id": "..."}'
+            '{"new_content": "...", "reasoning": "..."}'
         )
         return "\n".join(parts)

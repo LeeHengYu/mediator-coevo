@@ -16,7 +16,6 @@ import logging
 import random
 from collections import defaultdict
 from datetime import datetime
-from enum import StrEnum
 from math import ceil
 from pathlib import Path
 from typing import Any
@@ -28,16 +27,11 @@ from mediated_coevo.models.history_signals import HistorySignal
 logger = logging.getLogger(__name__)
 
 
-class AgentRole(StrEnum):
-    PLANNER = "planner"
-    MEDIATOR = "mediator"
-
-
 class HistoryEntry(BaseModel):
     """One outcome-tagged entry in the co-evolution history."""
 
     iteration: int
-    agent_role: AgentRole
+    agent_role: str
     payload: HistorySignal
     reward: float | None = None  # Filled by tag_outcome
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -80,7 +74,7 @@ class HistoryStore:
     def tag_outcome(
         self,
         iteration: int,
-        agent_role: AgentRole,
+        agent_role: str,
         reward: float,
     ) -> None:
         """Tag a previous entry with the downstream reward."""
@@ -95,7 +89,7 @@ class HistoryStore:
 
     def query(
         self,
-        agent_role: AgentRole | None = None,
+        agent_role: str | None = None,
         recent: int = 20,
         tagged_only: bool = False,
     ) -> list[HistoryEntry]:
@@ -109,7 +103,7 @@ class HistoryStore:
 
     def contrastive_pairs(
         self,
-        agent_role: AgentRole,
+        agent_role: str,
         max_pairs: int = 5,
         task_id: str | None = None,
         top_frac: float = 0.3,

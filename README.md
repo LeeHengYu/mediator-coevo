@@ -41,16 +41,53 @@ User → Claude (plans) ──── task (unmodified) ───► Gemini (exec
 
 1. Planner: construct run task plan based on the curated logs released from mediator, building the prompt and send to executor. Planner has access to:
    1. the complete log of the previous run (ONLY the previous run) to construct the plan
-   2. curated summaries (class `AgentSignal`) of the logs to reflect on its own planning skill
+   2. curated summaries (`MediatorSignal` / `PlannerSignal` payloads in `HistoryEntry`) of the logs to reflect on its own planning skill
 2. Executor: containerized environment to run benchmark or well-defined tasks, output reward or score.
 3. Mediator: Process the trace and summarize the feedback over the last few runs.
 4. Planner + Mediator: Coevolve by querying the `contrasive pairs`, a contrasive pair is by pairing good and bad performance and the improvement with harness diff can be used to reflect on skill improvement.
 
 ## Current Implementation
 
-- Planner now grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
-- Executor now runs a vendored local SkillsBench-style Harbor task and parses the resulting `reward`, verifier output, and agent logs into `ExecutionTrace`.
+- Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
+- Executor runs a vendored local SkillsBench-style Harbor task and parses the resulting `reward`, verifier output, and agent logs into `ExecutionTrace`.
 - The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
+
+### Two Distinct Skill Update Flows
+
+**Flow 1 — Executor skill gating (count-triggered)**
+
+Updates `skills/executor/SKILL.md` — what the Executor knows how to do.
+
+```
+Each iteration:
+  Planner proposes a SkillProposal (based on Mediator feedback) → buffered
+
+When buffer hits advisor_buffer_max (default 10):
+  SkillAdvisor reviews the full batch → approve / reject
+  Buffer is cleared regardless of outcome
+  If approved: Planner drafts a new SkillUpdate (based on Advisor's aggregated feedback)
+             → written to skills/executor/SKILL.md
+```
+
+**Flow 2 — Agent meta-skill co-evolution (iteration-triggered)**
+
+Updates `skills/mediator/SKILL.md` and `skills/planner/SKILL.md` — *how* each agent behaves, not what the Executor executes.
+
+```
+Every coevo_interval iterations (default 5):
+  Reflector queries HistoryStore for contrastive pairs
+  (pairs are formed from entries tagged with delayed rewards from the next iteration)
+
+  Mediator reflection → rewrites skills/mediator/SKILL.md
+    (coordination-protocol: how to curate and present feedback)
+    → loaded into MediatorAgent immediately
+
+  Planner reflection → rewrites skills/planner/SKILL.md
+    (skill-refiner: how to decide when and how to edit executor skills)
+    → injected into Planner context at the next iteration start
+```
+
+`SkillProposal` and `SkillUpdate` share a `SkillEdit` base (`old_content`, `new_content`, `reasoning`). Proposals are never written to `HistoryStore`; only committed `SkillUpdate`s appear in `IterationRecord` and `metrics.jsonl`.
 
 ## Further Direction
 

@@ -16,11 +16,12 @@ from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
+from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillUpdate
+from mediated_coevo.models.skill import SkillProposal, SkillUpdate
 from mediated_coevo.stores.artifact_store import ArtifactStore
-from mediated_coevo.stores.history_store import AgentRole, HistoryEntry, HistoryStore
+from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class Orchestrator:
         benchmark_repo: SkillsBenchRepository,
         config: Config,
         experiment_dir: Path,
+        skill_advisor: SkillAdvisor,
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -50,6 +52,8 @@ class Orchestrator:
         self.benchmark_repo = benchmark_repo
         self.config = config
         self.experiment_dir = experiment_dir
+        self.skill_advisor = skill_advisor
+        self._proposal_buffer: list[SkillProposal] = []
 
         self._snapshots_dir = experiment_dir / "skills_snapshots"
         self._snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -125,39 +129,45 @@ class Orchestrator:
         self.artifact_store.store_report(report)
         feedback: str | None = None if report.withheld else report.content
 
-        # 4. UPDATE SKILL — only when there is feedback to act on
-        skill_update: SkillUpdate | None = None
+        # 4. PROPOSE — buffer a skill update proposal (no write)
         if feedback and executor_skill_text:
-            logger.info("Step 4: Planner deciding skill update...")
+            logger.info("Step 4: Planner proposing skill update...")
             edit_history = self.history_store.query(
-                agent_role=AgentRole.PLANNER,
+                agent_role="planner",
                 tagged_only=True,
             )
-            skill_update = await self.planner.update_skill(
+            proposal = await self.planner.propose_skill_update(
                 current_skill_content=executor_skill_text,
                 feedback=feedback,
                 edit_history=edit_history,
+                task_id=task_id,
+                iteration=iteration,
             )
-            if skill_update:
-                self.skill_store.write_skill("executor", skill_update.new_content)
-                logger.info("Skill updated")
+            if proposal:
+                self._proposal_buffer.append(proposal)
+                logger.info("Proposal buffered (buffer size=%d)", len(self._proposal_buffer))
             else:
-                logger.info("Planner decided: no skill update needed.")
+                logger.info("Planner decided: no proposal needed.")
         else:
             logger.info("Step 4: Skipped (no feedback).")
 
-        # 5. TAG previous entries with this iteration's reward
+        # 5. TAG previous entries with this iteration's reward + backfill buffer
         if iteration > 0:
             self.history_store.tag_outcome(
                 iteration=iteration - 1,
-                agent_role=AgentRole.MEDIATOR,
+                agent_role="mediator",
                 reward=trace.reward,
             )
             self.history_store.tag_outcome(
                 iteration=iteration - 1,
-                agent_role=AgentRole.PLANNER,
+                agent_role="planner",
                 reward=trace.reward,
             )
+            for p in self._proposal_buffer:
+                if p.iteration == iteration - 1 and p.task_id == task_id:
+                    p.reward = trace.reward
+
+        skill_update = await self._advise_and_patch()
 
         # Record history entries
         current_report: MediatorReport | None = report if not report.withheld else None
@@ -165,14 +175,14 @@ class Orchestrator:
             mediator_signal = await self.mediator.compact_feedback(feedback, current_report)
             self.history_store.add(HistoryEntry(
                 iteration=iteration,
-                agent_role=AgentRole.MEDIATOR,
+                agent_role="mediator",
                 payload=mediator_signal,
                 metadata={"task_id": task_id},
             ))
         if skill_update:
             self.history_store.add(HistoryEntry(
                 iteration=iteration,
-                agent_role=AgentRole.PLANNER,
+                agent_role="planner",
                 payload=build_planner_signal(skill_update),
                 metadata={"task_id": task_id},
             ))
@@ -201,6 +211,52 @@ class Orchestrator:
         )
         return record
 
+    async def _advise_and_patch(self) -> SkillUpdate | None:
+        """If buffer is full, run the advisor and optionally patch the skill.
+
+        Clears the buffer regardless of outcome.
+        Returns the committed SkillUpdate if a patch was applied, else None.
+        """
+        if len(self._proposal_buffer) < self.config.experiment.advisor_buffer_max:
+            return None
+
+        logger.info("Advisor reviewing %d proposals...", len(self._proposal_buffer))
+        current_skill = self.skill_store.read_skill("executor") or ""
+        advisor_feedback = await self.skill_advisor.review(
+            current_skill=current_skill,
+            proposals=list(self._proposal_buffer),
+        )
+        self._proposal_buffer.clear()
+
+        if not advisor_feedback:
+            logger.info("Advisor rejected — no skill update.")
+            return None
+
+        logger.info("Advisor approved — Planner patching skill...")
+        edit_history = self.history_store.query(
+            agent_role="planner",
+            tagged_only=True,
+        )
+        proposal = await self.planner.propose_skill_update(
+            current_skill_content=current_skill,
+            feedback=advisor_feedback,
+            edit_history=edit_history,
+            task_id="",
+            iteration=self.planner.step,
+        )
+        if proposal:
+            skill_update = SkillUpdate(
+                skill_id="executor",
+                old_content=proposal.old_content,
+                new_content=proposal.new_content,
+                reasoning=proposal.reasoning,
+                iteration=proposal.iteration,
+            )
+            self.skill_store.write_skill("executor", skill_update.new_content)
+            logger.info("Skill patched and written.")
+            return skill_update
+        return None
+
     async def _coevolve(self, iteration: int) -> None:
         """Co-evolution checkpoint: Mediator + Planner reflect on history."""
         logger.info("=== Co-evolution checkpoint at iteration %d ===", iteration)
@@ -209,12 +265,12 @@ class Orchestrator:
         reflector = Reflector(self.history_store, self.skill_store)
 
         # Mediator reflects on reporting history
-        new_protocol = await reflector.reflect(AgentRole.MEDIATOR, self.mediator.llm_client)
+        new_protocol = await reflector.reflect("mediator", self.mediator.llm_client)
         if new_protocol:
             self.mediator.load_protocol(new_protocol)
 
         # Planner reflects on skill-edit history
-        await reflector.reflect(AgentRole.PLANNER, self.planner.llm_client)
+        await reflector.reflect("planner", self.planner.llm_client)
 
     def _write_metric(self, record: IterationRecord) -> None:
         """Append an iteration record to metrics.jsonl."""

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -29,6 +28,7 @@ class ExperimentConfig(BaseModel):
     num_iterations: int = 30
     coevo_interval: int = 5
     seed: int = 42
+    advisor_buffer_max: int = 10
 
 
 class SandboxConfig(BaseModel):

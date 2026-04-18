@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
+
+logger = logging.getLogger(__name__)
 
 
 def parse_json_object(text: str) -> dict:
     """Parse a JSON object from LLM output, tolerating markdown fences."""
     text = text.strip()
-    if text.startswith("```"):
-        nl = text.find("\n")
-        if nl != -1:
-            text = text[nl + 1 :]
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3].rstrip()
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    if match:
+        text = match.group(1).strip()
     try:
         result = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.debug("parse_json_object failed: %s | input=%r", exc, text[:200])
         return {}
     return result if isinstance(result, dict) else {}

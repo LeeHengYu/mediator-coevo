@@ -18,6 +18,7 @@ from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository
 from mediated_coevo.config import load_config
+from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
@@ -109,6 +110,7 @@ def run(
         mediator.load_protocol(protocol)
 
     # Build orchestrator
+    skill_advisor = SkillAdvisor(llm_client=planner_llm)
     orchestrator = Orchestrator(
         planner=planner,
         executor=executor,
@@ -119,6 +121,7 @@ def run(
         benchmark_repo=benchmark_repo,
         config=config,
         experiment_dir=experiment_dir,
+        skill_advisor=skill_advisor,
     )
 
     # Run
