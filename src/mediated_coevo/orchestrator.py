@@ -196,7 +196,6 @@ class Orchestrator:
         record = IterationRecord(
             iteration=iteration,
             task_id=task_id,
-            condition="learned_mediator",
             task_spec=task_spec,
             execution_trace=trace,
             mediator_report=self._previous_report,

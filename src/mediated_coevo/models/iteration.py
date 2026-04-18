@@ -17,7 +17,6 @@ class IterationRecord(BaseModel):
 
     iteration: int
     task_id: str
-    condition: str
     timestamp: datetime = Field(default_factory=datetime.now)
 
     task_spec: TaskSpec | None = None

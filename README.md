@@ -22,7 +22,7 @@ Introduce a **Mediator Agent** — a context-aware orchestrator whose primary fu
 ### Example Architecture
 
 ```
-User → Claude (plans) ──── task (unmodified) ───► Gemini (executes)
+User → Claude (plans) ──── task goal (unmodified) ───► Gemini (executes)
               ▲                                      │
               │                                      │  traces, errors, task score
               │  filtered reports                    │
@@ -43,7 +43,7 @@ User → Claude (plans) ──── task (unmodified) ───► Gemini (exec
    1. the complete log of the previous run (ONLY the previous run) to construct the plan
    2. curated summaries (`MediatorSignal` / `PlannerSignal` payloads in `HistoryEntry`) of the logs to reflect on its own planning skill
 2. Executor: containerized environment to run benchmark or well-defined tasks, output reward or score.
-3. Mediator: Process the trace and summarize the feedback over the last few runs.
+3. Mediator: Process the execution trace and produce a curated report for the Planner; may reference context from recent past runs.
 4. Planner + Mediator: Coevolve by querying the `contrasive pairs`, a contrasive pair is by pairing good and bad performance and the improvement with harness diff can be used to reflect on skill improvement.
 
 ## Current Implementation

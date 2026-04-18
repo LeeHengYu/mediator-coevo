@@ -52,8 +52,7 @@ def run(
     _setup_logging(verbose)
     random.seed(seed)
 
-    config = load_config(config_dir, condition="learned_mediator")
-    config.experiment.condition = "learned_mediator"
+    config = load_config(config_dir)
     config.experiment.seed = seed
 
     task_ids = [t.strip() for t in tasks.split(",")]
@@ -85,32 +84,25 @@ def run(
         jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
     )
 
-    # Initialize LLM clients
-    planner_llm = LLMClient(model=config.models.planner)
-    executor_llm = LLMClient(model=config.models.executor)
-
     # Initialize agents
-    planner = PlannerAgent(llm_client=planner_llm)
+    planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
     executor = ExecutorAgent(
-        llm_client=executor_llm,
+        model=config.models.executor,
         benchmark_repo=benchmark_repo,
         harbor_runner=harbor_runner,
         workspace_root=experiment_dir / "benchmarks",
         injected_skill_name=config.executor_runtime.injected_skill_name,
-        sandbox_config=config.sandbox.model_dump(),
     )
-    mediator_llm = LLMClient(model=config.models.mediator)
     mediator = MediatorAgent(
-        llm_client=mediator_llm,
+        llm_client=LLMClient(model=config.models.mediator),
         artifact_store=artifact_store,
-        token_budget=config.budgets.mediator_report_tokens,
     )
     protocol = skill_store.read_skill("mediator")
     if protocol:
         mediator.load_protocol(protocol)
 
     # Build orchestrator
-    skill_advisor = SkillAdvisor(llm_client=planner_llm)
+    skill_advisor = SkillAdvisor(llm_client=LLMClient(model=config.models.planner))
     orchestrator = Orchestrator(
         planner=planner,
         executor=executor,

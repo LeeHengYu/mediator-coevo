@@ -30,7 +30,3 @@ Respond with JSON:
 ```
 
 If withholding, set `"withheld": true` and leave `"content"` empty.
-
-## Token Budget
-
-Stay under the token budget. Every token must earn its place in the Planner's context.

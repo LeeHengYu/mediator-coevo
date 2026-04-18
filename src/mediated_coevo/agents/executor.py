@@ -1,8 +1,4 @@
-"""Executor agent — Gemini.
-
-Runs tasks in a sandboxed environment (Harbor) using current skills.
-Produces execution traces with stdout, stderr, test results, and reward.
-"""
+"""Executor agent — runs tasks via Harbor/SkillsBench sandbox."""
 
 from __future__ import annotations
 
@@ -13,38 +9,29 @@ from typing import TYPE_CHECKING
 
 from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository, parse_execution_trace
 
-from .base import BaseAgent
-
 if TYPE_CHECKING:
-    from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
 
 
-class ExecutorAgent(BaseAgent):
-    """Gemini-backed executor. Runs tasks in Harbor sandbox."""
-
-    @property
-    def role(self) -> str:
-        return "executor"
+class ExecutorAgent:
+    """Runs tasks in the Harbor sandbox. Makes no direct LLM calls."""
 
     def __init__(
         self,
-        llm_client: LLMClient,
+        model: str,
         benchmark_repo: SkillsBenchRepository,
         harbor_runner: HarborRunner,
         workspace_root: Path,
         injected_skill_name: str,
-        sandbox_config: dict | None = None,
     ) -> None:
-        super().__init__("executor", llm_client)
+        self._model = model
         self._benchmark_repo = benchmark_repo
         self._harbor_runner = harbor_runner
         self._workspace_root = workspace_root
         self._injected_skill_name = injected_skill_name
-        self._sandbox_config = sandbox_config or {}
 
     async def execute_task(
         self,
@@ -64,7 +51,7 @@ class ExecutorAgent(BaseAgent):
         )
         run_result = await self._harbor_runner.run(
             task_dir=task_run_dir,
-            model=self.llm_client.model,
+            model=self._model,
         )
         duration = time.time() - start
         return parse_execution_trace(

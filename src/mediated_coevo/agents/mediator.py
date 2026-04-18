@@ -50,11 +50,9 @@ class MediatorAgent(BaseAgent):
         self,
         llm_client: LLMClient,
         artifact_store: ArtifactStore | None = None,
-        token_budget: int = 2000,
     ) -> None:
         super().__init__("mediator", llm_client)
         self._artifact_store = artifact_store
-        self._token_budget = token_budget
         self._protocol_skill: str = ""
 
     def load_protocol(self, skill_content: str) -> None:
@@ -143,7 +141,6 @@ class MediatorAgent(BaseAgent):
             "trace": trace,
             "history": history,
             "task_context": task_context,
-            "token_budget": self._token_budget,
         }
         result = await self.process(context)
 
