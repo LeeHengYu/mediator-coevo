@@ -59,7 +59,9 @@ class Orchestrator:
         self._snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         self._metrics_path = experiment_dir / "metrics.jsonl"
-        self._previous_report: MediatorReport | None = None
+        self._previous_report_by_task: dict[str, MediatorReport] = {}
+        self._prev_mediator_entry_id_by_task: dict[str, str] = {}
+        self._prev_planner_entry_id_by_task: dict[str, str] = {}
 
     async def run_experiment(
         self,
@@ -114,7 +116,7 @@ class Orchestrator:
         task_spec = await self.planner.plan_task(
             task_id=task_id,
             base_instruction=benchmark_task.instruction,
-            mediator_report=self._previous_report,
+            mediator_report=self._previous_report_by_task.get(task_id),
             current_skills=skill_texts,
         )
 
@@ -153,16 +155,10 @@ class Orchestrator:
 
         # 5. TAG previous entries with this iteration's reward + backfill buffer
         if iteration > 0:
-            self.history_store.tag_outcome(
-                iteration=iteration - 1,
-                agent_role="mediator",
-                reward=trace.reward,
-            )
-            self.history_store.tag_outcome(
-                iteration=iteration - 1,
-                agent_role="planner",
-                reward=trace.reward,
-            )
+            if prev_mid := self._prev_mediator_entry_id_by_task.pop(task_id, None):
+                self.history_store.tag_outcome_by_id(prev_mid, reward=trace.reward)
+            if prev_pid := self._prev_planner_entry_id_by_task.pop(task_id, None):
+                self.history_store.tag_outcome_by_id(prev_pid, reward=trace.reward)
             for p in self._proposal_buffer:
                 if p.iteration == iteration - 1 and p.task_id == task_id:
                     p.reward = trace.reward
@@ -171,24 +167,31 @@ class Orchestrator:
 
         # Record history entries
         current_report: MediatorReport | None = report if not report.withheld else None
+        mediator_entry_id: str | None = None
+        planner_entry_id: str | None = None
         if feedback:
             mediator_signal = await self.mediator.compact_feedback(feedback, current_report)
-            self.history_store.add(HistoryEntry(
+            mediator_entry_id = self.history_store.add(HistoryEntry(
                 iteration=iteration,
                 agent_role="mediator",
                 payload=mediator_signal,
                 metadata={"task_id": task_id},
             ))
         if skill_update:
-            self.history_store.add(HistoryEntry(
+            planner_entry_id = self.history_store.add(HistoryEntry(
                 iteration=iteration,
                 agent_role="planner",
                 payload=build_planner_signal(skill_update),
                 metadata={"task_id": task_id},
             ))
 
-        # Carry the current report into the next iteration's Planner context.
-        self._previous_report = current_report
+        # Carry forward entry IDs and report for the next iteration's context.
+        if mediator_entry_id:
+            self._prev_mediator_entry_id_by_task[task_id] = mediator_entry_id
+        if planner_entry_id:
+            self._prev_planner_entry_id_by_task[task_id] = planner_entry_id
+        if current_report:
+            self._previous_report_by_task[task_id] = current_report
 
         duration = time.time() - start
         total_tokens = trace.token_usage.input_tokens + trace.token_usage.output_tokens
@@ -198,11 +201,13 @@ class Orchestrator:
             task_id=task_id,
             task_spec=task_spec,
             execution_trace=trace,
-            mediator_report=self._previous_report,
+            mediator_report=current_report,
             skill_update=skill_update,
             reward=trace.reward,
             total_tokens=total_tokens,
             duration_sec=duration,
+            mediator_history_entry_id=mediator_entry_id,
+            planner_history_entry_id=planner_entry_id,
         )
         logger.info(
             "Iteration %d complete: reward=%.2f tokens=%d duration=%.1fs",
@@ -232,6 +237,9 @@ class Orchestrator:
             return None
 
         logger.info("Advisor approved — Planner patching skill...")
+        contributing_task_ids = ",".join(
+            sorted({p.task_id for p in self._proposal_buffer if p.task_id})
+        )
         edit_history = self.history_store.query(
             agent_role="planner",
             tagged_only=True,
@@ -240,12 +248,13 @@ class Orchestrator:
             current_skill_content=current_skill,
             feedback=advisor_feedback,
             edit_history=edit_history,
-            task_id="",
+            task_id=contributing_task_ids,
             iteration=self.planner.step,
         )
         if proposal:
             skill_update = SkillUpdate(
                 skill_id="executor",
+                task_id=contributing_task_ids,
                 old_content=proposal.old_content,
                 new_content=proposal.new_content,
                 reasoning=proposal.reasoning,

@@ -27,3 +27,6 @@ class IterationRecord(BaseModel):
     reward: float = 0.0
     total_tokens: int = 0
     duration_sec: float = 0.0
+
+    mediator_history_entry_id: str | None = None
+    planner_history_entry_id: str | None = None

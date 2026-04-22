@@ -21,16 +21,10 @@ class SkillStore:
         self._skills_dir = skills_dir
 
     def read_skill(self, skill_name: str) -> str | None:
-        """Read SKILL.md content by skill name (directory name, also agent role string repr)."""
-        # Try direct path first (e.g., "executor" → skills/executor/SKILL.md)
+        """Read SKILL.md content by skill name (directory name)."""
         skill_path = self._skills_dir / skill_name / "SKILL.md"
         if not skill_path.exists():
-            # Try as a .md file directly (e.g., "planner" → skills/planner/skill-refiner.md)
-            candidates = list((self._skills_dir / skill_name).glob("*.md"))
-            if candidates:
-                skill_path = candidates[0]
-            else:
-                return None
+            return None
         return skill_path.read_text()
 
     def write_skill(self, skill_name: str, content: str) -> Path:

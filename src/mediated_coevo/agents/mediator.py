@@ -84,9 +84,9 @@ class MediatorAgent(BaseAgent):
         if trace := context.get("trace"):
             parts.append("## Execution Trace")
             if trace.stdout:
-                parts.append(f"### stdout\n{trace.stdout[:8000]}")
+                parts.append(f"### stdout\n{trace.stdout}")
             if trace.stderr:
-                parts.append(f"### stderr\n{trace.stderr[:4000]}")
+                parts.append(f"### stderr\n{trace.stderr}")
             if trace.test_results:
                 parts.append(f"### test_results\n{trace.test_results}")
             parts.append(f"### reward: {trace.reward}")
@@ -125,11 +125,7 @@ class MediatorAgent(BaseAgent):
         """
         from mediated_coevo.models.report import AbstractionLevel, MediatorReport
 
-        # 1. STORE artifacts
-        if self._artifact_store:
-            self._artifact_store.store_trace(trace)
-
-        # 2. FILTER — query relevant history
+        # 1. FILTER — query relevant history
         history: list[str] = []
         if self._artifact_store:
             history = self._artifact_store.query_summaries(

@@ -17,6 +17,7 @@ class SkillUpdate(SkillEdit):
     """A committed skill edit written to disk after advisor approval."""
 
     skill_id: str
+    task_id: str = ""
     iteration: int = 0
 
 

@@ -19,6 +19,7 @@ from datetime import datetime
 from math import ceil
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -30,10 +31,11 @@ logger = logging.getLogger(__name__)
 class HistoryEntry(BaseModel):
     """One outcome-tagged entry in the co-evolution history."""
 
+    entry_id: str = Field(default_factory=lambda: str(uuid4()))
     iteration: int
     agent_role: str
     payload: HistorySignal
-    reward: float | None = None  # Filled by tag_outcome
+    reward: float | None = None  # Filled by tag_outcome_by_id
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.now)
 
@@ -67,25 +69,19 @@ class HistoryStore:
         lines = [entry.model_dump_json() for entry in self._entries]
         path.write_text("\n".join(lines) + "\n")
 
-    def add(self, entry: HistoryEntry) -> None:
+    def add(self, entry: HistoryEntry) -> str:
         self._entries.append(entry)
         self._save()
+        return entry.entry_id
 
-    def tag_outcome(
-        self,
-        iteration: int,
-        agent_role: str,
-        reward: float,
-    ) -> None:
-        """Tag a previous entry with the downstream reward."""
+    def tag_outcome_by_id(self, entry_id: str, reward: float) -> None:
+        """Tag a specific entry by its stable ID."""
         for entry in reversed(self._entries):
-            if entry.iteration == iteration and entry.agent_role == agent_role:
+            if entry.entry_id == entry_id:
                 entry.reward = reward
                 self._save()
                 return
-        logger.warning(
-            "No history entry found for iter=%d role=%s", iteration, agent_role
-        )
+        logger.warning("No history entry found for entry_id=%s", entry_id)
 
     def query(
         self,
