@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from mediated_coevo.conditions import ConditionName
 from .task import TaskSpec
 from .trace import ExecutionTrace
 from .report import MediatorReport
@@ -30,3 +31,4 @@ class IterationRecord(BaseModel):
 
     mediator_history_entry_id: str | None = None
     planner_history_entry_id: str | None = None
+    condition_name: ConditionName = "learned_mediator"

@@ -14,6 +14,7 @@ from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.agents.mediator import MediatorAgent
+from mediated_coevo.conditions import MEDIATOR_CONDITIONS, MEDIATOR_EVOLVE_CONDITIONS, get_prior_context
 from mediated_coevo.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
@@ -84,7 +85,7 @@ class Orchestrator:
 
             # Co-evolution checkpoint
             if (iteration + 1) % self.config.experiment.coevo_interval == 0:
-                await self._coevolve(iteration)
+                await self._coevolve(iteration, self.config.experiment.condition_name)
 
             # Snapshot skills
             self.skill_store.snapshot(iteration, self._snapshots_dir)
@@ -98,6 +99,7 @@ class Orchestrator:
         iteration: int,
     ) -> IterationRecord:
         start = time.time()
+        condition = self.config.experiment.condition_name
 
         # Load executor skills for the planner's context
         executor_skill_text = self.skill_store.read_skill("executor") or ""
@@ -111,12 +113,21 @@ class Orchestrator:
 
         skill_texts = [executor_skill_text] if executor_skill_text else []
 
+        # Determine prior context for planner based on condition
+        prior_context = get_prior_context(
+            condition=condition,
+            task_id=task_id,
+            artifact_store=self.artifact_store,
+            previous_report=self._previous_report_by_task.get(task_id),
+            shared_notes=self.config.experiment.shared_notes,
+        )
+
         # 1. PLAN
-        logger.info("Step 1: Planner planning task...")
+        logger.info("Step 1: Planner planning task (condition=%s)...", condition)
         task_spec = await self.planner.plan_task(
             task_id=task_id,
             base_instruction=benchmark_task.instruction,
-            mediator_report=self._previous_report_by_task.get(task_id),
+            prior_context=prior_context,
             current_skills=skill_texts,
         )
 
@@ -125,13 +136,21 @@ class Orchestrator:
         trace = await self.executor.execute_task(task_spec, skill_texts)
         self.artifact_store.store_trace(trace)
 
-        # 3. MEDIATE
-        logger.info("Step 3: Mediator processing trace...")
-        report = await self.mediator.process_trace(trace, task_spec)
-        self.artifact_store.store_report(report)
-        feedback: str | None = None if report.withheld else report.content
+        # 3. MEDIATE — only for mediator conditions
+        report: MediatorReport | None = None
+        current_report: MediatorReport | None = None
+        feedback: str | None = None
 
-        # 4. PROPOSE — buffer a skill update proposal (no write)
+        if condition in MEDIATOR_CONDITIONS:
+            logger.info("Step 3: Mediator processing trace...")
+            report = await self.mediator.process_trace(trace, task_spec)
+            self.artifact_store.store_report(report)
+            current_report = report if not report.withheld else None
+            feedback = None if report.withheld else report.content
+        else:
+            logger.info("Step 3: Skipped (condition=%s does not use mediator).", condition)
+
+        # 4. PROPOSE — buffer a skill update proposal (no write); only when mediator feedback exists
         if feedback and executor_skill_text:
             logger.info("Step 4: Planner proposing skill update...")
             edit_history = self.history_store.query(
@@ -151,7 +170,7 @@ class Orchestrator:
             else:
                 logger.info("Planner decided: no proposal needed.")
         else:
-            logger.info("Step 4: Skipped (no feedback).")
+            logger.info("Step 4: Skipped (no mediator feedback).")
 
         # 5. TAG previous entries with this iteration's reward + backfill buffer
         if iteration > 0:
@@ -165,24 +184,23 @@ class Orchestrator:
 
         skill_update = await self._advise_and_patch()
 
-        # Record history entries
-        current_report: MediatorReport | None = report if not report.withheld else None
+        # Record history entries (mediator conditions only for mediator signal)
         mediator_entry_id: str | None = None
         planner_entry_id: str | None = None
-        if feedback:
+        if feedback and current_report:
             mediator_signal = await self.mediator.compact_feedback(feedback, current_report)
             mediator_entry_id = self.history_store.add(HistoryEntry(
                 iteration=iteration,
                 agent_role="mediator",
                 payload=mediator_signal,
-                metadata={"task_id": task_id},
+                metadata={"task_id": task_id, "condition": condition},
             ))
         if skill_update:
             planner_entry_id = self.history_store.add(HistoryEntry(
                 iteration=iteration,
                 agent_role="planner",
                 payload=build_planner_signal(skill_update),
-                metadata={"task_id": task_id},
+                metadata={"task_id": task_id, "condition": condition},
             ))
 
         # Carry forward entry IDs and report for the next iteration's context.
@@ -208,10 +226,11 @@ class Orchestrator:
             duration_sec=duration,
             mediator_history_entry_id=mediator_entry_id,
             planner_history_entry_id=planner_entry_id,
+            condition_name=condition,
         )
         logger.info(
-            "Iteration %d complete: reward=%.2f tokens=%d duration=%.1fs",
-            iteration, trace.reward, total_tokens, duration,
+            "Iteration %d complete: condition=%s reward=%.2f tokens=%d duration=%.1fs",
+            iteration, condition, trace.reward, total_tokens, duration,
         )
         return record
 
@@ -265,17 +284,23 @@ class Orchestrator:
             return skill_update
         return None
 
-    async def _coevolve(self, iteration: int) -> None:
+    async def _coevolve(self, iteration: int, condition: str) -> None:
         """Co-evolution checkpoint: Mediator + Planner reflect on history."""
-        logger.info("=== Co-evolution checkpoint at iteration %d ===", iteration)
+        logger.info(
+            "=== Co-evolution checkpoint at iteration %d (condition=%s) ===",
+            iteration, condition,
+        )
 
         from mediated_coevo.evolution.reflector import Reflector
         reflector = Reflector(self.history_store, self.skill_store)
 
-        # Mediator reflects on reporting history
-        new_protocol = await reflector.reflect("mediator", self.mediator.llm_client)
-        if new_protocol:
-            self.mediator.load_protocol(new_protocol)
+        # Mediator skill evolution only for learned_mediator
+        if condition in MEDIATOR_EVOLVE_CONDITIONS:
+            new_protocol = await reflector.reflect("mediator", self.mediator.llm_client)
+            if new_protocol:
+                self.mediator.load_protocol(new_protocol)
+        else:
+            logger.info("Mediator skill evolution skipped (condition=%s).", condition)
 
         # Planner reflects on skill-edit history
         await reflector.reflect("planner", self.planner.llm_client)

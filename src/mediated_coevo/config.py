@@ -6,6 +6,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from mediated_coevo.conditions import ConditionName
+
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -26,6 +28,8 @@ class ExperimentConfig(BaseModel):
     coevo_interval: int = 5
     seed: int = 42
     advisor_buffer_max: int = 10
+    condition_name: ConditionName = "learned_mediator"
+    shared_notes: str | None = None
 
 
 class PathsConfig(BaseModel):

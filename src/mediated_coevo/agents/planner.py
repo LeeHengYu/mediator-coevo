@@ -13,7 +13,6 @@ from .base import BaseAgent
 
 if TYPE_CHECKING:
     from mediated_coevo.llm.client import LLMClient
-    from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.skill import SkillProposal
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.stores.history_store import HistoryEntry
@@ -106,7 +105,7 @@ class PlannerAgent(BaseAgent):
         self,
         task_id: str,
         base_instruction: str,
-        mediator_report: MediatorReport | None,
+        prior_context: str | None,
         current_skills: list[str],
     ) -> TaskSpec:
         from mediated_coevo.models.task import TaskSpec
@@ -117,8 +116,8 @@ class PlannerAgent(BaseAgent):
             "base_instruction": base_instruction,
             "current_skills": current_skills,
         }
-        if mediator_report and not mediator_report.withheld:
-            context["mediator_report"] = mediator_report.content
+        if prior_context:
+            context["mediator_report"] = prior_context
 
         result = await self.process(context)
         parsed = result["parsed"]

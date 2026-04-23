@@ -45,6 +45,10 @@ def run(
     tasks: str = typer.Option("fix-build-google-auto", help="Comma-separated task IDs"),
     iterations: int = typer.Option(30, help="Number of iterations"),
     seed: int = typer.Option(42, help="Random seed"),
+    condition: str = typer.Option(
+        "learned_mediator",
+        help="Experiment condition: no_feedback | full_traces | shared_notes | static_mediator | learned_mediator",
+    ),
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -54,16 +58,18 @@ def run(
 
     config = load_config(config_dir)
     config.experiment.seed = seed
+    config.experiment.condition_name = condition
 
     task_ids = [t.strip() for t in tasks.split(",")]
 
     console.print(f"[bold]Tasks:[/] {task_ids}")
     console.print(f"[bold]Iterations:[/] {iterations}")
+    console.print(f"[bold]Condition:[/] {condition}")
     console.print(f"[bold]Models:[/] planner={config.models.planner} executor={config.models.executor} mediator={config.models.mediator}")
 
     # Create experiment directory
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    experiment_dir = PROJECT_ROOT / "data" / "experiments" / f"{timestamp}-{seed}"
+    experiment_dir = PROJECT_ROOT / "data" / "experiments" / f"{timestamp}-{seed}-{condition}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     # Save frozen config
