@@ -21,6 +21,7 @@ from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import SkillProposal, SkillUpdate
+from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
@@ -104,7 +105,32 @@ class Orchestrator:
         # Load executor skills for the planner's context
         executor_skill_text = self.skill_store.read_skill("executor") or ""
         planner_skill_text = self.skill_store.read_skill("planner") or None
-        benchmark_task = self.benchmark_repo.resolve(task_id)
+        try:
+            benchmark_task = self.benchmark_repo.resolve(task_id)
+        except FileNotFoundError as e:
+            duration = time.time() - start
+            trace = ExecutionTrace(
+                task_id=task_id,
+                iteration=iteration,
+                duration_sec=duration,
+                exit_code=-1,
+                status="env_failure",
+                error_kind="task_not_found",
+                error_detail=str(e),
+            )
+            self.artifact_store.store_trace(trace)
+            self._tag_previous_iteration(iteration, task_id, trace)
+            logger.warning(
+                "Iteration %d skipped before planning: task=%s status=%s error_kind=%s",
+                iteration, task_id, trace.status, trace.error_kind,
+            )
+            return IterationRecord(
+                iteration=iteration,
+                task_id=task_id,
+                execution_trace=trace,
+                duration_sec=duration,
+                condition_name=condition,
+            )
 
         self.planner.set_skill_context(
             executor_skills=executor_skill_text,
@@ -136,19 +162,27 @@ class Orchestrator:
         trace = await self.executor.execute_task(task_spec, skill_texts)
         self.artifact_store.store_trace(trace)
 
-        # 3. MEDIATE — only for mediator conditions
+        # 3. MEDIATE — only for mediator conditions, and only if the trace is
+        # usable. Env-failure traces have unreliable reward/stderr signal and
+        # would poison the mediator's compaction LLM call + history payload.
         report: MediatorReport | None = None
         current_report: MediatorReport | None = None
         feedback: str | None = None
 
-        if condition in MEDIATOR_CONDITIONS:
+        trace_usable = trace.status == "ok" and trace.reward is not None
+        if condition not in MEDIATOR_CONDITIONS:
+            logger.info("Step 3: Skipped (condition=%s does not use mediator).", condition)
+        elif not trace_usable:
+            logger.warning(
+                "Step 3: Skipped — trace unusable (status=%s error_kind=%s reward=%s)",
+                trace.status, trace.error_kind, trace.reward,
+            )
+        else:
             logger.info("Step 3: Mediator processing trace...")
             report = await self.mediator.process_trace(trace, task_spec)
             self.artifact_store.store_report(report)
             current_report = report if not report.withheld else None
             feedback = None if report.withheld else report.content
-        else:
-            logger.info("Step 3: Skipped (condition=%s does not use mediator).", condition)
 
         # 4. PROPOSE — buffer a skill update proposal (no write); only when mediator feedback exists
         if feedback and executor_skill_text:
@@ -172,15 +206,8 @@ class Orchestrator:
         else:
             logger.info("Step 4: Skipped (no mediator feedback).")
 
-        # 5. TAG previous entries with this iteration's reward + backfill buffer
-        if iteration > 0:
-            if prev_mid := self._prev_mediator_entry_id_by_task.pop(task_id, None):
-                self.history_store.tag_outcome_by_id(prev_mid, reward=trace.reward)
-            if prev_pid := self._prev_planner_entry_id_by_task.pop(task_id, None):
-                self.history_store.tag_outcome_by_id(prev_pid, reward=trace.reward)
-            for p in self._proposal_buffer:
-                if p.iteration == iteration - 1 and p.task_id == task_id:
-                    p.reward = trace.reward
+        # 5. TAG previous entries with this iteration's reward + backfill buffer.
+        self._tag_previous_iteration(iteration, task_id, trace)
 
         skill_update = await self._advise_and_patch()
 
@@ -228,11 +255,48 @@ class Orchestrator:
             planner_history_entry_id=planner_entry_id,
             condition_name=condition,
         )
+        reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
         logger.info(
-            "Iteration %d complete: condition=%s reward=%.2f tokens=%d duration=%.1fs",
-            iteration, condition, trace.reward, total_tokens, duration,
+            "Iteration %d complete: condition=%s status=%s reward=%s tokens=%d duration=%.1fs",
+            iteration, condition, trace.status, reward_str, total_tokens, duration,
         )
         return record
+
+    def _tag_previous_iteration(
+        self,
+        iteration: int,
+        task_id: str,
+        trace: ExecutionTrace,
+    ) -> None:
+        """Pop the carry-forward entry IDs and tag them with this iteration's reward.
+
+        The pop must happen on every iteration (including env failures), so a
+        stale entry from iteration N can never be tagged with iteration N+2's
+        reward across an intervening env_failure. We only WRITE the reward
+        when the trace is usable; otherwise the entry is dropped untagged.
+        """
+        if iteration <= 0:
+            return
+
+        prev_mid = self._prev_mediator_entry_id_by_task.pop(task_id, None)
+        prev_pid = self._prev_planner_entry_id_by_task.pop(task_id, None)
+
+        if trace.reward is None or trace.status != "ok":
+            if prev_mid or prev_pid:
+                logger.info(
+                    "Dropping carry-forward entry IDs untagged for task=%s "
+                    "(trace status=%s reward=%s)",
+                    task_id, trace.status, trace.reward,
+                )
+            return
+
+        if prev_mid:
+            self.history_store.tag_outcome_by_id(prev_mid, reward=trace.reward)
+        if prev_pid:
+            self.history_store.tag_outcome_by_id(prev_pid, reward=trace.reward)
+        for p in self._proposal_buffer:
+            if p.iteration == iteration - 1 and p.task_id == task_id:
+                p.reward = trace.reward
 
     async def _advise_and_patch(self) -> SkillUpdate | None:
         """If buffer is full, run the advisor and optionally patch the skill.
@@ -245,9 +309,10 @@ class Orchestrator:
 
         logger.info("Advisor reviewing %d proposals...", len(self._proposal_buffer))
         current_skill = self.skill_store.read_skill("executor") or ""
+        buffered_proposals = list(self._proposal_buffer)
         advisor_feedback = await self.skill_advisor.review(
             current_skill=current_skill,
-            proposals=list(self._proposal_buffer),
+            proposals=buffered_proposals,
         )
         self._proposal_buffer.clear()
 
@@ -257,7 +322,7 @@ class Orchestrator:
 
         logger.info("Advisor approved — Planner patching skill...")
         contributing_task_ids = ",".join(
-            sorted({p.task_id for p in self._proposal_buffer if p.task_id})
+            sorted({p.task_id for p in buffered_proposals if p.task_id})
         )
         edit_history = self.history_store.query(
             agent_role="planner",

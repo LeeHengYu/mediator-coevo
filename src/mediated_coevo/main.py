@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -60,6 +61,13 @@ def run(
     config.experiment.seed = seed
     config.experiment.condition_name = condition
 
+    if config.executor_runtime.harbor_required and shutil.which("harbor") is None:
+        console.print(
+            "[bold red]ERROR:[/] harbor CLI not found on PATH. Install harbor, "
+            "or set executor_runtime.harbor_required = false in config."
+        )
+        raise typer.Exit(code=1)
+
     task_ids = [t.strip() for t in tasks.split(",")]
 
     console.print(f"[bold]Tasks:[/] {task_ids}")
@@ -88,6 +96,7 @@ def run(
     harbor_runner = HarborRunner(
         agent_name=config.executor_runtime.agent_name,
         jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
+        timeout_sec=config.executor_runtime.harbor_timeout_sec,
     )
 
     # Initialize agents
@@ -127,12 +136,15 @@ def run(
     records = asyncio.run(orchestrator.run_experiment(task_ids, iterations))
 
     # Summary
-    rewards = [r.reward for r in records]
-    avg_reward = sum(rewards) / len(rewards) if rewards else 0
+    scored = [r for r in records if r.reward is not None]
+    avg_reward = sum(r.reward for r in scored) / len(scored) if scored else 0.0
+    failures = [r for r in records if r.reward is None]
     total_tokens = sum(r.total_tokens for r in records)
     console.print(f"\n[bold]Results:[/]")
     console.print(f"  Iterations: {len(records)}")
-    console.print(f"  Avg reward: {avg_reward:.3f}")
+    console.print(f"  Scored: {len(scored)}")
+    console.print(f"  Env failures: {len(failures)}")
+    console.print(f"  Avg reward (scored only): {avg_reward:.3f}")
     console.print(f"  Total tokens: {total_tokens:,}")
     console.print(f"  Data: {experiment_dir}")
 

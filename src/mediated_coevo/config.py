@@ -44,6 +44,13 @@ class ExecutorRuntimeConfig(BaseModel):
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     injected_skill_name: str = "executor-evolved"
+    # Hard wall-clock cap on a single Harbor subprocess (seconds). Prevents
+    # a hung run from blocking the orchestrator indefinitely.
+    harbor_timeout_sec: float = 1800.0
+    # When True, refuse to start the experiment if the harbor CLI is missing.
+    # When False, the executor synthesizes env_failure traces on each task
+    # so CI can exercise the orchestrator without harbor installed.
+    harbor_required: bool = True
 
 
 class Config(BaseModel):

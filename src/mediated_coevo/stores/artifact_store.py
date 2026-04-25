@@ -101,10 +101,16 @@ class ArtifactStore:
         traces = self.query_traces(task_id=task_id, recent=recent)
         summaries: list[str] = []
         for trace in traces:
-            status = "OK" if trace.exit_code == 0 else f"FAIL(exit={trace.exit_code})"
-            summary = (
-                f"iter={trace.iteration} reward={trace.reward:.2f} {status}"
+            if trace.status != "ok":
+                status = f"{trace.status.upper()}({trace.error_kind or 'unknown'})"
+            elif trace.exit_code == 0:
+                status = "OK"
+            else:
+                status = f"FAIL(exit={trace.exit_code})"
+            reward_str = (
+                f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
             )
+            summary = f"iter={trace.iteration} reward={reward_str} {status}"
             if trace.stderr:
                 summary += f" stderr={trace.stderr[:200]}"
             summaries.append(summary)

@@ -25,7 +25,7 @@ class IterationRecord(BaseModel):
     mediator_report: MediatorReport | None = None
     skill_update: SkillUpdate | None = None
 
-    reward: float = 0.0
+    reward: float | None = None
     total_tokens: int = 0
     duration_sec: float = 0.0
 

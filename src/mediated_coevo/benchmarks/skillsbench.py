@@ -8,13 +8,22 @@ import logging
 import shutil
 import tomllib
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
+from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
 
 logger = logging.getLogger(__name__)
+
+
+class HarborNotFoundError(RuntimeError):
+    """Raised when the harbor CLI cannot be located on PATH or is not executable."""
+
+
+class HarborTimeoutError(RuntimeError):
+    """Raised when a Harbor subprocess exceeds the configured timeout."""
 
 
 @dataclass(slots=True)
@@ -102,15 +111,35 @@ class SkillsBenchRepository:
 class HarborRunner:
     """Run a local SkillsBench task via Harbor and locate its artifacts."""
 
-    def __init__(self, agent_name: str, jobs_dir: Path) -> None:
+    def __init__(
+        self,
+        agent_name: str,
+        jobs_dir: Path,
+        timeout_sec: float = 1800.0,
+    ) -> None:
         self.agent_name = agent_name
         self.jobs_dir = jobs_dir
+        self.timeout_sec = timeout_sec
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self._harbor_path: str | None = None
+
+    def _resolve_harbor(self) -> str:
+        if self._harbor_path is None:
+            path = shutil.which("harbor")
+            if path is None:
+                raise HarborNotFoundError(
+                    "harbor CLI not found on PATH. Install harbor, or set "
+                    "executor_runtime.harbor_required=False to allow synthesized "
+                    "env-failure traces in CI."
+                )
+            self._harbor_path = path
+        return self._harbor_path
 
     async def run(self, task_dir: Path, model: str) -> HarborRunResult:
+        harbor = self._resolve_harbor()
         before = {p.resolve() for p in self.jobs_dir.iterdir() if p.is_dir()}
         cmd = [
-            "harbor",
+            harbor,
             "run",
             "-p",
             str(task_dir),
@@ -122,23 +151,52 @@ class HarborRunner:
             str(self.jobs_dir),
         ]
         logger.info("Running Harbor task: %s", " ".join(cmd))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            raise HarborNotFoundError(f"harbor CLI not executable: {e}") from e
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=self.timeout_sec,
+            )
+        except asyncio.TimeoutError as e:
+            with suppress(ProcessLookupError):
+                proc.kill()
+            with suppress(Exception):
+                await proc.wait()
+            raise HarborTimeoutError(
+                f"harbor run exceeded {self.timeout_sec}s timeout for {task_dir}"
+            ) from e
+
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
+        # Only attribute directories created by THIS run, so stale artifacts
+        # from prior runs cannot be mistaken for the current one.
         after = [p.resolve() for p in self.jobs_dir.iterdir() if p.is_dir()]
-        new_jobs = [p for p in after if p not in before]
-        job_dir = _latest_path(new_jobs) or _latest_path(after)
+        job_dir = _latest_path([p for p in after if p not in before])
         trial_dir = _find_trial_dir(job_dir) if job_dir else None
+
+        returncode = proc.returncode if proc.returncode is not None else -1
+        if returncode != 0:
+            logger.warning(
+                "harbor exited with code %d (job_dir=%s, task_dir=%s)",
+                returncode,
+                job_dir,
+                task_dir,
+            )
+
         return HarborRunResult(
             job_dir=job_dir,
             trial_dir=trial_dir,
-            returncode=proc.returncode,
+            returncode=returncode,
             stdout=stdout,
             stderr=stderr,
         )
@@ -150,86 +208,259 @@ def parse_execution_trace(
     iteration: int,
     duration_sec: float,
 ) -> ExecutionTrace:
-    """Convert Harbor artifacts into this repo's ExecutionTrace."""
-    result_json: dict[str, Any] = {}
-    ctrf_json: dict[str, Any] | None = None
-    reward = 0.0
-    input_tokens = 0
-    output_tokens = 0
-    agent_summary = ""
+    """Convert Harbor artifacts into a classified ExecutionTrace.
 
-    if run_result.trial_dir:
-        result_path = run_result.trial_dir / "result.json"
-        if result_path.exists():
-            result_json = json.loads(result_path.read_text())
+    Missing or malformed artifacts surface as ``status != "ok"`` traces
+    (rather than silently zero-padded ones) so the orchestrator can skip
+    feeding them into mediator/skill-update channels.
 
-        ctrf_path = run_result.trial_dir / "verifier" / "ctrf.json"
-        if ctrf_path.exists():
-            ctrf_json = json.loads(ctrf_path.read_text())
-
-        reward_path = run_result.trial_dir / "verifier" / "reward.txt"
-        if reward_path.exists():
-            reward_text = reward_path.read_text().strip()
-            reward = float(reward_text)
-
-        if reward == 0.0:
-            reward = (
-                result_json.get("verifier_result", {})
-                .get("rewards", {})
-                .get("reward", 0.0)
-            )
-
-        agent_result = result_json.get("agent_result", {})
-        input_tokens = int(agent_result.get("n_input_tokens", 0) or 0)
-        output_tokens = int(agent_result.get("n_output_tokens", 0) or 0)
-
-        agent_dir = run_result.trial_dir / "agent"
-        if agent_dir.exists():
-            txt_files = sorted(agent_dir.glob("*.txt"))
-            if txt_files:
-                agent_summary = txt_files[0].read_text()
-
-    stdout_sections = []
-    if run_result.stdout.strip():
-        stdout_sections.append("# Harbor Output\n\n" + run_result.stdout.strip())
-    if agent_summary.strip():
-        stdout_sections.append("# Agent Summary\n\n" + agent_summary.strip())
-    stdout = "\n\n".join(stdout_sections)
-
-    stderr_sections = []
-    if run_result.stderr.strip():
-        stderr_sections.append(run_result.stderr.strip())
-    exception_info = result_json.get("exception_info")
-    if exception_info:
-        stderr_sections.append(json.dumps(exception_info, indent=2))
-    stderr = "\n\n".join(stderr_sections)
-
-    exit_code = run_result.returncode
-    if exit_code == 0 and exception_info:
-        exit_code = 1
-
-    return ExecutionTrace(
+    Status / error_kind matrix:
+      env_failure    : missing_trial_dir | missing_result_json |
+                       malformed_result_json | no_reward
+      parse_error    : malformed_reward
+      harbor_failed  : harbor_nonzero | harbor_nonzero_no_reward
+      ok (warnings)  : reward_ctrf_mismatch | harbor_exception
+    """
+    base: dict[str, Any] = dict(
         task_id=task_id,
         iteration=iteration,
-        stdout=stdout,
-        stderr=stderr,
-        exit_code=exit_code,
-        test_results=_summarize_ctrf(ctrf_json),
-        reward=float(reward),
-        token_usage=TokenUsage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-        ),
         duration_sec=duration_sec,
+        exit_code=run_result.returncode,
+        stdout=_format_harbor_stdout(run_result.stdout, ""),
+        stderr=_format_harbor_stderr(run_result.stderr, None),
     )
+
+    if run_result.trial_dir is None:
+        logger.warning(
+            "parse_execution_trace: no trial_dir for task=%s iter=%d (returncode=%d)",
+            task_id, iteration, run_result.returncode,
+        )
+        return ExecutionTrace(
+            **base,
+            status="env_failure",
+            error_kind="missing_trial_dir",
+            error_detail=run_result.stderr.strip() or None,
+        )
+
+    result_path = run_result.trial_dir / "result.json"
+    if not result_path.exists():
+        logger.warning(
+            "parse_execution_trace: missing result.json at %s (task=%s iter=%d)",
+            result_path, task_id, iteration,
+        )
+        return ExecutionTrace(
+            **base,
+            status="env_failure",
+            error_kind="missing_result_json",
+            error_detail=f"result.json not found at {result_path}",
+        )
+
+    try:
+        result_json: dict[str, Any] = json.loads(result_path.read_text())
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "parse_execution_trace: malformed result.json at %s: %s", result_path, e,
+        )
+        return ExecutionTrace(
+            **base,
+            status="env_failure",
+            error_kind="malformed_result_json",
+            error_detail=str(e),
+        )
+
+    ctrf_json: dict[str, Any] | None = None
+    ctrf_path = run_result.trial_dir / "verifier" / "ctrf.json"
+    if ctrf_path.exists():
+        try:
+            ctrf_json = json.loads(ctrf_path.read_text())
+        except json.JSONDecodeError as e:
+            logger.warning(
+                "parse_execution_trace: malformed ctrf.json at %s: %s", ctrf_path, e,
+            )
+
+    # Prefer reward.txt; fall back to result.json only when absent. A
+    # legitimate 0.0 in reward.txt must not be overwritten by the nested key.
+    agent_summary = _read_agent_summary(run_result.trial_dir)
+    exception_info = result_json.get("exception_info")
+    reward_path = run_result.trial_dir / "verifier" / "reward.txt"
+    test_results = _summarize_ctrf(ctrf_json)
+    agent_result = _mapping_or_empty(result_json.get("agent_result"))
+    token_usage = TokenUsage(
+        input_tokens=_safe_int(
+            agent_result.get("n_input_tokens", 0),
+            field="agent_result.n_input_tokens",
+            task_id=task_id, iteration=iteration,
+        ),
+        output_tokens=_safe_int(
+            agent_result.get("n_output_tokens", 0),
+            field="agent_result.n_output_tokens",
+            task_id=task_id, iteration=iteration,
+        ),
+    )
+
+    full_base: dict[str, Any] = dict(
+        base,
+        stdout=_format_harbor_stdout(run_result.stdout, agent_summary),
+        stderr=_format_harbor_stderr(run_result.stderr, exception_info),
+        test_results=test_results,
+        token_usage=token_usage,
+    )
+
+    reward: float | None = None
+    if reward_path.exists():
+        reward_text = reward_path.read_text().strip()
+        try:
+            reward = float(reward_text)
+        except ValueError:
+            logger.warning(
+                "parse_execution_trace: malformed reward.txt at %s (content=%r)",
+                reward_path, reward_text,
+            )
+            return ExecutionTrace(
+                **full_base,
+                status="parse_error",
+                error_kind="malformed_reward",
+                error_detail=(
+                    f"reward.txt at {reward_path} contained non-numeric value: "
+                    f"{reward_text!r}"
+                ),
+            )
+    else:
+        nested = _mapping_or_empty(
+            _mapping_or_empty(result_json.get("verifier_result")).get("rewards")
+        ).get("reward")
+        if nested is not None:
+            try:
+                reward = float(nested)
+            except (TypeError, ValueError):
+                reward = None
+
+    if reward is None:
+        logger.warning(
+            "parse_execution_trace: no reward parsed for task=%s iter=%d (returncode=%d)",
+            task_id, iteration, run_result.returncode,
+        )
+        if run_result.returncode != 0:
+            status: TraceStatus = "harbor_failed"
+            error_kind = "harbor_nonzero_no_reward"
+        else:
+            status = "env_failure"
+            error_kind = "no_reward"
+        return ExecutionTrace(
+            **full_base,
+            status=status,
+            error_kind=error_kind,
+            error_detail=exception_info or run_result.stderr.strip() or None,
+        )
+
+    error_kind, error_detail = _ctrf_mismatch(
+        ctrf_json, reward, task_id=task_id, iteration=iteration,
+    )
+
+    if exception_info and error_kind is None:
+        error_kind = "harbor_exception"
+        error_detail = exception_info
+
+    if run_result.returncode != 0:
+        status = "harbor_failed"
+        if error_kind is None:
+            error_kind = "harbor_nonzero"
+            error_detail = (
+                run_result.stderr.strip()
+                or f"harbor returncode={run_result.returncode}"
+            )
+    else:
+        status = "ok"
+
+    # Bump exit_code 0→1 to mark exception_info in legacy consumers.
+    exit_code = 1 if run_result.returncode == 0 and exception_info else run_result.returncode
+
+    return ExecutionTrace(
+        **{**full_base, "exit_code": exit_code},
+        reward=reward,
+        status=status,
+        error_kind=error_kind,
+        error_detail=error_detail,
+    )
+
+
+def _ctrf_mismatch(
+    ctrf_json: dict[str, Any] | None,
+    reward: float,
+    *,
+    task_id: str,
+    iteration: int,
+) -> tuple[str | None, str | None]:
+    """Sanity-check reward against CTRF summary; return (kind, detail)."""
+    if ctrf_json is None:
+        return None, None
+    summary = _mapping_or_empty(
+        _mapping_or_empty(ctrf_json.get("results")).get("summary")
+    )
+    failed = _safe_int(
+        summary.get("failed", 0),
+        field="ctrf.results.summary.failed",
+        task_id=task_id, iteration=iteration,
+    )
+    passed = _safe_int(
+        summary.get("passed", 0),
+        field="ctrf.results.summary.passed",
+        task_id=task_id, iteration=iteration,
+    )
+    if failed > 0 and reward >= 0.999:
+        detail = f"reward={reward} but CTRF reports {failed} failed tests"
+    elif passed > 0 and failed == 0 and reward <= 0.001:
+        detail = f"reward={reward} but CTRF reports all {passed} tests passed"
+    else:
+        return None, None
+    logger.warning(
+        "parse_execution_trace: %s (task=%s iter=%d)", detail, task_id, iteration,
+    )
+    return "reward_ctrf_mismatch", detail
+
+
+def _format_harbor_stdout(harbor_stdout: str, agent_summary: str) -> str:
+    sections: list[str] = []
+    if harbor_stdout.strip():
+        sections.append("# Harbor Output\n\n" + harbor_stdout.strip())
+    if agent_summary.strip():
+        sections.append("# Agent Summary\n\n" + agent_summary.strip())
+    return "\n\n".join(sections)
+
+
+def _format_harbor_stderr(
+    harbor_stderr: str,
+    exception_info: dict[str, Any] | None,
+) -> str:
+    sections: list[str] = []
+    if harbor_stderr.strip():
+        sections.append(harbor_stderr.strip())
+    if exception_info:
+        sections.append(json.dumps(exception_info, indent=2))
+    return "\n\n".join(sections)
+
+
+def _read_agent_summary(trial_dir: Path) -> str:
+    agent_dir = trial_dir / "agent"
+    if not agent_dir.exists():
+        return ""
+    txt_files = sorted(agent_dir.glob("*.txt"))
+    if not txt_files:
+        return ""
+    try:
+        return txt_files[0].read_text()
+    except OSError:
+        return ""
 
 
 def _summarize_ctrf(ctrf_json: dict[str, Any] | None) -> dict[str, Any] | None:
     if not ctrf_json:
         return None
-    results = ctrf_json.get("results", {})
-    summary = results.get("summary", {})
+    results = _mapping_or_empty(ctrf_json.get("results"))
+    summary = _mapping_or_empty(results.get("summary"))
     tests = results.get("tests", [])
+    if not isinstance(tests, list):
+        tests = []
     return {
         "summary": summary,
         "failed_tests": [
@@ -239,9 +470,30 @@ def _summarize_ctrf(ctrf_json: dict[str, Any] | None) -> dict[str, Any] | None:
                 "message": test.get("message"),
             }
             for test in tests
-            if test.get("status") != "passed"
+            if isinstance(test, dict) and test.get("status") != "passed"
         ],
     }
+
+
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _safe_int(value: Any, *, field: str, task_id: str, iteration: int) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        logger.warning(
+            "parse_execution_trace: malformed integer field %s=%r "
+            "(task=%s iter=%d); defaulting to 0",
+            field,
+            value,
+            task_id,
+            iteration,
+        )
+        return 0
 
 
 def _latest_path(paths: list[Path]) -> Path | None:
