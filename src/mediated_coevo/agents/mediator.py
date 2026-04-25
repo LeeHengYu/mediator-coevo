@@ -6,12 +6,14 @@ outputs, filters/compresses them, and produces curated reports for
 Claude. Its system prompt is the coordination-protocol.md skill, which
 evolves over time through the co-evolution loop.
 
-The 5 Mediator actions:
-  1. STORE   — extract and persist artifacts from Gemini's outputs
-  2. FILTER  — select relevant artifacts based on task context
-  3. COMPRESS — distill raw traces into concise reports within token budget
-  4. DECIDE  — expose or withhold (sometimes surfacing nothing is best)
-  5. TAG     — annotate past reports with downstream results (deferred)
+The Mediator actions:
+  1. FILTER   — select relevant artifacts based on task context
+  2. COMPRESS — distill raw traces into concise reports within token budget
+  3. DECIDE   — expose or withhold (sometimes surfacing nothing is best)
+  4. TAG      — annotate past reports with downstream results (deferred)
+
+Trace and report persistence is owned by the Orchestrator.
+The Mediator has read-only access to the artifact store (query_summaries).
 """
 
 from __future__ import annotations
@@ -119,9 +121,11 @@ class MediatorAgent(BaseAgent):
         trace: ExecutionTrace,
         task_context: TaskSpec,
     ) -> MediatorReport:
-        """Full mediation pipeline: store → filter → compress → decide.
+        """Full mediation pipeline: filter → compress → decide.
 
-        This is the main entry point called by the LearnedMediatorCondition.
+        Reads recent trace summaries from the artifact store (read-only).
+        Persistence of the returned MediatorReport is the Orchestrator's
+        responsibility.
         """
         from mediated_coevo.models.report import AbstractionLevel, MediatorReport
 
@@ -132,7 +136,7 @@ class MediatorAgent(BaseAgent):
                 task_id=trace.task_id, recent=5
             )
 
-        # 3-4. COMPRESS + DECIDE via LLM call
+        # 2-3. COMPRESS + DECIDE via LLM call
         context = {
             "trace": trace,
             "history": history,

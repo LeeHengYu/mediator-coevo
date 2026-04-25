@@ -71,7 +71,7 @@ When buffer hits advisor_buffer_max (default 10):
 
 **Flow 2 — Agent meta-skill co-evolution (iteration-triggered)**
 
-Updates `skills/mediator/SKILL.md` and `skills/planner/SKILL.md` — *how* each agent behaves, not what the Executor executes.
+Updates `skills/mediator/SKILL.md` and `skills/planner/SKILL.md` — _how_ each agent behaves, not what the Executor executes.
 
 ```
 Every coevo_interval iterations (default 5):
@@ -101,3 +101,5 @@ Every coevo_interval iterations (default 5):
 2. Spark — Shared Agentic Memory: https://arxiv.org/abs/2511.08301
 3. Multi-Agent Evolve (MAE): https://arxiv.org/abs/2510.23595
 4. OpenSpace: https://github.com/HKUDS/OpenSpace
+5. Group-Evolving Agents (GEA): https://arxiv.org/abs/2602.04837
+6. Self-Evolving Coordination Protocol (SECP): https://arxiv.org/abs/2602.02170

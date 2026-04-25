@@ -29,18 +29,22 @@ class ArtifactStore:
         self._traces_dir.mkdir(parents=True, exist_ok=True)
         self._reports_dir.mkdir(parents=True, exist_ok=True)
 
-    def store_trace(self, trace: ExecutionTrace) -> Path:
+    def store_trace(self, trace: ExecutionTrace, *, overwrite: bool = False) -> Path:
         """Persist an execution trace. Returns the file path."""
         filename = f"{trace.task_id}_iter{trace.iteration:04d}.json"
         path = self._traces_dir / filename
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Trace already exists: {path}")
         path.write_text(trace.model_dump_json(indent=2))
         logger.debug("Stored trace: %s", path)
         return path
 
-    def store_report(self, report: MediatorReport) -> Path:
+    def store_report(self, report: MediatorReport, *, overwrite: bool = False) -> Path:
         """Persist a mediator report. Returns the file path."""
         filename = f"{report.task_id}_iter{report.iteration:04d}_{report.report_id}.json"
         path = self._reports_dir / filename
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Report already exists: {path}")
         path.write_text(report.model_dump_json(indent=2))
         logger.debug("Stored report: %s", path)
         return path
