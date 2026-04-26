@@ -39,18 +39,26 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
          └────────────────────────────────────────────────────────────┘
 ```
 
-1. Planner: construct run task plan based on the curated logs released from mediator, building the prompt and send to executor. Planner has access to:
-   1. the complete log of the previous run (ONLY the previous run) to construct the plan
-   2. curated summaries (`MediatorSignal` / `PlannerSignal` payloads in `HistoryEntry`) of the logs to reflect on its own planning skill
+1. Planner: constructs each run's task plan from the benchmark instruction, active Executor skills, and condition-selected prior context. Prior context is selected by `--condition`:
+   - `no_feedback`: no previous-run context.
+   - `full_traces`: compact summaries of recent same-task traces (LLM-compacted when stderr is long).
+   - `shared_notes`: configured shared notes from experiment config.
+   - `static_mediator` / `learned_mediator`: the previous non-withheld Mediator report for the same task.
+     Prior reports are task-keyed; cross-task context is opt-in via `experiment.allow_cross_task_feedback`.
+     For meta-skill reflection, the Planner consumes `MediatorSignal` / `PlannerSignal` payloads from `HistoryEntry`.
 2. Executor: containerized environment to run benchmark or well-defined tasks, output reward or score.
-3. Mediator: Process the execution trace and produce a curated report for the Planner; may reference context from recent past runs.
-4. Planner + Mediator: Coevolve by querying the `contrasive pairs`, a contrasive pair is by pairing good and bad performance and the improvement with harness diff can be used to reflect on skill improvement.
+3. Mediator: only runs for `static_mediator` and `learned_mediator`; processes usable execution traces into curated reports for the Planner.
+4. Planner + Mediator: Coevolve by querying contrastive pairs — pairs are formed by linking history entries (via stable entry IDs) to their delayed rewards from the next iteration of the same task.
 
 ## Current Implementation
 
 - Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
 - Executor runs a vendored local SkillsBench-style Harbor task and parses the resulting `reward`, verifier output, and agent logs into `ExecutionTrace`.
 - The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
+- Experiment conditions selectable via `--condition` (`no_feedback` | `full_traces` | `shared_notes` | `static_mediator` | `learned_mediator`).
+- Previous-report state is task-keyed; cross-task feedback is opt-in via `experiment.allow_cross_task_feedback` (default `false`).
+- Skill directories require a canonical `SKILL.md` entrypoint, validated at startup by `SkillStore.validate()`.
+- History outcome tagging uses stable entry IDs so multi-task runs cannot attribute a reward to the wrong task's planner/mediator entry.
 
 ### Two Distinct Skill Update Flows
 
@@ -88,6 +96,10 @@ Every coevo_interval iterations (default 5):
 ```
 
 `SkillProposal` and `SkillUpdate` share a `SkillEdit` base (`old_content`, `new_content`, `reasoning`). Proposals are never written to `HistoryStore`; only committed `SkillUpdate`s appear in `IterationRecord` and `metrics.jsonl`.
+
+## Progress
+
+P0 1-5, Week 1 scope
 
 ## Further Direction
 
