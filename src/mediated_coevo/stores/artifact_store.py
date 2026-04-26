@@ -11,6 +11,11 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from mediated_coevo.evolution.compactor import (
+    TARGET_EVIDENCE_CHARS,
+    head_tail_text,
+    trace_header_summary,
+)
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.models.report import MediatorReport
 
@@ -101,17 +106,8 @@ class ArtifactStore:
         traces = self.query_traces(task_id=task_id, recent=recent)
         summaries: list[str] = []
         for trace in traces:
-            if trace.status != "ok":
-                status = f"{trace.status.upper()}({trace.error_kind or 'unknown'})"
-            elif trace.exit_code == 0:
-                status = "OK"
-            else:
-                status = f"FAIL(exit={trace.exit_code})"
-            reward_str = (
-                f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
-            )
-            summary = f"iter={trace.iteration} reward={reward_str} {status}"
+            summary = trace_header_summary(trace)
             if trace.stderr:
-                summary += f" stderr={trace.stderr[:200]}"
+                summary += f" stderr={head_tail_text(trace.stderr, TARGET_EVIDENCE_CHARS)}"
             summaries.append(summary)
         return summaries

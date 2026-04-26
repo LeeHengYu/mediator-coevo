@@ -32,3 +32,4 @@ class IterationRecord(BaseModel):
     mediator_history_entry_id: str | None = None
     planner_history_entry_id: str | None = None
     condition_name: ConditionName = "learned_mediator"
+    cross_task_feedback_enabled: bool = False

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 import shutil
+from typing import cast, get_args
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository
+from mediated_coevo.conditions import ConditionName
 from mediated_coevo.config import load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.llm.client import LLMClient
@@ -30,6 +32,18 @@ app = typer.Typer(name="medcoevo", help="Mediated Co-Evolution Experiment Runner
 console = Console()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+VALID_CONDITION_NAMES = set(get_args(ConditionName))
+
+
+def _validate_condition_name(condition: str) -> ConditionName:
+    """Validate CLI condition names before mutating the config object."""
+    if condition not in VALID_CONDITION_NAMES:
+        allowed = ", ".join(sorted(VALID_CONDITION_NAMES))
+        raise typer.BadParameter(
+            f"invalid condition {condition!r}; expected one of: {allowed}"
+        )
+    return cast(ConditionName, condition)
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -57,9 +71,11 @@ def run(
     _setup_logging(verbose)
     random.seed(seed)
 
+    condition_name = _validate_condition_name(condition)
+
     config = load_config(config_dir)
     config.experiment.seed = seed
-    config.experiment.condition_name = condition
+    config.experiment.condition_name = condition_name
 
     if config.executor_runtime.harbor_required and shutil.which("harbor") is None:
         console.print(
@@ -72,12 +88,14 @@ def run(
 
     console.print(f"[bold]Tasks:[/] {task_ids}")
     console.print(f"[bold]Iterations:[/] {iterations}")
-    console.print(f"[bold]Condition:[/] {condition}")
+    console.print(f"[bold]Condition:[/] {condition_name}")
     console.print(f"[bold]Models:[/] planner={config.models.planner} executor={config.models.executor} mediator={config.models.mediator}")
 
     # Create experiment directory
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    experiment_dir = PROJECT_ROOT / "data" / "experiments" / f"{timestamp}-{seed}-{condition}"
+    experiment_dir = (
+        PROJECT_ROOT / "data" / "experiments" / f"{timestamp}-{seed}-{condition_name}"
+    )
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     # Save frozen config
@@ -87,6 +105,7 @@ def run(
     # Initialize stores
     skills_dir = PROJECT_ROOT / config.paths.skills_dir
     skill_store = SkillStore(skills_dir=skills_dir)
+    skill_store.validate()
     artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
     history_store = HistoryStore(history_dir=experiment_dir / "history")
     benchmark_repo = SkillsBenchRepository(
@@ -140,7 +159,7 @@ def run(
     avg_reward = sum(r.reward for r in scored) / len(scored) if scored else 0.0
     failures = [r for r in records if r.reward is None]
     total_tokens = sum(r.total_tokens for r in records)
-    console.print(f"\n[bold]Results:[/]")
+    console.print("\n[bold]Results:[/]")
     console.print(f"  Iterations: {len(records)}")
     console.print(f"  Scored: {len(scored)}")
     console.print(f"  Env failures: {len(failures)}")

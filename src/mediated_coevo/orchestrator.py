@@ -14,7 +14,13 @@ from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.agents.mediator import MediatorAgent
-from mediated_coevo.conditions import MEDIATOR_CONDITIONS, MEDIATOR_EVOLVE_CONDITIONS, get_prior_context
+from mediated_coevo.conditions import (
+    ConditionName,
+    MEDIATOR_CONDITIONS,
+    MEDIATOR_EVOLVE_CONDITIONS,
+    get_cross_task_prior_context,
+    get_prior_context,
+)
 from mediated_coevo.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
@@ -130,6 +136,9 @@ class Orchestrator:
                 execution_trace=trace,
                 duration_sec=duration,
                 condition_name=condition,
+                cross_task_feedback_enabled=(
+                    self.config.experiment.allow_cross_task_feedback
+                ),
             )
 
         self.planner.set_skill_context(
@@ -139,14 +148,8 @@ class Orchestrator:
 
         skill_texts = [executor_skill_text] if executor_skill_text else []
 
-        # Determine prior context for planner based on condition
-        prior_context = get_prior_context(
-            condition=condition,
-            task_id=task_id,
-            artifact_store=self.artifact_store,
-            previous_report=self._previous_report_by_task.get(task_id),
-            shared_notes=self.config.experiment.shared_notes,
-        )
+        # Determine prior context for planner based on condition.
+        prior_context = await self._build_prior_context(condition, task_id)
 
         # 1. PLAN
         logger.info("Step 1: Planner planning task (condition=%s)...", condition)
@@ -254,6 +257,9 @@ class Orchestrator:
             mediator_history_entry_id=mediator_entry_id,
             planner_history_entry_id=planner_entry_id,
             condition_name=condition,
+            cross_task_feedback_enabled=(
+                self.config.experiment.allow_cross_task_feedback
+            ),
         )
         reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
         logger.info(
@@ -261,6 +267,46 @@ class Orchestrator:
             iteration, condition, trace.status, reward_str, total_tokens, duration,
         )
         return record
+
+    async def _build_prior_context(self, condition: ConditionName, task_id: str) -> str | None:
+        """Build same-task prior context, with explicit opt-in cross-task context."""
+        llm_client = self.mediator.llm_client if condition == "full_traces" else None
+        prior_context = await get_prior_context(
+            condition=condition,
+            task_id=task_id,
+            artifact_store=self.artifact_store,
+            previous_report=self._previous_report_by_task.get(task_id),
+            shared_notes=self.config.experiment.shared_notes,
+            llm_client=llm_client,
+        )
+        if not self.config.experiment.allow_cross_task_feedback:
+            return prior_context
+
+        cross_context = await get_cross_task_prior_context(
+            condition=condition,
+            task_id=task_id,
+            artifact_store=self.artifact_store,
+            previous_reports_by_task=self._previous_report_by_task,
+            llm_client=llm_client,
+        )
+        if not cross_context:
+            return prior_context
+
+        header = (
+            "# Explicit Cross-Task Feedback\n\n"
+            f"condition={condition} target_task={task_id} "
+            "allow_cross_task_feedback=true\n\n"
+            "The following context came from other tasks by explicit "
+            "experiment configuration."
+        )
+        logger.info(
+            "Cross-task feedback injected: condition=%s target_task=%s",
+            condition,
+            task_id,
+        )
+        if prior_context:
+            return f"{prior_context}\n\n{header}\n\n{cross_context}"
+        return f"{header}\n\n{cross_context}"
 
     def _tag_previous_iteration(
         self,

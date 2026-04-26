@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mediated_coevo.conditions import ConditionName
 
@@ -24,12 +24,15 @@ class BudgetsConfig(BaseModel):
 
 
 class ExperimentConfig(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     num_iterations: int = 30
     coevo_interval: int = 5
     seed: int = 42
     advisor_buffer_max: int = 10
     condition_name: ConditionName = "learned_mediator"
     shared_notes: str | None = None
+    allow_cross_task_feedback: bool = False
 
 
 class PathsConfig(BaseModel):

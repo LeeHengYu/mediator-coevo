@@ -27,15 +27,28 @@ from __future__ import annotations
 import difflib
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 
 if TYPE_CHECKING:
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.skill import SkillUpdate
+    from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
+
+
+class SupportsComplete(Protocol):
+    async def complete(
+        self,
+        messages: list[dict[str, Any]] | str,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        ...
+
 
 # Feedback text shorter than this is kept verbatim — an LLM call would be wasted.
 RAW_PASSTHROUGH_CHARS = 800
@@ -62,6 +75,66 @@ into a structured JSON object with exactly two fields:
   failing assertions, or specific recommendations over generic framing.
 
 Respond with ONLY a JSON object — no prose, no markdown fences."""
+
+
+CONTEXT_COMPACTOR_SYSTEM_PROMPT = """\
+You are a log compactor. Condense long execution context for a planner prompt.
+
+Return JSON with exactly two string fields:
+- "headline": ONE sentence naming the most important signal.
+- "evidence": 2-4 concise sentences preserving concrete error messages,
+  failing assertions, command names, paths, or verifier details where relevant.
+
+Respond with ONLY a JSON object — no prose, no markdown fences."""
+
+
+async def compact_text_for_context(
+    text: str,
+    *,
+    llm_client: SupportsComplete | None = None,
+    label: str = "context",
+) -> str:
+    """Compact long prompt context with the existing compactor fallback rules."""
+    raw = text.strip()
+    if len(raw) <= RAW_PASSTHROUGH_CHARS:
+        return raw
+
+    if llm_client is None:
+        return head_tail_text(raw, TARGET_EVIDENCE_CHARS)
+
+    try:
+        from mediated_coevo.utils import parse_json_object
+
+        response = await llm_client.complete(
+            messages=[
+                {"role": "system", "content": CONTEXT_COMPACTOR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"## {label} ({len(raw)} chars)\n\n"
+                        f"{raw}\n\n"
+                        f"Keep evidence to about {TARGET_EVIDENCE_CHARS} "
+                        f"characters and headline to about {TARGET_HEADLINE_CHARS}."
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=600,
+        )
+        parsed = parse_json_object(str(response.get("content", "")))
+        headline = str(parsed.get("headline", "")).strip()
+        evidence = str(parsed.get("evidence", "")).strip()
+        compacted = "\n".join(part for part in [headline, evidence] if part)
+        if compacted:
+            return compacted
+    except Exception as e:
+        logger.warning(
+            "Context compaction LLM call failed for %s (%s); using fallback excerpt.",
+            label,
+            e,
+        )
+
+    return head_tail_text(raw, TARGET_EVIDENCE_CHARS)
 
 
 def deterministic_mediator_signal(
@@ -104,6 +177,23 @@ def first_sentence(text: str, max_chars: int) -> str:
     if len(sentence) > max_chars:
         sentence = sentence[: max_chars - 1].rstrip() + "…"
     return sentence
+
+
+def trace_header_summary(
+    trace: "ExecutionTrace",
+    *,
+    include_source_task: bool = False,
+) -> str:
+    """Format the leading 'iter=X reward=Y STATUS' prefix for a trace summary."""
+    if trace.status != "ok":
+        status = f"{trace.status.upper()}({trace.error_kind or 'unknown'})"
+    elif trace.exit_code == 0:
+        status = "OK"
+    else:
+        status = f"FAIL(exit={trace.exit_code})"
+    reward = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
+    prefix = f"source_task={trace.task_id} " if include_source_task else ""
+    return f"{prefix}iter={trace.iteration} reward={reward} {status}"
 
 
 def head_tail_text(text: str, budget: int) -> str:
