@@ -24,10 +24,12 @@ from mediated_coevo.conditions import (
 from mediated_coevo.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
+from mediated_coevo.llm.client import LLMClientOwner
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import SkillProposal, SkillUpdate
 from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.token_budget import TokenBudgetEvent
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
@@ -61,6 +63,11 @@ class Orchestrator:
         self.config = config
         self.experiment_dir = experiment_dir
         self.skill_advisor = skill_advisor
+        self._llm_client_owners: tuple[LLMClientOwner, ...] = (
+            planner,
+            mediator,
+            skill_advisor,
+        )
         self._proposal_buffer: list[SkillProposal] = []
 
         self._snapshots_dir = experiment_dir / "skills_snapshots"
@@ -126,6 +133,7 @@ class Orchestrator:
             )
             self.artifact_store.store_trace(trace)
             self._tag_previous_iteration(iteration, task_id, trace)
+            llm_token_events = self._drain_llm_token_events()
             logger.warning(
                 "Iteration %d skipped before planning: task=%s status=%s error_kind=%s",
                 iteration, task_id, trace.status, trace.error_kind,
@@ -135,6 +143,8 @@ class Orchestrator:
                 task_id=task_id,
                 execution_trace=trace,
                 duration_sec=duration,
+                llm_token_events=llm_token_events,
+                total_tokens=sum(e.total_tokens for e in llm_token_events),
                 condition_name=condition,
                 cross_task_feedback_enabled=(
                     self.config.experiment.allow_cross_task_feedback
@@ -242,7 +252,9 @@ class Orchestrator:
             self._previous_report_by_task[task_id] = current_report
 
         duration = time.time() - start
-        total_tokens = trace.token_usage.input_tokens + trace.token_usage.output_tokens
+        llm_token_events = self._drain_llm_token_events()
+        executor_tokens = trace.token_usage.input_tokens + trace.token_usage.output_tokens
+        total_tokens = executor_tokens + sum(e.total_tokens for e in llm_token_events)
 
         record = IterationRecord(
             iteration=iteration,
@@ -253,6 +265,7 @@ class Orchestrator:
             skill_update=skill_update,
             reward=trace.reward,
             total_tokens=total_tokens,
+            llm_token_events=llm_token_events,
             duration_sec=duration,
             mediator_history_entry_id=mediator_entry_id,
             planner_history_entry_id=planner_entry_id,
@@ -278,6 +291,9 @@ class Orchestrator:
             previous_report=self._previous_report_by_task.get(task_id),
             shared_notes=self.config.experiment.shared_notes,
             llm_client=llm_client,
+            model=self.planner.llm_client.model,
+            budgets=self.config.budgets,
+            condition_name=condition,
         )
         if not self.config.experiment.allow_cross_task_feedback:
             return prior_context
@@ -288,6 +304,9 @@ class Orchestrator:
             artifact_store=self.artifact_store,
             previous_reports_by_task=self._previous_report_by_task,
             llm_client=llm_client,
+            model=self.planner.llm_client.model,
+            budgets=self.config.budgets,
+            condition_name=condition,
         )
         if not cross_context:
             return prior_context
@@ -403,7 +422,12 @@ class Orchestrator:
         )
 
         from mediated_coevo.evolution.reflector import Reflector
-        reflector = Reflector(self.history_store, self.skill_store)
+        reflector = Reflector(
+            self.history_store,
+            self.skill_store,
+            budgets=self.config.budgets,
+            condition_name=condition,
+        )
 
         # Mediator skill evolution only for learned_mediator
         if condition in MEDIATOR_EVOLVE_CONDITIONS:
@@ -415,8 +439,16 @@ class Orchestrator:
 
         # Planner reflects on skill-edit history
         await reflector.reflect("planner", self.planner.llm_client)
+        self._drain_llm_token_events()
 
     def _write_metric(self, record: IterationRecord) -> None:
         """Append an iteration record to metrics.jsonl."""
         with open(self._metrics_path, "a") as f:
             f.write(record.model_dump_json() + "\n")
+
+    def _drain_llm_token_events(self) -> list[TokenBudgetEvent]:
+        """Collect token telemetry from configured LLM clients."""
+        events: list[TokenBudgetEvent] = []
+        for owner in self._llm_client_owners:
+            events.extend(owner.llm_client.drain_token_events())
+        return events

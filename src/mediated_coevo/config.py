@@ -2,25 +2,34 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from mediated_coevo.conditions import ConditionName
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
 
 class ModelsConfig(BaseModel):
     planner: str = "anthropic/claude-opus-4"
-    executor: str = "gemini-3-flash-preview" # no litellm prefix since it's used in Skillsbench
+    executor: str = "gemini-3-flash-preview"  # Used directly by SkillsBench.
     mediator: str = "openai/gpt-5.4"
 
 
 class BudgetsConfig(BaseModel):
     max_skill_tokens: int = 4000
+    trace_excerpt_tokens: int = 6000
+    historical_summary_tokens: int = 3000
+    mediator_report_tokens: int = 4000
+    planner_context_tokens: int = 24000
+    skill_update_diff_tokens: int = 6000
+    mediator_prompt_tokens: int = 16000
+    advisor_prompt_tokens: int = 12000
+    reflector_prompt_tokens: int = 16000
+    planner_completion_tokens: int = 4096
+    mediator_completion_tokens: int = 2048
+    advisor_completion_tokens: int = 512
+    reflector_completion_tokens: int = 4096
 
 
 class ExperimentConfig(BaseModel):

@@ -27,27 +27,18 @@ from __future__ import annotations
 import difflib
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
+from mediated_coevo.token_budget import count_text_tokens, fit_text_to_tokens
 
 if TYPE_CHECKING:
+    from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.skill import SkillUpdate
     from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
-
-
-class SupportsComplete(Protocol):
-    async def complete(
-        self,
-        messages: list[dict[str, Any]] | str,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        ...
 
 
 # Feedback text shorter than this is kept verbatim — an LLM call would be wasted.
@@ -91,19 +82,34 @@ Respond with ONLY a JSON object — no prose, no markdown fences."""
 async def compact_text_for_context(
     text: str,
     *,
-    llm_client: SupportsComplete | None = None,
+    llm_client: LLMClient | None = None,
     label: str = "context",
+    model: str,
+    budget_tokens: int | None = None,
+    completion_tokens: int = 600,
+    condition_name: str | None = None,
 ) -> str:
     """Compact long prompt context with the existing compactor fallback rules."""
     raw = text.strip()
-    if len(raw) <= RAW_PASSTHROUGH_CHARS:
+    if len(raw) <= RAW_PASSTHROUGH_CHARS and (
+        budget_tokens is None or count_text_tokens(model, raw) <= budget_tokens
+    ):
         return raw
 
     if llm_client is None:
+        if budget_tokens is not None:
+            excerpt = head_tail_text(raw, TARGET_EVIDENCE_CHARS)
+            return fit_text_to_tokens(model, excerpt, budget_tokens)
         return head_tail_text(raw, TARGET_EVIDENCE_CHARS)
 
     try:
         from mediated_coevo.utils import parse_json_object
+
+        prompt_raw = raw
+        prompt_budget = None
+        if budget_tokens is not None:
+            prompt_raw = fit_text_to_tokens(llm_client.model, raw, budget_tokens)
+            prompt_budget = max(1, budget_tokens + 500)
 
         response = await llm_client.complete(
             messages=[
@@ -112,20 +118,26 @@ async def compact_text_for_context(
                     "role": "user",
                     "content": (
                         f"## {label} ({len(raw)} chars)\n\n"
-                        f"{raw}\n\n"
+                        f"{prompt_raw}\n\n"
                         f"Keep evidence to about {TARGET_EVIDENCE_CHARS} "
                         f"characters and headline to about {TARGET_HEADLINE_CHARS}."
                     ),
                 },
             ],
             temperature=0.0,
-            max_tokens=600,
+            max_tokens=completion_tokens,
+            budget_label="compactor.context",
+            prompt_budget=prompt_budget,
+            budget_overflow_strategy="head_tail",
+            condition_name=condition_name,
         )
         parsed = parse_json_object(str(response.get("content", "")))
         headline = str(parsed.get("headline", "")).strip()
         evidence = str(parsed.get("evidence", "")).strip()
         compacted = "\n".join(part for part in [headline, evidence] if part)
         if compacted:
+            if budget_tokens is not None:
+                return fit_text_to_tokens(model, compacted, budget_tokens)
             return compacted
     except Exception as e:
         logger.warning(
@@ -134,6 +146,9 @@ async def compact_text_for_context(
             e,
         )
 
+    if budget_tokens is not None:
+        excerpt = head_tail_text(raw, TARGET_EVIDENCE_CHARS)
+        return fit_text_to_tokens(model, excerpt, budget_tokens)
     return head_tail_text(raw, TARGET_EVIDENCE_CHARS)
 
 

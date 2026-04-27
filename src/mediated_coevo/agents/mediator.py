@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from .base import BaseAgent
 
 if TYPE_CHECKING:
+    from mediated_coevo.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.history_signals import MediatorSignal
     from mediated_coevo.models.report import MediatorReport
@@ -56,6 +57,17 @@ class MediatorAgent(BaseAgent):
         super().__init__("mediator", llm_client)
         self._artifact_store = artifact_store
         self._protocol_skill: str = ""
+        self._budgets: BudgetsConfig | None = None
+        self._condition_name: str | None = None
+
+    def configure_token_budget(
+        self,
+        budgets: BudgetsConfig,
+        *,
+        condition_name: str | None = None,
+    ) -> None:
+        self._budgets = budgets
+        self._condition_name = condition_name
 
     def load_protocol(self, skill_content: str) -> None:
         """Load coordination-protocol.md as the system prompt.
@@ -67,41 +79,87 @@ class MediatorAgent(BaseAgent):
         logger.info("Mediator protocol loaded (%d chars)", len(skill_content))
 
     def construct_messages(self, context: dict[str, Any]) -> list[dict[str, Any]]:
+        from mediated_coevo.token_budget import (
+            BudgetSection,
+            count_message_tokens,
+            fit_text_to_tokens,
+            pack_sections,
+        )
+
+        model = self.llm_client.model
+        protocol_skill = self._protocol_skill
+        if self._budgets:
+            protocol_skill = fit_text_to_tokens(
+                model,
+                protocol_skill,
+                self._budgets.max_skill_tokens,
+            )
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._protocol_skill},
+            {"role": "system", "content": protocol_skill},
         ]
 
         # History as separate system context (if available)
         if history := context.get("history"):
             history_lines = "\n".join(f"- {item}" for item in history[:5])
+            if self._budgets:
+                history_lines = fit_text_to_tokens(
+                    model,
+                    history_lines,
+                    self._budgets.historical_summary_tokens,
+                )
             messages.append({"role": "system", "content": (
                 "# Relevant History\n\n"
                 "Previous mediation reports for this task:\n\n"
                 f"{history_lines}"
             )})
 
-        # User message: trace + task context
-        parts: list[str] = []
+        user_budget = None
+        if self._budgets:
+            system_tokens = count_message_tokens(model, messages)
+            user_budget = max(1, self._budgets.mediator_prompt_tokens - system_tokens)
 
+        sections: list[BudgetSection] = []
         if trace := context.get("trace"):
-            parts.append("## Execution Trace")
+            trace_parts = ["## Execution Trace"]
             if trace.stdout:
-                parts.append(f"### stdout\n{trace.stdout}")
+                trace_parts.append(f"### stdout\n{trace.stdout}")
             if trace.stderr:
-                parts.append(f"### stderr\n{trace.stderr}")
+                trace_parts.append(f"### stderr\n{trace.stderr}")
             if trace.test_results:
-                parts.append(f"### test_results\n{trace.test_results}")
-            parts.append(f"### reward: {trace.reward}")
+                trace_parts.append(f"### test_results\n{trace.test_results}")
+            trace_parts.append(f"### reward: {trace.reward}")
+            sections.append(BudgetSection(
+                "execution_trace",
+                "\n\n".join(trace_parts),
+                max_tokens=self._budgets.trace_excerpt_tokens if self._budgets else None,
+            ))
 
         if task_context := context.get("task_context"):
-            parts.append(f"\n## Task Context\n{task_context.instruction}")
+            sections.append(BudgetSection(
+                "task_context",
+                f"## Task Context\n{task_context.instruction}",
+                required=True,
+            ))
 
-        messages.append({"role": "user", "content": "\n\n".join(parts)})
+        if self._budgets and user_budget:
+            user_content = pack_sections(model, sections, user_budget)
+        else:
+            user_content = "\n\n".join(section.content for section in sections)
+        messages.append({"role": "user", "content": user_content})
         return messages
 
     async def process(self, context: dict[str, Any]) -> dict[str, Any]:
         messages = self.construct_messages(context)
-        response = await self.get_llm_response(messages)
+        kwargs: dict[str, Any] = {}
+        if self._budgets:
+            kwargs = {
+                "max_tokens": self._budgets.mediator_completion_tokens,
+                "prompt_budget": self._budgets.mediator_prompt_tokens,
+                "budget_label": "mediator.process_trace",
+                "budget_overflow_strategy": "section_pack",
+                "condition_name": self._condition_name,
+            }
+        response = await self.get_llm_response(messages, **kwargs)
         self.increment_step()
 
         parsed = self.response_to_dict(response["content"])
@@ -190,6 +248,7 @@ class MediatorAgent(BaseAgent):
             first_sentence,
             head_tail_text,
         )
+        from mediated_coevo.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
         from mediated_coevo.models.history_signals import MediatorSignal
         from mediated_coevo.utils import parse_json_object
 
@@ -198,6 +257,24 @@ class MediatorAgent(BaseAgent):
             return deterministic_mediator_signal(feedback, report)
 
         try:
+            prompt_feedback = feedback
+            prompt_budget = None
+            max_tokens = 600
+            if self._budgets:
+                prompt_budget = self._budgets.mediator_prompt_tokens
+                max_tokens = min(600, self._budgets.mediator_completion_tokens)
+                prompt_feedback = pack_sections(
+                    self.llm_client.model,
+                    [
+                        BudgetSection(
+                            "feedback",
+                            feedback,
+                            required=True,
+                            max_tokens=self._budgets.mediator_report_tokens,
+                        )
+                    ],
+                    max(1, self._budgets.mediator_prompt_tokens - 500),
+                )
             response = await self._llm_client.complete(
                 messages=[
                     {"role": "system", "content": COMPACTOR_SYSTEM_PROMPT},
@@ -205,7 +282,7 @@ class MediatorAgent(BaseAgent):
                         "role": "user",
                         "content": (
                             f"## Mediator report ({raw_length} chars)\n\n"
-                            f"{feedback}\n\n"
+                            f"{prompt_feedback}\n\n"
                             f"Return JSON with `headline` "
                             f"(≤{TARGET_HEADLINE_CHARS} chars) and `evidence` "
                             f"(≤{TARGET_EVIDENCE_CHARS} chars)."
@@ -213,7 +290,11 @@ class MediatorAgent(BaseAgent):
                     },
                 ],
                 temperature=0.0,
-                max_tokens=600,
+                max_tokens=max_tokens,
+                budget_label="mediator.compact_feedback",
+                prompt_budget=prompt_budget,
+                budget_overflow_strategy="head_tail",
+                condition_name=self._condition_name,
             )
             parsed = parse_json_object(response["content"])
             headline = str(parsed.get("headline", "")).strip() or first_sentence(
@@ -232,7 +313,15 @@ class MediatorAgent(BaseAgent):
 
         return MediatorSignal(
             headline=headline[: TARGET_HEADLINE_CHARS * 2],
-            evidence=evidence[: TARGET_EVIDENCE_CHARS * 2],
+            evidence=(
+                fit_text_to_tokens(
+                    self.llm_client.model,
+                    evidence,
+                    self._budgets.mediator_report_tokens,
+                )
+                if self._budgets
+                else evidence[: TARGET_EVIDENCE_CHARS * 2]
+            ),
             abstraction_level=abstraction_level_str(report),
             withheld=report.withheld if report else False,
             mediator_reasoning=report.reasoning if report else "",

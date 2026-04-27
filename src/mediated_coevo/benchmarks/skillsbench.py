@@ -341,15 +341,15 @@ def parse_execution_trace(
             task_id, iteration, run_result.returncode,
         )
         if run_result.returncode != 0:
-            status: TraceStatus = "harbor_failed"
-            error_kind = "harbor_nonzero_no_reward"
+            missing_reward_status: TraceStatus = "harbor_failed"
+            missing_reward_error_kind = "harbor_nonzero_no_reward"
         else:
-            status = "env_failure"
-            error_kind = "no_reward"
+            missing_reward_status = "env_failure"
+            missing_reward_error_kind = "no_reward"
         return ExecutionTrace(
             **full_base,
-            status=status,
-            error_kind=error_kind,
+            status=missing_reward_status,
+            error_kind=missing_reward_error_kind,
             error_detail=exception_info or run_result.stderr.strip() or None,
         )
 
@@ -361,16 +361,13 @@ def parse_execution_trace(
         error_kind = "harbor_exception"
         error_detail = exception_info
 
-    if run_result.returncode != 0:
-        status = "harbor_failed"
-        if error_kind is None:
-            error_kind = "harbor_nonzero"
-            error_detail = (
-                run_result.stderr.strip()
-                or f"harbor returncode={run_result.returncode}"
-            )
-    else:
-        status = "ok"
+    status: TraceStatus = "harbor_failed" if run_result.returncode != 0 else "ok"
+    if run_result.returncode != 0 and error_kind is None:
+        error_kind = "harbor_nonzero"
+        error_detail = (
+            run_result.stderr.strip()
+            or f"harbor returncode={run_result.returncode}"
+        )
 
     # Bump exit_code 0→1 to mark exception_info in legacy consumers.
     exit_code = 1 if run_result.returncode == 0 and exception_info else run_result.returncode

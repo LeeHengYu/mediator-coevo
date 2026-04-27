@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 
 if TYPE_CHECKING:
+    from mediated_coevo.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
     from mediated_coevo.stores.skill_store import SkillStore
@@ -39,10 +40,14 @@ class Reflector:
         history_store: HistoryStore,
         skill_store: SkillStore,
         similarity_threshold: float = _SIMILARITY_THRESHOLD,
+        budgets: BudgetsConfig | None = None,
+        condition_name: str | None = None,
     ) -> None:
         self._history_store = history_store
         self._skill_store = skill_store
         self._similarity_threshold = similarity_threshold
+        self._budgets = budgets
+        self._condition_name = condition_name
 
     async def reflect(
         self,
@@ -64,16 +69,37 @@ class Reflector:
         current_skill = self._skill_store.read_skill(agent_role) or ""
 
         if agent_role == "mediator":
-            messages = self._build_mediator_prompt(current_skill, pairs)
+            messages = self._build_mediator_prompt(
+                current_skill,
+                pairs,
+                model=llm_client.model,
+                budgets=self._budgets,
+            )
         else:
-            messages = self._build_planner_prompt(current_skill, pairs)
+            messages = self._build_planner_prompt(
+                current_skill,
+                pairs,
+                model=llm_client.model,
+                budgets=self._budgets,
+            )
 
         try:
-            response = await llm_client.complete(
-                messages=messages,
-                temperature=0.4,
-                max_tokens=4096,
-            )
+            if self._budgets:
+                response = await llm_client.complete(
+                    messages=messages,
+                    temperature=0.4,
+                    max_tokens=self._budgets.reflector_completion_tokens,
+                    prompt_budget=self._budgets.reflector_prompt_tokens,
+                    budget_label=f"reflector.{agent_role}",
+                    budget_overflow_strategy="section_pack",
+                    condition_name=self._condition_name,
+                )
+            else:
+                response = await llm_client.complete(
+                    messages=messages,
+                    temperature=0.4,
+                    max_tokens=4096,
+                )
             raw_content = response["content"].strip()
 
             if raw_content == _NO_CHANGE_SENTINEL:
@@ -115,6 +141,8 @@ class Reflector:
         instructions: str,
         pairs: list[tuple[HistoryEntry, HistoryEntry]],
         formatter: Callable[[HistoryEntry], str],
+        model: str = "",
+        budgets: BudgetsConfig | None = None,
     ) -> list[dict[str, str]]:
         """Shared builder for contrastive reflection prompts."""
         contrastive_parts: list[str] = []
@@ -127,25 +155,55 @@ class Reflector:
                 f"{formatter(better)}"
             )
 
+        user_content = (
+            f"## {current_skill_heading}\n\n"
+            f"{current_skill}\n\n"
+            "## Contrastive Evidence\n\n"
+            f"{evidence_intro}\n\n"
+            + "\n\n".join(contrastive_parts)
+            + f"\n\n## Instructions\n\n{instructions}"
+        )
+        if budgets:
+            from mediated_coevo.token_budget import BudgetSection, pack_sections
+
+            user_content = pack_sections(
+                model,
+                [
+                    BudgetSection(
+                        current_skill_heading,
+                        f"## {current_skill_heading}\n\n{current_skill}",
+                        required=True,
+                        max_tokens=budgets.max_skill_tokens,
+                    ),
+                    BudgetSection(
+                        "contrastive_evidence",
+                        "## Contrastive Evidence\n\n"
+                        f"{evidence_intro}\n\n"
+                        + "\n\n".join(contrastive_parts),
+                        required=True,
+                        max_tokens=budgets.historical_summary_tokens,
+                    ),
+                    BudgetSection(
+                        "instructions",
+                        f"## Instructions\n\n{instructions}",
+                        required=True,
+                    ),
+                ],
+                budgets.reflector_prompt_tokens,
+            )
+
         return [
             {"role": "system", "content": system_text},
-            {
-                "role": "user",
-                "content": (
-                    f"## {current_skill_heading}\n\n"
-                    f"{current_skill}\n\n"
-                    "## Contrastive Evidence\n\n"
-                    f"{evidence_intro}\n\n"
-                    + "\n\n".join(contrastive_parts)
-                    + f"\n\n## Instructions\n\n{instructions}"
-                ),
-            },
+            {"role": "user", "content": user_content},
         ]
 
     @staticmethod
     def _build_mediator_prompt(
         current_skill: str,
         pairs: list[tuple[HistoryEntry, HistoryEntry]],
+        *,
+        model: str = "",
+        budgets: BudgetsConfig | None = None,
     ) -> list[dict[str, str]]:
         return Reflector._build_contrastive_prompt(
             system_text=(
@@ -179,12 +237,17 @@ class Reflector:
             ),
             pairs=pairs,
             formatter=_format_mediator_entry,
+            model=model,
+            budgets=budgets,
         )
 
     @staticmethod
     def _build_planner_prompt(
         current_skill: str,
         pairs: list[tuple[HistoryEntry, HistoryEntry]],
+        *,
+        model: str = "",
+        budgets: BudgetsConfig | None = None,
     ) -> list[dict[str, str]]:
         return Reflector._build_contrastive_prompt(
             system_text=(
@@ -218,6 +281,8 @@ class Reflector:
             ),
             pairs=pairs,
             formatter=_format_planner_entry,
+            model=model,
+            budgets=budgets,
         )
 
 
@@ -342,4 +407,3 @@ def _find_closing_fence(text: str, start: int) -> int | None:
         pos = line_end + 1
 
     return None
-

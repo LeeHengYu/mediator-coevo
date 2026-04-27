@@ -31,9 +31,14 @@ class _SkillStore:
         return None
 
 
+class _PlannerLLM:
+    model = "test-model"
+
+
 class _Planner:
     def __init__(self) -> None:
         self.prior_contexts: dict[str, str | None] = {}
+        self.llm_client = _PlannerLLM()
 
     def set_skill_context(
         self,
@@ -95,6 +100,8 @@ class _Mediator:
 
 
 class _LLMCompactor:
+    model = "test-model"
+
     def __init__(self, *, content: str, raise_exc: Exception | None = None) -> None:
         self.content = content
         self.raise_exc = raise_exc
@@ -134,6 +141,7 @@ def _orchestrator(
     orch.config.experiment.shared_notes = "shared note"
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
+    orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
     orch._prev_mediator_entry_id_by_task = {}

@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from mediated_coevo.conditions import ConditionName
+from mediated_coevo.token_budget import TokenBudgetEvent
 from .task import TaskSpec
 from .trace import ExecutionTrace
 from .report import MediatorReport
@@ -27,6 +28,7 @@ class IterationRecord(BaseModel):
 
     reward: float | None = None
     total_tokens: int = 0
+    llm_token_events: list[TokenBudgetEvent] = Field(default_factory=list)
     duration_sec: float = 0.0
 
     mediator_history_entry_id: str | None = None

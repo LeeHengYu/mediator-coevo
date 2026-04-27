@@ -25,6 +25,7 @@ from mediated_coevo.config import Config
 from mediated_coevo.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
+from mediated_coevo.token_budget import TokenBudgetEvent
 
 
 def _bare_orchestrator(tmp_path: Path) -> Orchestrator:
@@ -189,6 +190,48 @@ def test_iter_zero_is_a_noop(tmp_path):
     assert orch._prev_mediator_entry_id_by_task["task-A"] == "should-not-touch"
 
 
+class _DrainClient:
+    def __init__(self, label: str) -> None:
+        self.events = [
+            TokenBudgetEvent(
+                label=label,
+                model="test-model",
+                prompt_tokens=1,
+                completion_tokens=2,
+                total_tokens=3,
+            )
+        ]
+
+    def drain_token_events(self) -> list[TokenBudgetEvent]:
+        events = list(self.events)
+        self.events.clear()
+        return events
+
+
+class _LLMOwner:
+    def __init__(self, client: _DrainClient) -> None:
+        self.llm_client = client
+
+
+def test_drain_llm_token_events_uses_configured_owner_contract():
+    clients = [
+        _DrainClient("planner.plan_task"),
+        _DrainClient("mediator.process_trace"),
+        _DrainClient("advisor.review"),
+    ]
+    orch = Orchestrator.__new__(Orchestrator)
+    orch._llm_client_owners = tuple(_LLMOwner(client) for client in clients)
+
+    events = orch._drain_llm_token_events()
+
+    assert [event.label for event in events] == [
+        "planner.plan_task",
+        "mediator.process_trace",
+        "advisor.review",
+    ]
+    assert all(client.events == [] for client in clients)
+
+
 class _NoCallPlanner:
     def __getattr__(self, name):
         raise AssertionError(f"planner should not be called: {name}")
@@ -227,6 +270,7 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
     orch.config = Config()
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
+    orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
     orch._prev_mediator_entry_id_by_task = {}
@@ -253,9 +297,14 @@ class _AnyTaskRepo:
         return _ResolvedTask()
 
 
+class _PlannerLLM:
+    model = "test-model"
+
+
 class _RecordingPlanner:
     def __init__(self) -> None:
         self.prior_contexts: dict[str, str | None] = {}
+        self.llm_client = _PlannerLLM()
 
     def set_skill_context(
         self,
@@ -303,6 +352,7 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
     orch.config = Config()
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
+    orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {
         "task-A": MediatorReport(task_id="task-A", iteration=0, content="task-A report"),

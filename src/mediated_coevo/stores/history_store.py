@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import random
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
 from pathlib import Path
@@ -38,6 +39,14 @@ class HistoryEntry(BaseModel):
     reward: float | None = None  # Filled by tag_outcome_by_id
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+@dataclass(frozen=True)
+class _RewardedEntry:
+    """History entry paired with its non-optional reward."""
+
+    entry: HistoryEntry
+    reward: float
 
 
 class HistoryStore:
@@ -125,33 +134,37 @@ class HistoryStore:
         rng = rng or random.Random()
 
         tagged = [
-            e for e in self._entries
+            _RewardedEntry(entry=e, reward=e.reward)
+            for e in self._entries
             if e.agent_role == agent_role and e.reward is not None
         ]
         if task_id is not None:
-            tagged = [e for e in tagged if e.metadata.get("task_id") == task_id]
+            tagged = [
+                item for item in tagged
+                if item.entry.metadata.get("task_id") == task_id
+            ]
 
-        by_task: dict[str, list[HistoryEntry]] = defaultdict(list)
+        by_task: dict[str, list[_RewardedEntry]] = defaultdict(list)
         dropped_untagged = 0
-        for e in tagged:
-            tid = e.metadata.get("task_id", "")
+        for item in tagged:
+            tid = item.entry.metadata.get("task_id", "")
             if not tid:
                 dropped_untagged += 1
                 continue
-            by_task[tid].append(e)
+            by_task[tid].append(item)
         if dropped_untagged:
             logger.debug(
                 "Dropped %d entries with no task_id from contrastive pairing.",
                 dropped_untagged,
             )
 
-        pool: list[tuple[HistoryEntry, HistoryEntry]] = []
+        pool: list[tuple[_RewardedEntry, _RewardedEntry]] = []
         for entries in by_task.values():
             n = len(entries)
             if n < 2:
                 continue
 
-            sorted_entries = sorted(entries, key=lambda e: e.reward)
+            sorted_entries = sorted(entries, key=lambda item: item.reward)
             k_bot = max(1, ceil(n * bot_frac))
             k_top = max(1, ceil(n * top_frac))
 
@@ -175,4 +188,4 @@ class HistoryStore:
             pool = rng.sample(pool, max_pairs)
 
         pool.sort(key=lambda p: p[1].reward - p[0].reward, reverse=True)
-        return pool
+        return [(worse.entry, better.entry) for worse, better in pool]

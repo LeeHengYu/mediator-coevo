@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from mediated_coevo.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.skill import SkillProposal
 
@@ -36,6 +37,21 @@ class SkillAdvisor:
 
     def __init__(self, llm_client: LLMClient) -> None:
         self._llm = llm_client
+        self._budgets: BudgetsConfig | None = None
+        self._condition_name: str | None = None
+
+    @property
+    def llm_client(self) -> LLMClient:
+        return self._llm
+
+    def configure_token_budget(
+        self,
+        budgets: BudgetsConfig,
+        *,
+        condition_name: str | None = None,
+    ) -> None:
+        self._budgets = budgets
+        self._condition_name = condition_name
 
     async def review(
         self,
@@ -49,16 +65,32 @@ class SkillAdvisor:
             return None
 
         from mediated_coevo.evolution.compactor import _diff_parts
+        from mediated_coevo.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
         from mediated_coevo.utils import parse_json_object
+
+        model = self._llm.model
+        current_skill_text = current_skill or "(empty)"
+        if self._budgets:
+            current_skill_text = fit_text_to_tokens(
+                model,
+                current_skill_text,
+                self._budgets.max_skill_tokens,
+            )
 
         parts = [
             "## Current Executor Skill\n",
-            current_skill or "(empty)",
+            current_skill_text,
             "\n## Buffered Proposals\n",
         ]
         for i, p in enumerate(proposals, 1):
             reward_str = f"{p.reward:.3f}" if p.reward is not None else "n/a"
             added, removed, excerpt = _diff_parts(p.old_content, p.new_content)
+            if self._budgets:
+                excerpt = fit_text_to_tokens(
+                    model,
+                    excerpt,
+                    self._budgets.skill_update_diff_tokens,
+                )
             parts.append(
                 f"### Proposal {i} — iter={p.iteration} task={p.task_id} reward={reward_str}\n"
                 f"**Reasoning**: {p.reasoning}\n"
@@ -66,15 +98,38 @@ class SkillAdvisor:
                 f"```diff\n{excerpt}```\n"
             )
         parts.append('\nRespond with JSON only: {"approve": true/false, "feedback": "..."}')
+        user_content = "\n".join(parts)
+        prompt_budget = None
+        if self._budgets:
+            prompt_budget = self._budgets.advisor_prompt_tokens
+            user_content = pack_sections(
+                model,
+                [
+                    BudgetSection(
+                        "advisor_review",
+                        user_content,
+                        required=True,
+                        max_tokens=prompt_budget,
+                    )
+                ],
+                prompt_budget,
+            )
 
         try:
             resp = await self._llm.complete(
                 messages=[
                     {"role": "system", "content": _SYSTEM},
-                    {"role": "user", "content": "\n".join(parts)},
+                    {"role": "user", "content": user_content},
                 ],
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=(
+                    min(max_tokens, self._budgets.advisor_completion_tokens)
+                    if self._budgets else max_tokens
+                ),
+                budget_label="skill_advisor.review",
+                prompt_budget=prompt_budget,
+                budget_overflow_strategy="section_pack",
+                condition_name=self._condition_name,
             )
             parsed = parse_json_object(resp["content"])
             if parsed.get("approve"):

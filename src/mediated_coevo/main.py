@@ -6,9 +6,9 @@ import asyncio
 import logging
 import random
 import shutil
-from typing import cast, get_args
 from datetime import datetime
 from pathlib import Path
+from typing import cast, get_args
 
 import tomli_w
 import typer
@@ -23,6 +23,7 @@ from mediated_coevo.conditions import ConditionName
 from mediated_coevo.config import load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.llm.client import LLMClient
+from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
@@ -53,6 +54,18 @@ def _setup_logging(verbose: bool = False) -> None:
         format="%(message)s",
         handlers=[RichHandler(console=console, show_time=True, show_path=False)],
     )
+
+
+def _reward_summary(records: list[IterationRecord]) -> tuple[int, int, float]:
+    """Return (scored_count, failure_count, avg_reward) for CLI reporting."""
+    rewards = [
+        reward for record in records
+        if (reward := record.reward) is not None
+    ]
+    scored_count = len(rewards)
+    failure_count = len(records) - scored_count
+    avg_reward = sum(rewards) / scored_count if rewards else 0.0
+    return scored_count, failure_count, avg_reward
 
 
 @app.command()
@@ -120,6 +133,10 @@ def run(
 
     # Initialize agents
     planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
+    planner.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
     executor = ExecutorAgent(
         model=config.models.executor,
         benchmark_repo=benchmark_repo,
@@ -131,12 +148,20 @@ def run(
         llm_client=LLMClient(model=config.models.mediator),
         artifact_store=artifact_store,
     )
+    mediator.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
     protocol = skill_store.read_skill("mediator")
     if protocol:
         mediator.load_protocol(protocol)
 
     # Build orchestrator
     skill_advisor = SkillAdvisor(llm_client=LLMClient(model=config.models.planner))
+    skill_advisor.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
     orchestrator = Orchestrator(
         planner=planner,
         executor=executor,
@@ -155,14 +180,12 @@ def run(
     records = asyncio.run(orchestrator.run_experiment(task_ids, iterations))
 
     # Summary
-    scored = [r for r in records if r.reward is not None]
-    avg_reward = sum(r.reward for r in scored) / len(scored) if scored else 0.0
-    failures = [r for r in records if r.reward is None]
+    scored_count, failure_count, avg_reward = _reward_summary(records)
     total_tokens = sum(r.total_tokens for r in records)
     console.print("\n[bold]Results:[/]")
     console.print(f"  Iterations: {len(records)}")
-    console.print(f"  Scored: {len(scored)}")
-    console.print(f"  Env failures: {len(failures)}")
+    console.print(f"  Scored: {scored_count}")
+    console.print(f"  Env failures: {failure_count}")
     console.print(f"  Avg reward (scored only): {avg_reward:.3f}")
     console.print(f"  Total tokens: {total_tokens:,}")
     console.print(f"  Data: {experiment_dir}")
