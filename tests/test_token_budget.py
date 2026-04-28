@@ -21,13 +21,49 @@ from mediated_coevo.token_budget import (
 )
 
 
-def test_token_count_raises_when_litellm_counter_fails(monkeypatch):
+def test_token_count_falls_back_when_litellm_counter_fails(monkeypatch):
     import litellm
+    import tiktoken
 
-    def _raise(*args, **kwargs):
+    encoding_names = []
+
+    class _Encoding:
+        def encode(self, text):
+            return list(text)
+
+    def _raise_counter(*args, **kwargs):
         raise RuntimeError("counter unavailable")
 
-    monkeypatch.setattr(litellm, "token_counter", _raise)
+    def _get_encoding(name):
+        encoding_names.append(name)
+        return _Encoding()
+
+    monkeypatch.setattr(litellm, "token_counter", _raise_counter)
+    monkeypatch.setattr(tiktoken, "get_encoding", _get_encoding)
+
+    assert count_text_tokens("test-model", "abcd") == 4
+    assert (
+        count_message_tokens(
+            "test-model",
+            [{"role": "user", "content": "abcd"}],
+        )
+        > 0
+    )
+    assert encoding_names == ["o200k_base", "o200k_base"]
+
+
+def test_token_count_raises_when_litellm_and_fallback_fail(monkeypatch):
+    import litellm
+    import tiktoken
+
+    def _raise_counter(*args, **kwargs):
+        raise RuntimeError("counter unavailable")
+
+    def _raise_encoding(name):
+        raise ValueError(name)
+
+    monkeypatch.setattr(litellm, "token_counter", _raise_counter)
+    monkeypatch.setattr(tiktoken, "get_encoding", _raise_encoding)
 
     with pytest.raises(TokenCountingError):
         count_text_tokens("test-model", "abcd")

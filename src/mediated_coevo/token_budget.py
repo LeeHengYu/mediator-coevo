@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -46,7 +47,7 @@ class BudgetSection:
 
 
 def count_text_tokens(model: str, text: str) -> int:
-    """Count text tokens using LiteLLM, raising if exact counting is unavailable."""
+    """Count text tokens using LiteLLM, falling back to a local tokenizer."""
     if not text:
         return 0
     if not model:
@@ -55,14 +56,24 @@ def count_text_tokens(model: str, text: str) -> int:
         import litellm
 
         return int(litellm.token_counter(model=model, text=text))
-    except Exception as e:
+    except Exception as litellm_error:
+        logger.debug(
+            "LiteLLM token counting failed for model=%r text; using tokenizer fallback",
+            model,
+            exc_info=litellm_error,
+        )
+    try:
+        import tiktoken
+
+        return len(tiktoken.get_encoding("o200k_base").encode(text))
+    except Exception as tokenizer_error:
         raise TokenCountingError(
-            f"LiteLLM token counting failed for model={model!r} text"
-        ) from e
+            f"Token counting failed for model={model!r} text"
+        ) from tokenizer_error
 
 
 def count_message_tokens(model: str, messages: list[dict[str, Any]]) -> int:
-    """Count chat message tokens using LiteLLM, raising if unavailable."""
+    """Count chat message tokens using LiteLLM, falling back to a local tokenizer."""
     if not messages:
         return 0
     if not model:
@@ -71,10 +82,48 @@ def count_message_tokens(model: str, messages: list[dict[str, Any]]) -> int:
         import litellm
 
         return int(litellm.token_counter(model=model, messages=messages))
-    except Exception as e:
+    except Exception as litellm_error:
+        logger.debug(
+            "LiteLLM token counting failed for model=%r messages; using tokenizer fallback",
+            model,
+            exc_info=litellm_error,
+        )
+    try:
+        return _count_messages_with_tiktoken(model, messages)
+    except Exception as tokenizer_error:
         raise TokenCountingError(
-            f"LiteLLM token counting failed for model={model!r} messages"
-        ) from e
+            f"Token counting failed for model={model!r} messages"
+        ) from tokenizer_error
+
+
+def _count_messages_with_tiktoken(model: str, messages: list[dict[str, Any]]) -> int:
+    import tiktoken
+    
+    encoding = tiktoken.get_encoding("o200k_base")
+    total = 3
+    for message in messages:
+        total += 4
+        for key, value in message.items():
+            if value is None:
+                continue
+            content = _message_value_to_text(value)
+            if key not in {"role", "content", "name"}:
+                content = f"{key}: {content}"
+            total += len(encoding.encode(content))
+            if key == "name":
+                total += 1
+    return total
+
+
+def _message_value_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def fit_text_to_tokens(
