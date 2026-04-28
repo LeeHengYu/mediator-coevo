@@ -90,6 +90,18 @@ class _Mediator:
             content=f"fresh report for {trace.task_id}",
         )
 
+    async def mediate_trace(
+        self,
+        condition: str,
+        trace: ExecutionTrace,
+        task_context: TaskSpec,
+    ) -> MediatorReport | None:
+        if condition not in {"static_mediator", "learned_mediator"}:
+            return None
+        if not trace.is_usable_feedback_signal:
+            return None
+        return await self.process_trace(trace, task_context)
+
     async def compact_feedback(
         self,
         feedback: str,
@@ -144,8 +156,6 @@ def _orchestrator(
     orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
-    orch._prev_mediator_entry_id_by_task = {}
-    orch._prev_planner_entry_id_by_task = {}
     return orch, planner, mediator
 
 

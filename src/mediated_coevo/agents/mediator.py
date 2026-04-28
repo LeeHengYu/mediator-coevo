@@ -21,6 +21,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from mediated_coevo.conditions import ConditionName, MEDIATOR_CONDITIONS
+
 from .base import BaseAgent
 
 if TYPE_CHECKING:
@@ -173,6 +175,32 @@ class MediatorAgent(BaseAgent):
         }
 
     # ── Convenience wrappers ──
+
+    async def mediate_trace(
+        self,
+        condition: ConditionName,
+        trace: ExecutionTrace,
+        task_context: TaskSpec,
+    ) -> MediatorReport | None:
+        """Run mediation when the experiment condition and trace allow it."""
+        if condition not in MEDIATOR_CONDITIONS:
+            logger.info(
+                "Step 3: Skipped (condition=%s does not use mediator).",
+                condition,
+            )
+            return None
+
+        if not trace.is_usable_feedback_signal:
+            logger.warning(
+                "Step 3: Skipped — trace unusable (status=%s error_kind=%s reward=%s)",
+                trace.status,
+                trace.error_kind,
+                trace.reward,
+            )
+            return None
+
+        logger.info("Step 3: Mediator processing trace...")
+        return await self.process_trace(trace, task_context)
 
     async def process_trace(
         self,

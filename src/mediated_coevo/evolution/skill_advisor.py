@@ -8,6 +8,7 @@ feedback for the Planner if approved, None if rejected.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,6 +31,87 @@ current skill already captures the proposed changes.
 Respond with ONLY a JSON object (no prose, no fences):
   {"approve": true,  "feedback": "<2-4 sentence instruction for the Planner>"}
   {"approve": false, "feedback": ""}"""
+
+
+@dataclass(frozen=True)
+class SkillAdvisorPrompt:
+    """Render the advisor review prompt for a batch of skill proposals."""
+
+    current_skill: str
+    proposals: list[SkillProposal]
+    model: str
+    budgets: BudgetsConfig | None = None
+
+    def render(self) -> tuple[str, int | None]:
+        from mediated_coevo.token_budget import BudgetSection, pack_sections
+
+        user_content = "\n".join([
+            "## Current Executor Skill\n",
+            self._current_skill_text(),
+            "\n## Buffered Proposals\n",
+            *self._proposal_blocks(),
+            '\nRespond with JSON only: {"approve": true/false, "feedback": "..."}',
+        ])
+        if not self.budgets:
+            return user_content, None
+
+        prompt_budget = self.budgets.advisor_prompt_tokens
+        return (
+            pack_sections(
+                self.model,
+                [
+                    BudgetSection(
+                        "advisor_review",
+                        user_content,
+                        required=True,
+                        max_tokens=prompt_budget,
+                    )
+                ],
+                prompt_budget,
+            ),
+            prompt_budget,
+        )
+
+    def _current_skill_text(self) -> str:
+        from mediated_coevo.token_budget import fit_text_to_tokens
+
+        text = self.current_skill or "(empty)"
+        if not self.budgets:
+            return text
+        return fit_text_to_tokens(
+            self.model,
+            text,
+            self.budgets.max_skill_tokens,
+        )
+
+    def _proposal_blocks(self) -> list[str]:
+        return [
+            self._proposal_block(index, proposal)
+            for index, proposal in enumerate(self.proposals, 1)
+        ]
+
+    def _proposal_block(self, index: int, proposal: SkillProposal) -> str:
+        from mediated_coevo.evolution.compactor import _diff_parts
+        from mediated_coevo.token_budget import fit_text_to_tokens
+
+        reward_str = f"{proposal.reward:.3f}" if proposal.reward is not None else "n/a"
+        added, removed, excerpt = _diff_parts(
+            proposal.old_content,
+            proposal.new_content,
+        )
+        if self.budgets:
+            excerpt = fit_text_to_tokens(
+                self.model,
+                excerpt,
+                self.budgets.skill_update_diff_tokens,
+            )
+        return (
+            f"### Proposal {index} — iter={proposal.iteration} "
+            f"task={proposal.task_id} reward={reward_str}\n"
+            f"**Reasoning**: {proposal.reasoning}\n"
+            f"**Diff**: +{added}/-{removed} lines\n"
+            f"```diff\n{excerpt}```\n"
+        )
 
 
 class SkillAdvisor:
@@ -64,56 +146,14 @@ class SkillAdvisor:
         if not proposals:
             return None
 
-        from mediated_coevo.evolution.compactor import _diff_parts
-        from mediated_coevo.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
         from mediated_coevo.utils import parse_json_object
 
-        model = self._llm.model
-        current_skill_text = current_skill or "(empty)"
-        if self._budgets:
-            current_skill_text = fit_text_to_tokens(
-                model,
-                current_skill_text,
-                self._budgets.max_skill_tokens,
-            )
-
-        parts = [
-            "## Current Executor Skill\n",
-            current_skill_text,
-            "\n## Buffered Proposals\n",
-        ]
-        for i, p in enumerate(proposals, 1):
-            reward_str = f"{p.reward:.3f}" if p.reward is not None else "n/a"
-            added, removed, excerpt = _diff_parts(p.old_content, p.new_content)
-            if self._budgets:
-                excerpt = fit_text_to_tokens(
-                    model,
-                    excerpt,
-                    self._budgets.skill_update_diff_tokens,
-                )
-            parts.append(
-                f"### Proposal {i} — iter={p.iteration} task={p.task_id} reward={reward_str}\n"
-                f"**Reasoning**: {p.reasoning}\n"
-                f"**Diff**: +{added}/-{removed} lines\n"
-                f"```diff\n{excerpt}```\n"
-            )
-        parts.append('\nRespond with JSON only: {"approve": true/false, "feedback": "..."}')
-        user_content = "\n".join(parts)
-        prompt_budget = None
-        if self._budgets:
-            prompt_budget = self._budgets.advisor_prompt_tokens
-            user_content = pack_sections(
-                model,
-                [
-                    BudgetSection(
-                        "advisor_review",
-                        user_content,
-                        required=True,
-                        max_tokens=prompt_budget,
-                    )
-                ],
-                prompt_budget,
-            )
+        user_content, prompt_budget = SkillAdvisorPrompt(
+            current_skill=current_skill,
+            proposals=proposals,
+            model=self._llm.model,
+            budgets=self._budgets,
+        ).render()
 
         try:
             resp = await self._llm.complete(

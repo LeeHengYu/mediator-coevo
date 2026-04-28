@@ -1,13 +1,13 @@
-"""Regression tests for Orchestrator._tag_previous_iteration.
+"""Regression tests for pending outcome tagging.
 
 P0 #4 wants iteration-N's reward to land on iteration-N's planner/mediator
 HistoryEntry — not on a stale entry that's been carried over an env_failure.
 
 Sequence under test: [ok, env_failure, ok] for one task.
 
-Without the always-pop semantics, iter 0's entry would still be in the
-carry-forward dict at iter 2 and get tagged with iter 2's reward — exactly
-the cross-attribution P0 #4 was meant to prevent.
+Without the always-pop semantics, iter 0's entry would still be pending
+at iter 2 and get tagged with iter 2's reward — exactly the
+cross-attribution P0 #4 was meant to prevent.
 """
 
 from __future__ import annotations
@@ -17,14 +17,16 @@ from pathlib import Path
 import pytest
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
+from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillProposal
+from mediated_coevo.models.skill import SkillProposal, SkillUpdate
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.config import Config
 from mediated_coevo.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
+from mediated_coevo.stores.skill_store import SkillStore
 from mediated_coevo.token_budget import TokenBudgetEvent
 
 
@@ -34,8 +36,6 @@ def _bare_orchestrator(tmp_path: Path) -> Orchestrator:
     that aren't relevant to the tagging contract."""
     orch = Orchestrator.__new__(Orchestrator)
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
-    orch._prev_mediator_entry_id_by_task = {}
-    orch._prev_planner_entry_id_by_task = {}
     orch._proposal_buffer = []
     return orch
 
@@ -66,12 +66,12 @@ def test_env_failure_drops_stale_entry_id_so_later_iter_does_not_mistag(tmp_path
         payload=MediatorSignal(headline="iter0"),
         metadata={"task_id": task},
     ))
-    orch._prev_mediator_entry_id_by_task[task] = e0
+    orch.history_store.remember_pending_outcome(task, mediator_entry_id=e0)
 
     # iter 1: env_failure. The carry-forward must be dropped, NOT preserved.
-    orch._tag_previous_iteration(1, task, _env_failure_trace(task, 1))
+    orch.history_store.tag_pending_outcome(task, _env_failure_trace(task, 1))
 
-    assert task not in orch._prev_mediator_entry_id_by_task, (
+    assert task not in orch.history_store._pending_mediator_entry_id_by_task, (
         "stale entry id leaked across env_failure"
     )
     # iter 0's entry was never tagged — that is correct: we never observed
@@ -86,8 +86,8 @@ def test_env_failure_drops_stale_entry_id_so_later_iter_does_not_mistag(tmp_path
         payload=MediatorSignal(headline="iter2"),
         metadata={"task_id": task},
     ))
-    orch._prev_mediator_entry_id_by_task[task] = e2
-    orch._tag_previous_iteration(3, task, _ok_trace(task, 3, reward=0.9))
+    orch.history_store.remember_pending_outcome(task, mediator_entry_id=e2)
+    orch.history_store.tag_pending_outcome(task, _ok_trace(task, 3, reward=0.9))
 
     e0_after = next(e for e in orch.history_store._entries if e.entry_id == e0)
     e2_after = next(e for e in orch.history_store._entries if e.entry_id == e2)
@@ -106,13 +106,13 @@ def test_ok_trace_after_ok_tags_correctly(tmp_path):
         payload=PlannerSignal(reasoning="first"),
         metadata={"task_id": task},
     ))
-    orch._prev_planner_entry_id_by_task[task] = e0
+    orch.history_store.remember_pending_outcome(task, planner_entry_id=e0)
 
-    orch._tag_previous_iteration(1, task, _ok_trace(task, 1, reward=0.4))
+    orch.history_store.tag_pending_outcome(task, _ok_trace(task, 1, reward=0.4))
 
     e0_after = next(e for e in orch.history_store._entries if e.entry_id == e0)
     assert e0_after.reward == pytest.approx(0.4)
-    assert task not in orch._prev_planner_entry_id_by_task
+    assert task not in orch.history_store._pending_planner_entry_id_by_task
 
 
 def test_two_tasks_same_iteration_tagged_independently(tmp_path):
@@ -141,14 +141,26 @@ def test_two_tasks_same_iteration_tagged_independently(tmp_path):
         payload=PlannerSignal(reasoning="B iter0"),
         metadata={"task_id": "task-B"},
     ))
-    orch._prev_mediator_entry_id_by_task["task-A"] = a_mid
-    orch._prev_planner_entry_id_by_task["task-A"] = a_pid
-    orch._prev_mediator_entry_id_by_task["task-B"] = b_mid
-    orch._prev_planner_entry_id_by_task["task-B"] = b_pid
+    orch.history_store.remember_pending_outcome(
+        "task-A",
+        mediator_entry_id=a_mid,
+        planner_entry_id=a_pid,
+    )
+    orch.history_store.remember_pending_outcome(
+        "task-B",
+        mediator_entry_id=b_mid,
+        planner_entry_id=b_pid,
+    )
 
     # Iter 1: both tasks run with distinct rewards.
-    orch._tag_previous_iteration(1, "task-A", _ok_trace("task-A", 1, reward=0.2))
-    orch._tag_previous_iteration(1, "task-B", _ok_trace("task-B", 1, reward=0.9))
+    orch.history_store.tag_pending_outcome(
+        "task-A",
+        _ok_trace("task-A", 1, reward=0.2),
+    )
+    orch.history_store.tag_pending_outcome(
+        "task-B",
+        _ok_trace("task-B", 1, reward=0.9),
+    )
 
     by_id = {e.entry_id: e for e in orch.history_store._entries}
     assert by_id[a_mid].reward == pytest.approx(0.2)
@@ -157,10 +169,10 @@ def test_two_tasks_same_iteration_tagged_independently(tmp_path):
     assert by_id[b_pid].reward == pytest.approx(0.9)
 
     # Carry-forward dicts cleared for both tasks.
-    assert "task-A" not in orch._prev_mediator_entry_id_by_task
-    assert "task-A" not in orch._prev_planner_entry_id_by_task
-    assert "task-B" not in orch._prev_mediator_entry_id_by_task
-    assert "task-B" not in orch._prev_planner_entry_id_by_task
+    assert "task-A" not in orch.history_store._pending_mediator_entry_id_by_task
+    assert "task-A" not in orch.history_store._pending_planner_entry_id_by_task
+    assert "task-B" not in orch.history_store._pending_mediator_entry_id_by_task
+    assert "task-B" not in orch.history_store._pending_planner_entry_id_by_task
 
 
 def test_proposal_buffer_backfill_only_on_ok_trace(tmp_path):
@@ -171,23 +183,40 @@ def test_proposal_buffer_backfill_only_on_ok_trace(tmp_path):
     ]
 
     # env_failure at iter 1 must NOT backfill iter 0's proposal reward.
-    orch._tag_previous_iteration(1, task, _env_failure_trace(task, 1))
+    orch.history_store.tag_pending_outcome(
+        task,
+        _env_failure_trace(task, 1),
+        proposals=orch._proposal_buffer,
+    )
     assert orch._proposal_buffer[0].reward is None
 
     # Subsequent ok at iter 2 also must NOT retroactively reach iter 0
     # (the iteration==iteration-1 guard prevents stale backfill).
-    orch._tag_previous_iteration(2, task, _ok_trace(task, 2, reward=0.7))
+    orch.history_store.tag_pending_outcome(
+        task,
+        _ok_trace(task, 2, reward=0.7),
+        proposals=orch._proposal_buffer,
+    )
     assert orch._proposal_buffer[0].reward is None
 
 
 def test_iter_zero_is_a_noop(tmp_path):
     orch = _bare_orchestrator(tmp_path)
-    orch._prev_mediator_entry_id_by_task["task-A"] = "should-not-touch"
+    orch.history_store.remember_pending_outcome(
+        "task-A",
+        mediator_entry_id="should-not-touch",
+    )
 
-    orch._tag_previous_iteration(0, "task-A", _ok_trace("task-A", 0, reward=1.0))
+    orch.history_store.tag_pending_outcome(
+        "task-A",
+        _ok_trace("task-A", 0, reward=1.0),
+    )
 
     # Pre-iteration-1 should never pop or tag.
-    assert orch._prev_mediator_entry_id_by_task["task-A"] == "should-not-touch"
+    assert (
+        orch.history_store._pending_mediator_entry_id_by_task["task-A"]
+        == "should-not-touch"
+    )
 
 
 class _DrainClient:
@@ -232,6 +261,30 @@ def test_drain_llm_token_events_uses_configured_owner_contract():
     assert all(client.events == [] for client in clients)
 
 
+def test_attach_skill_identity_populates_record_and_skill_update():
+    update = SkillUpdate(
+        skill_id="executor",
+        old_content="old",
+        new_content="new",
+    )
+    record = IterationRecord(
+        iteration=3,
+        task_id="task-A",
+        skill_update=update,
+    )
+
+    Orchestrator._attach_skill_identity(
+        record,
+        {"executor": "hash-a", "planner": "hash-b"},
+        "iter_0003",
+    )
+
+    assert record.skill_hashes == {"executor": "hash-a", "planner": "hash-b"}
+    assert record.skill_version == "iter_0003"
+    assert record.skill_update is not None
+    assert record.skill_update.skill_version == "iter_0003"
+
+
 class _NoCallPlanner:
     def __getattr__(self, name):
         raise AssertionError(f"planner should not be called: {name}")
@@ -240,6 +293,16 @@ class _NoCallPlanner:
 class _NoCallMediator:
     def __getattr__(self, name):
         raise AssertionError(f"mediator should not be called: {name}")
+
+
+class _SkippingMediator:
+    async def mediate_trace(
+        self,
+        condition: str,
+        trace: ExecutionTrace,
+        task_context: TaskSpec,
+    ) -> MediatorReport | None:
+        return None
 
 
 class _NoCallExecutor:
@@ -273,8 +336,6 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
     orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
-    orch._prev_mediator_entry_id_by_task = {}
-    orch._prev_planner_entry_id_by_task = {}
 
     record = await orch._run_iteration("missing-task", 1)
 
@@ -344,7 +405,7 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
     orch = Orchestrator.__new__(Orchestrator)
     orch.planner = planner
     orch.executor = _EnvFailureExecutor()
-    orch.mediator = _NoCallMediator()
+    orch.mediator = _SkippingMediator()
     orch.skill_store = _EmptySkillStore()
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
@@ -357,8 +418,6 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
     orch._previous_report_by_task = {
         "task-A": MediatorReport(task_id="task-A", iteration=0, content="task-A report"),
     }
-    orch._prev_mediator_entry_id_by_task = {}
-    orch._prev_planner_entry_id_by_task = {}
 
     await orch._run_iteration("task-B", 1)
     await orch._run_iteration("task-A", 1)
@@ -424,10 +483,12 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
         SkillProposal(iteration=0, task_id="task-A", old_content="", new_content="a"),
     ]
 
-    update = await orch._advise_and_patch()
+    update = await orch._review_proposals_and_patch_skill()
 
     assert update is not None
     assert update.task_id == "task-A,task-B"
+    assert update.old_skill_hash == SkillStore.content_hash("old")
+    assert update.new_skill_hash == SkillStore.content_hash("new")
     assert len(orch.skill_advisor.seen) == 2
     assert orch._proposal_buffer == []
     assert orch.skill_store.writes == [("executor", "new")]

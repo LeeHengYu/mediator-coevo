@@ -19,12 +19,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from mediated_coevo.models.history_signals import HistorySignal
+
+if TYPE_CHECKING:
+    from mediated_coevo.models.skill import SkillProposal
+    from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +62,8 @@ class HistoryStore:
         self._history_dir = history_dir
         self._history_dir.mkdir(parents=True, exist_ok=True)
         self._entries: list[HistoryEntry] = []
+        self._pending_mediator_entry_id_by_task: dict[str, str] = {}
+        self._pending_planner_entry_id_by_task: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -82,6 +88,70 @@ class HistoryStore:
         self._entries.append(entry)
         self._save()
         return entry.entry_id
+
+    def record_signal(
+        self,
+        *,
+        iteration: int,
+        agent_role: str,
+        task_id: str,
+        condition: str,
+        payload: HistorySignal,
+    ) -> str:
+        """Persist one role signal with standard experiment metadata."""
+        return self.add(HistoryEntry(
+            iteration=iteration,
+            agent_role=agent_role,
+            payload=payload,
+            metadata={"task_id": task_id, "condition": condition},
+        ))
+
+    def remember_pending_outcome(
+        self,
+        task_id: str,
+        *,
+        mediator_entry_id: str | None = None,
+        planner_entry_id: str | None = None,
+    ) -> None:
+        """Remember entries that should be tagged by the next clean reward."""
+        if mediator_entry_id:
+            self._pending_mediator_entry_id_by_task[task_id] = mediator_entry_id
+        if planner_entry_id:
+            self._pending_planner_entry_id_by_task[task_id] = planner_entry_id
+
+    def tag_pending_outcome(
+        self,
+        task_id: str,
+        trace: "ExecutionTrace",
+        *,
+        proposals: list["SkillProposal"] | None = None,
+    ) -> None:
+        """Tag pending role entries with this trace's reward, when usable."""
+        if trace.iteration <= 0:
+            return
+
+        mediator_entry_id = self._pending_mediator_entry_id_by_task.pop(task_id, None)
+        planner_entry_id = self._pending_planner_entry_id_by_task.pop(task_id, None)
+
+        reward = trace.reward
+        if not trace.is_usable_feedback_signal or reward is None:
+            if mediator_entry_id or planner_entry_id:
+                logger.info(
+                    "Dropping carry-forward entry IDs untagged for task=%s "
+                    "(trace status=%s reward=%s)",
+                    task_id,
+                    trace.status,
+                    trace.reward,
+                )
+            return
+
+        if mediator_entry_id:
+            self.tag_outcome_by_id(mediator_entry_id, reward=reward)
+        if planner_entry_id:
+            self.tag_outcome_by_id(planner_entry_id, reward=reward)
+        for proposal in proposals or []:
+            if proposal.iteration == trace.iteration - 1 and proposal.task_id == task_id:
+                proposal.reward = reward
 
     def tag_outcome_by_id(self, entry_id: str, reward: float) -> None:
         """Tag a specific entry by its stable ID."""

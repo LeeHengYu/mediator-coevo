@@ -38,3 +38,15 @@ class MediatorReport(BaseModel):
     withheld: bool = False    # True if mediator decided to expose nothing
     reasoning: str = ""       # Mediator's internal reasoning (for analysis)
     outcome_tag: OutcomeTag | None = None
+
+    @property
+    def is_exposed(self) -> bool:
+        """True when this report was shown to the Planner."""
+        return not self.withheld
+
+    @property
+    def exposed_content(self) -> str | None:
+        """Planner-visible feedback content, or None when withheld."""
+        if self.withheld:
+            return None
+        return self.content

@@ -289,6 +289,8 @@ def test_iteration_record_serializes_llm_token_events_and_total_tokens():
         total_tokens=21,
         llm_token_events=[event],
         condition_name="learned_mediator",
+        skill_hashes={"executor": "abc123"},
+        skill_version="iter_0000",
     )
     dumped = record.model_dump()
 
@@ -296,3 +298,5 @@ def test_iteration_record_serializes_llm_token_events_and_total_tokens():
     assert dumped["condition_name"] == "learned_mediator"
     assert dumped["llm_token_events"][0]["prompt_tokens"] == 11
     assert dumped["llm_token_events"][0]["budget_limit"] == 100
+    assert dumped["skill_hashes"] == {"executor": "abc123"}
+    assert dumped["skill_version"] == "iter_0000"

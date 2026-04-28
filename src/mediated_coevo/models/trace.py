@@ -47,3 +47,8 @@ class ExecutionTrace(BaseModel):
     error_detail: Any = None
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     duration_sec: float = 0.0
+
+    @property
+    def is_usable_feedback_signal(self) -> bool:
+        """True when the trace can safely feed mediation and skill updates."""
+        return self.status == "ok" and self.reward is not None

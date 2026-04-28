@@ -19,6 +19,9 @@ class SkillUpdate(SkillEdit):
     skill_id: str
     task_id: str = ""
     iteration: int = 0
+    old_skill_hash: str | None = None
+    new_skill_hash: str | None = None
+    skill_version: str | None = None
 
 
 class SkillProposal(SkillEdit):
