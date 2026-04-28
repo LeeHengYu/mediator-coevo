@@ -99,7 +99,7 @@ Every coevo_interval iterations (default 5):
 
 ## Progress
 
-P0 1-5, Week 1 scope
+P0 1-7, Week 1 scope + a bit of Week 2
 
 ## Further Direction
 
