@@ -165,6 +165,7 @@ class PlannerAgent(BaseAgent):
         base_instruction: str,
         prior_context: str | None,
         current_skills: list[str],
+        iteration: int,
     ) -> TaskSpec:
         from mediated_coevo.models.task import TaskSpec
 
@@ -184,10 +185,10 @@ class PlannerAgent(BaseAgent):
             instruction=parsed.get("instruction", base_instruction),
             skills_context=current_skills,
             planner_reasoning=parsed.get("reasoning"),
-            iteration=self.step,
+            iteration=iteration,
         )
 
-    async def propose_skill_update(
+    async def register_skill_update(
         self,
         current_skill_content: str,
         feedback: str | None,

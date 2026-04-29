@@ -1,3 +1,3 @@
-from .client import CompletionResult, LLMClient, LLMClientOwner
+from .client import CompletionResult, LLMClient
 
-__all__ = ["CompletionResult", "LLMClient", "LLMClientOwner"]
+__all__ = ["CompletionResult", "LLMClient"]

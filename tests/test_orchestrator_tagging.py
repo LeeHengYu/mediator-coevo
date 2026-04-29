@@ -237,19 +237,21 @@ class _DrainClient:
         return events
 
 
-class _LLMOwner:
+class _LLMBackedComponent:
     def __init__(self, client: _DrainClient) -> None:
         self.llm_client = client
 
 
-def test_drain_llm_token_events_uses_configured_owner_contract():
+def test_drain_llm_token_events_uses_llm_backed_components():
     clients = [
         _DrainClient("planner.plan_task"),
         _DrainClient("mediator.process_trace"),
         _DrainClient("advisor.review"),
     ]
     orch = Orchestrator.__new__(Orchestrator)
-    orch._llm_client_owners = tuple(_LLMOwner(client) for client in clients)
+    orch.planner = _LLMBackedComponent(clients[0])
+    orch.mediator = _LLMBackedComponent(clients[1])
+    orch.skill_advisor = _LLMBackedComponent(clients[2])
 
     events = orch._drain_llm_token_events()
 
@@ -285,12 +287,58 @@ def test_attach_skill_identity_populates_record_and_skill_update():
     assert record.skill_update.skill_version == "iter_0003"
 
 
+def test_attach_skill_identity_preserves_existing_skill_hashes():
+    record = IterationRecord(
+        iteration=3,
+        task_id="task-A",
+        skill_hashes={"executor": "start-hash"},
+    )
+
+    Orchestrator._attach_skill_identity(
+        record,
+        {"executor": "end-hash", "planner": "planner-hash"},
+        "iter_0003",
+    )
+
+    assert record.skill_hashes == {"executor": "start-hash"}
+    assert record.skill_version == "iter_0003"
+
+
+def test_build_coevolution_record_captures_reflector_token_events():
+    event = TokenBudgetEvent(
+        label="reflector.planner",
+        model="test-model",
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+    )
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = Config()
+    orch.skill_store = _EmptySkillStore()
+
+    record = orch._build_coevolution_record(
+        iteration=4,
+        condition="learned_mediator",
+        start=0.0,
+        llm_token_events=[event],
+    )
+
+    assert record.task_id == "__coevolution__"
+    assert record.iteration == 4
+    assert record.total_tokens == 15
+    assert record.llm_token_events == [event]
+
+
 class _NoCallPlanner:
+    llm_client = _DrainClient("unused")
+
     def __getattr__(self, name):
         raise AssertionError(f"planner should not be called: {name}")
 
 
 class _NoCallMediator:
+    llm_client = _DrainClient("unused")
+
     def __getattr__(self, name):
         raise AssertionError(f"mediator should not be called: {name}")
 
@@ -333,7 +381,6 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
     orch.config = Config()
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
-    orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
 
@@ -380,9 +427,10 @@ class _RecordingPlanner:
         base_instruction: str,
         prior_context: str | None = None,
         current_skills: list[str] | None = None,
+        iteration: int = 0,
     ) -> TaskSpec:
         self.prior_contexts[task_id] = prior_context
-        return TaskSpec(task_id=task_id, instruction=base_instruction)
+        return TaskSpec(task_id=task_id, instruction=base_instruction, iteration=iteration)
 
 
 class _EnvFailureExecutor:
@@ -413,7 +461,6 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
     orch.config = Config()
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
-    orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {
         "task-A": MediatorReport(task_id="task-A", iteration=0, content="task-A report"),
@@ -452,7 +499,7 @@ class _ApprovingAdvisor:
 class _PatchPlanner:
     step = 7
 
-    async def propose_skill_update(
+    async def register_skill_update(
         self,
         current_skill_content: str,
         feedback: str | None,
@@ -483,10 +530,12 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
         SkillProposal(iteration=0, task_id="task-A", old_content="", new_content="a"),
     ]
 
-    update = await orch._review_proposals_and_patch_skill()
+    update = await orch._review_proposals_and_patch_skill(iteration=3)
 
     assert update is not None
     assert update.task_id == "task-A,task-B"
+    assert update.iteration == 3
+    assert update.reasoning == "approved"
     assert update.old_skill_hash == SkillStore.content_hash("old")
     assert update.new_skill_hash == SkillStore.content_hash("new")
     assert len(orch.skill_advisor.seen) == 2

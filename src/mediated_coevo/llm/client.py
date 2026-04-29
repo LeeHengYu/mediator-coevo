@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Protocol, TypedDict
+from typing import Any, TypedDict
 
 import litellm
 from litellm.types.utils import ModelResponse
@@ -225,15 +225,6 @@ class LLMClient:
         events = list(self._token_events)
         self._token_events.clear()
         return events
-
-
-class LLMClientOwner(Protocol):
-    """Object that exposes an underlying LLM client."""
-
-    @property
-    def llm_client(self) -> LLMClient:
-        """Underlying client used for LLM calls and telemetry."""
-        ...
 
 
 def _required_usage_int(response: ModelResponse, field: str) -> int:

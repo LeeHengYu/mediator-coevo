@@ -23,7 +23,6 @@ from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository
 from mediated_coevo.conditions import ConditionName
 from mediated_coevo.config import Config, load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
-from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
@@ -125,6 +124,8 @@ class ExperimentFactory:
 
     @staticmethod
     def _build_planner(config: Config) -> PlannerAgent:
+        from mediated_coevo.llm.client import LLMClient
+
         planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
         planner.configure_token_budget(
             config.budgets,
@@ -138,6 +139,8 @@ class ExperimentFactory:
         artifact_store: ArtifactStore,
         skill_store: SkillStore,
     ) -> MediatorAgent:
+        from mediated_coevo.llm.client import LLMClient
+
         mediator = MediatorAgent(
             llm_client=LLMClient(model=config.models.mediator),
             artifact_store=artifact_store,
@@ -153,6 +156,8 @@ class ExperimentFactory:
 
     @staticmethod
     def _build_skill_advisor(config: Config) -> SkillAdvisor:
+        from mediated_coevo.llm.client import LLMClient
+
         skill_advisor = SkillAdvisor(
             llm_client=LLMClient(model=config.models.planner)
         )

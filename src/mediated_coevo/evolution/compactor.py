@@ -153,9 +153,9 @@ async def compact_text_for_context(
 
 
 def deterministic_mediator_signal(
-    feedback: str,
-    report: "MediatorReport | None" = None,
+    report: "MediatorReport",
 ) -> MediatorSignal:
+    feedback = report.exposed_content or ""
     raw_length = len(feedback)
     evidence = (
         feedback
@@ -166,8 +166,8 @@ def deterministic_mediator_signal(
         headline=first_sentence(feedback, TARGET_HEADLINE_CHARS),
         evidence=evidence,
         abstraction_level=abstraction_level_str(report),
-        withheld=report.withheld if report else False,
-        mediator_reasoning=report.reasoning if report else "",
+        withheld=report.withheld,
+        mediator_reasoning=report.reasoning,
         raw_length=raw_length,
     )
 
@@ -219,10 +219,8 @@ def head_tail_text(text: str, budget: int) -> str:
     return f"{text[:half].rstrip()}\n…\n{text[-half:].lstrip()}"
 
 
-def abstraction_level_str(report: "MediatorReport | None") -> str:
-    """Return the report's abstraction_level as a string, or ''."""
-    if report is None:
-        return ""
+def abstraction_level_str(report: "MediatorReport") -> str:
+    """Return the report's abstraction_level as a string."""
     return report.abstraction_level.value
 
 

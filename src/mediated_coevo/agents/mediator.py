@@ -100,7 +100,7 @@ class MediatorAgent(BaseAgent):
             {"role": "system", "content": protocol_skill},
         ]
 
-        # History as separate system context (if available)
+        # Prior trace summaries as separate system context (if available)
         if history := context.get("history"):
             history_lines = "\n".join(f"- {item}" for item in history[:5])
             if self._budgets:
@@ -111,7 +111,7 @@ class MediatorAgent(BaseAgent):
                 )
             messages.append({"role": "system", "content": (
                 "# Relevant History\n\n"
-                "Previous mediation reports for this task:\n\n"
+                "Previous execution trace summaries for this task:\n\n"
                 f"{history_lines}"
             )})
 
@@ -248,10 +248,9 @@ class MediatorAgent(BaseAgent):
 
     async def compact_feedback(
         self,
-        feedback: str,
-        report: MediatorReport | None = None,
+        report: MediatorReport,
     ) -> "MediatorSignal":
-        """Compact a feedback event into a structured ``MediatorSignal``.
+        """Compact a mediator report into a structured ``MediatorSignal``.
 
         Short feedback (``<= RAW_PASSTHROUGH_CHARS``) passes through the
         deterministic path with no LLM call. Long feedback triggers one
@@ -280,9 +279,10 @@ class MediatorAgent(BaseAgent):
         from mediated_coevo.models.history_signals import MediatorSignal
         from mediated_coevo.utils import parse_json_object
 
+        feedback = report.exposed_content or ""
         raw_length = len(feedback)
         if raw_length <= RAW_PASSTHROUGH_CHARS:
-            return deterministic_mediator_signal(feedback, report)
+            return deterministic_mediator_signal(report)
 
         try:
             prompt_feedback = feedback
@@ -337,7 +337,7 @@ class MediatorAgent(BaseAgent):
                 self.name,
                 e,
             )
-            return deterministic_mediator_signal(feedback, report)
+            return deterministic_mediator_signal(report)
 
         return MediatorSignal(
             headline=headline[: TARGET_HEADLINE_CHARS * 2],
@@ -351,7 +351,7 @@ class MediatorAgent(BaseAgent):
                 else evidence[: TARGET_EVIDENCE_CHARS * 2]
             ),
             abstraction_level=abstraction_level_str(report),
-            withheld=report.withheld if report else False,
-            mediator_reasoning=report.reasoning if report else "",
+            withheld=report.withheld,
+            mediator_reasoning=report.reasoning,
             raw_length=raw_length,
         )

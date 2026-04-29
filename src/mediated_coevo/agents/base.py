@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mediated_coevo.llm.client import CompletionResult, LLMClient
+if TYPE_CHECKING:
+    from mediated_coevo.llm.client import CompletionResult, LLMClient
 
 logger = logging.getLogger(__name__)
 

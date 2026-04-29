@@ -23,7 +23,6 @@ from mediated_coevo.conditions import (
 from mediated_coevo.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
-from mediated_coevo.llm.client import LLMClientOwner
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import SkillProposal, SkillUpdate
@@ -63,11 +62,6 @@ class Orchestrator:
         self.config = config
         self.experiment_dir = experiment_dir
         self.skill_advisor = skill_advisor
-        self._llm_client_owners: tuple[LLMClientOwner, ...] = (
-            planner,
-            mediator,
-            skill_advisor,
-        )
         self._proposal_buffer: list[SkillProposal] = []
 
         self._snapshots_dir = experiment_dir / "skills_snapshots"
@@ -82,7 +76,8 @@ class Orchestrator:
         num_iterations: int | None = None,
     ) -> list[IterationRecord]:
         """Run the full experiment loop."""
-        num_iterations = num_iterations or self.config.experiment.num_iterations
+        if num_iterations is None:
+            num_iterations = self.config.experiment.num_iterations
         records: list[IterationRecord] = []
 
         for iteration in range(num_iterations):
@@ -97,16 +92,18 @@ class Orchestrator:
                 iteration_records.append(record)
 
             # Co-evolution checkpoint
+            coevolution_record: IterationRecord | None = None
             if (iteration + 1) % self.config.experiment.coevo_interval == 0:
-                await self._coevolve(iteration, self.config.experiment.condition_name)
+                coevolution_record = await self._coevolve(
+                    iteration,
+                    self.config.experiment.condition_name,
+                )
 
-            # Snapshot skills and write metric rows against that exact version.
-            skill_version = self._skill_version(iteration)
-            self.skill_store.snapshot(iteration, self._snapshots_dir)
-            skill_hashes = self._current_skill_hashes()
-            for record in iteration_records:
-                self._attach_skill_identity(record, skill_hashes, skill_version)
-                self._write_metric(record)
+            self._snapshot_and_write_metrics(
+                iteration,
+                iteration_records,
+                coevolution_record=coevolution_record,
+            )
 
         logger.info("Experiment complete: %d iterations, %d records", num_iterations, len(records))
         return records
@@ -118,6 +115,7 @@ class Orchestrator:
     ) -> IterationRecord:
         start = time.time()
         condition = self.config.experiment.condition_name
+        skill_hashes = self._current_skill_hashes()
         executor_skill_text = self.skill_store.read_skill("executor") or ""
         planner_skill_text = self.skill_store.read_skill("planner") or None
 
@@ -130,6 +128,7 @@ class Orchestrator:
                 condition=condition,
                 start=start,
                 exc=e,
+                skill_hashes=skill_hashes,
             )
 
         self.planner.set_skill_context(
@@ -145,20 +144,24 @@ class Orchestrator:
             base_instruction=benchmark_task.instruction,
             prior_context=prior_context,
             current_skills=skill_texts,
+            iteration=iteration,
         )
 
         logger.info("Step 2: Executor running task...")
         trace = await self.executor.execute_task(task_spec, skill_texts)
-        self.artifact_store.store_trace(trace)
 
-        report = await self.mediator.mediate_trace(condition, trace, task_spec)
-        if report:
-            self.artifact_store.store_report(report)
+        report = None
+        try:
+            report = await self.mediator.mediate_trace(condition, trace, task_spec)
+            if report:
+                self.artifact_store.store_report(report)
+        finally:
+            self.artifact_store.store_trace(trace)
 
         await self._ask_planner_for_skill_proposal(
             task_id=task_id,
             iteration=iteration,
-            executor_skill_text=executor_skill_text,
+            executor_skill=executor_skill_text,
             feedback=report.exposed_content if report else None,
         )
 
@@ -169,26 +172,14 @@ class Orchestrator:
             proposals=self._proposal_buffer,
         )
 
-        skill_update = await self._review_proposals_and_patch_skill()
-        mediator_entry_id = await self._record_mediator_history(
+        skill_update = await self._review_proposals_and_patch_skill(iteration=iteration)
+        mediator_entry_id, planner_entry_id = await self._record_history_and_remember_outcome(
             task_id=task_id,
             iteration=iteration,
             condition=condition,
             report=report,
-        )
-        planner_entry_id = self._record_planner_history(
-            task_id=task_id,
-            iteration=iteration,
-            condition=condition,
             skill_update=skill_update,
         )
-        self.history_store.remember_pending_outcome(
-            task_id,
-            mediator_entry_id=mediator_entry_id,
-            planner_entry_id=planner_entry_id,
-        )
-        if report and report.is_exposed:
-            self._previous_report_by_task[task_id] = report
 
         return self._build_iteration_record(
             task_id=task_id,
@@ -201,6 +192,7 @@ class Orchestrator:
             skill_update=skill_update,
             mediator_entry_id=mediator_entry_id,
             planner_entry_id=planner_entry_id,
+            skill_hashes=skill_hashes,
         )
 
     def _record_missing_task(
@@ -211,6 +203,7 @@ class Orchestrator:
         condition: ConditionName,
         start: float,
         exc: FileNotFoundError,
+        skill_hashes: dict[str, str],
     ) -> IterationRecord:
         duration = time.time() - start
         trace = ExecutionTrace(
@@ -247,6 +240,7 @@ class Orchestrator:
             cross_task_feedback_enabled=(
                 self.config.experiment.allow_cross_task_feedback
             ),
+            skill_hashes=dict(skill_hashes),
         )
 
     async def _ask_planner_for_skill_proposal(
@@ -254,10 +248,10 @@ class Orchestrator:
         *,
         task_id: str,
         iteration: int,
-        executor_skill_text: str,
+        executor_skill: str,
         feedback: str | None,
     ) -> None:
-        if not feedback or not executor_skill_text:
+        if not feedback or not executor_skill:
             logger.info("Step 4: Skipped (no mediator feedback).")
             return
 
@@ -266,8 +260,8 @@ class Orchestrator:
             agent_role="planner",
             tagged_only=True,
         )
-        proposal = await self.planner.propose_skill_update(
-            current_skill_content=executor_skill_text,
+        proposal = await self.planner.register_skill_update(
+            current_skill_content=executor_skill,
             feedback=feedback,
             edit_history=edit_history,
             task_id=task_id,
@@ -279,45 +273,44 @@ class Orchestrator:
         else:
             logger.info("Planner decided: no proposal needed.")
 
-    async def _record_mediator_history(
+    async def _record_history_and_remember_outcome(
         self,
         *,
         task_id: str,
         iteration: int,
         condition: ConditionName,
         report: MediatorReport | None,
-    ) -> str | None:
-        if report and report.exposed_content:
-            mediator_signal = await self.mediator.compact_feedback(
-                report.exposed_content,
-                report,
-            )
-            return self.history_store.record_signal(
+        skill_update: SkillUpdate | None,
+    ) -> tuple[str | None, str | None]:
+        mediator_entry_id = None
+        if report:
+            mediator_signal = await self.mediator.compact_feedback(report)
+            mediator_entry_id = self.history_store.record_signal(
                 iteration=iteration,
                 agent_role="mediator",
                 task_id=task_id,
                 condition=condition,
                 payload=mediator_signal,
             )
-        return None
 
-    def _record_planner_history(
-        self,
-        *,
-        task_id: str,
-        iteration: int,
-        condition: ConditionName,
-        skill_update: SkillUpdate | None,
-    ) -> str | None:
+        planner_entry_id = None
         if skill_update:
-            return self.history_store.record_signal(
+            planner_entry_id = self.history_store.record_signal(
                 iteration=iteration,
                 agent_role="planner",
                 task_id=task_id,
                 condition=condition,
                 payload=build_planner_signal(skill_update),
             )
-        return None
+
+        self.history_store.remember_pending_outcome(
+            task_id,
+            mediator_entry_id=mediator_entry_id,
+            planner_entry_id=planner_entry_id,
+        )
+        if report and report.is_exposed:
+            self._previous_report_by_task[task_id] = report
+        return mediator_entry_id, planner_entry_id
 
     def _build_iteration_record(
         self,
@@ -332,6 +325,7 @@ class Orchestrator:
         skill_update: SkillUpdate | None,
         mediator_entry_id: str | None,
         planner_entry_id: str | None,
+        skill_hashes: dict[str, str],
     ) -> IterationRecord:
         duration = time.time() - start
         llm_token_events = self._drain_llm_token_events()
@@ -355,6 +349,7 @@ class Orchestrator:
             cross_task_feedback_enabled=(
                 self.config.experiment.allow_cross_task_feedback
             ),
+            skill_hashes=dict(skill_hashes),
         )
         reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
         logger.info(
@@ -409,7 +404,11 @@ class Orchestrator:
             return f"{prior_context}\n\n{header}\n\n{cross_context}"
         return f"{header}\n\n{cross_context}"
 
-    async def _review_proposals_and_patch_skill(self) -> SkillUpdate | None:
+    async def _review_proposals_and_patch_skill(
+        self,
+        *,
+        iteration: int,
+    ) -> SkillUpdate | None:
         """If buffer is full, run the advisor and optionally patch the skill.
 
         Clears the buffer regardless of outcome.
@@ -439,31 +438,36 @@ class Orchestrator:
             agent_role="planner",
             tagged_only=True,
         )
-        proposal = await self.planner.propose_skill_update(
+        draft_update = await self.planner.register_skill_update(
             current_skill_content=current_skill,
             feedback=advisor_feedback,
             edit_history=edit_history,
             task_id=contributing_task_ids,
-            iteration=self.planner.step,
+            iteration=iteration,
         )
-        if proposal:
+        if draft_update:
             skill_update = SkillUpdate(
                 skill_id="executor",
                 task_id=contributing_task_ids,
-                old_content=proposal.old_content,
-                new_content=proposal.new_content,
-                reasoning=proposal.reasoning,
-                iteration=proposal.iteration,
-                old_skill_hash=SkillStore.content_hash(proposal.old_content),
-                new_skill_hash=SkillStore.content_hash(proposal.new_content),
+                old_content=current_skill,
+                new_content=draft_update.new_content,
+                reasoning=advisor_feedback,
+                iteration=iteration,
+                old_skill_hash=SkillStore.content_hash(current_skill),
+                new_skill_hash=SkillStore.content_hash(draft_update.new_content),
             )
             self.skill_store.write_skill("executor", skill_update.new_content)
             logger.info("Skill patched and written.")
             return skill_update
         return None
 
-    async def _coevolve(self, iteration: int, condition: str) -> None:
+    async def _coevolve(
+        self,
+        iteration: int,
+        condition: ConditionName,
+    ) -> IterationRecord | None:
         """Co-evolution checkpoint: Mediator + Planner reflect on history."""
+        start = time.time()
         logger.info(
             "=== Co-evolution checkpoint at iteration %d (condition=%s) ===",
             iteration, condition,
@@ -487,12 +491,38 @@ class Orchestrator:
 
         # Planner reflects on skill-edit history
         await reflector.reflect("planner", self.planner.llm_client)
-        self._drain_llm_token_events()
+        llm_token_events = self._drain_llm_token_events()
+        if not llm_token_events:
+            return None
+        return self._build_coevolution_record(
+            iteration=iteration,
+            condition=condition,
+            start=start,
+            llm_token_events=llm_token_events,
+        )
 
     def _write_metric(self, record: IterationRecord) -> None:
         """Append an iteration record to metrics.jsonl."""
         with open(self._metrics_path, "a") as f:
             f.write(record.model_dump_json() + "\n")
+
+    def _snapshot_and_write_metrics(
+        self,
+        iteration: int,
+        records: list[IterationRecord],
+        *,
+        coevolution_record: IterationRecord | None = None,
+    ) -> None:
+        """Snapshot skills and write metric rows against that exact version."""
+        skill_version = self._skill_version(iteration)
+        self.skill_store.snapshot(iteration, self._snapshots_dir)
+        skill_hashes = self._current_skill_hashes()
+        records_to_write = list(records)
+        if coevolution_record:
+            records_to_write.append(coevolution_record)
+        for record in records_to_write:
+            self._attach_skill_identity(record, skill_hashes, skill_version)
+            self._write_metric(record)
 
     @staticmethod
     def _skill_version(iteration: int) -> str:
@@ -513,7 +543,8 @@ class Orchestrator:
         skill_version: str,
     ) -> None:
         """Attach snapshot identity to a metric record before serialization."""
-        record.skill_hashes = dict(skill_hashes)
+        if not record.skill_hashes:
+            record.skill_hashes = dict(skill_hashes)
         record.skill_version = skill_version
         if record.skill_update:
             record.skill_update.skill_version = skill_version
@@ -521,6 +552,34 @@ class Orchestrator:
     def _drain_llm_token_events(self) -> list[TokenBudgetEvent]:
         """Collect token telemetry from configured LLM clients."""
         events: list[TokenBudgetEvent] = []
-        for owner in self._llm_client_owners:
-            events.extend(owner.llm_client.drain_token_events())
+        for llm_client in (
+            getattr(self.planner, "llm_client", None),
+            getattr(self.mediator, "llm_client", None),
+            getattr(self.skill_advisor, "llm_client", None),
+        ):
+            drain_token_events = getattr(llm_client, "drain_token_events", None)
+            if callable(drain_token_events):
+                events.extend(drain_token_events())
         return events
+
+    def _build_coevolution_record(
+        self,
+        *,
+        iteration: int,
+        condition: ConditionName,
+        start: float,
+        llm_token_events: list[TokenBudgetEvent],
+    ) -> IterationRecord:
+        """Build a metrics-only row for co-evolution LLM telemetry."""
+        return IterationRecord(
+            iteration=iteration,
+            task_id="__coevolution__",
+            total_tokens=sum(e.total_tokens for e in llm_token_events),
+            llm_token_events=llm_token_events,
+            duration_sec=time.time() - start,
+            condition_name=condition,
+            cross_task_feedback_enabled=(
+                self.config.experiment.allow_cross_task_feedback
+            ),
+            skill_hashes=self._current_skill_hashes(),
+        )

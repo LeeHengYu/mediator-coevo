@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import typer
@@ -53,9 +54,10 @@ class _Planner:
         base_instruction: str,
         prior_context: str | None = None,
         current_skills: list[str] | None = None,
+        iteration: int = 0,
     ) -> TaskSpec:
         self.prior_contexts[task_id] = prior_context
-        return TaskSpec(task_id=task_id, instruction=base_instruction, iteration=7)
+        return TaskSpec(task_id=task_id, instruction=base_instruction, iteration=iteration)
 
 
 class _Executor:
@@ -104,11 +106,63 @@ class _Mediator:
 
     async def compact_feedback(
         self,
-        feedback: str,
-        report: MediatorReport | None = None,
+        report: MediatorReport,
     ) -> MediatorSignal:
         self.compact_calls += 1
-        return MediatorSignal(headline=feedback)
+        return MediatorSignal(headline=report.exposed_content or "")
+
+
+class _TraceHistoryInspectingMediator:
+    def __init__(self, artifact_store: ArtifactStore) -> None:
+        self.artifact_store = artifact_store
+        self.trace_iterations_seen: list[int] = []
+
+    async def mediate_trace(
+        self,
+        condition: str,
+        trace: ExecutionTrace,
+        task_context: TaskSpec,
+    ) -> MediatorReport | None:
+        self.trace_iterations_seen = [
+            item.iteration
+            for item in self.artifact_store.query_traces(task_id=trace.task_id)
+        ]
+        return None
+
+
+class _WithholdingMediator:
+    async def mediate_trace(
+        self,
+        condition: str,
+        trace: ExecutionTrace,
+        task_context: TaskSpec,
+    ) -> MediatorReport:
+        return MediatorReport(
+            task_id=trace.task_id,
+            iteration=trace.iteration,
+            content="withheld content",
+            withheld=True,
+            reasoning="not useful for planner",
+        )
+
+    async def compact_feedback(
+        self,
+        report: MediatorReport,
+    ) -> MediatorSignal:
+        return MediatorSignal(
+            withheld=report.withheld,
+            mediator_reasoning=report.reasoning,
+        )
+
+
+class _FailingMediator:
+    async def mediate_trace(
+        self,
+        condition: str,
+        trace: ExecutionTrace,
+        task_context: TaskSpec,
+    ) -> MediatorReport | None:
+        raise RuntimeError("mediator failed")
 
 
 class _LLMCompactor:
@@ -140,7 +194,7 @@ def _orchestrator(
 ) -> tuple[Orchestrator, _Planner, _Mediator]:
     planner = _Planner()
     mediator = _Mediator(llm_client=llm_client)
-    orch = Orchestrator.__new__(Orchestrator)
+    orch: Any = Orchestrator.__new__(Orchestrator)
     orch.planner = planner
     orch.executor = _Executor()
     orch.mediator = mediator
@@ -153,7 +207,6 @@ def _orchestrator(
     orch.config.experiment.shared_notes = "shared note"
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
-    orch._llm_client_owners = ()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
     return orch, planner, mediator
@@ -199,6 +252,53 @@ async def test_feedback_conditions_control_planner_context_and_mediator_calls(
     assert mediator.process_calls == expected_mediator_calls
     assert record.condition_name == condition
     assert record.cross_task_feedback_enabled is False
+    assert record.execution_trace is not None
+    assert record.execution_trace.iteration == 1
+
+
+@pytest.mark.asyncio
+async def test_mediator_history_excludes_current_trace(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-A", iteration=0, reward=0.25, status="ok")
+    )
+    mediator = _TraceHistoryInspectingMediator(orch.artifact_store)
+    orch.mediator = mediator
+
+    await orch._run_iteration("task-A", 1)
+
+    assert mediator.trace_iterations_seen == [0]
+    assert orch.artifact_store.load_trace("task-A", 1) is not None
+
+
+@pytest.mark.asyncio
+async def test_trace_is_stored_when_mediator_fails(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.mediator = _FailingMediator()
+
+    with pytest.raises(RuntimeError, match="mediator failed"):
+        await orch._run_iteration("task-A", 1)
+
+    assert orch.artifact_store.load_trace("task-A", 1) is not None
+
+
+@pytest.mark.asyncio
+async def test_withheld_mediator_report_is_recorded_for_reflection(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.mediator = _WithholdingMediator()
+
+    record = await orch._run_iteration("task-A", 1)
+
+    assert record.mediator_report is None
+    assert record.mediator_history_entry_id is not None
+    assert "task-A" not in orch._previous_report_by_task
+    entry = next(
+        item
+        for item in orch.history_store._entries
+        if item.entry_id == record.mediator_history_entry_id
+    )
+    assert isinstance(entry.payload, MediatorSignal)
+    assert entry.payload.withheld is True
 
 
 @pytest.mark.asyncio
