@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.models.trace import ExecutionTrace
     from mediated_coevo.stores.artifact_store import ArtifactStore
+    from mediated_coevo.token_budget import BudgetSection
 
 logger = logging.getLogger(__name__)
 
@@ -102,18 +103,7 @@ class MediatorAgent(BaseAgent):
 
         # Prior trace summaries as separate system context (if available)
         if history := context.get("history"):
-            history_lines = "\n".join(f"- {item}" for item in history[:5])
-            if self._budgets:
-                history_lines = fit_text_to_tokens(
-                    model,
-                    history_lines,
-                    self._budgets.historical_summary_tokens,
-                )
-            messages.append({"role": "system", "content": (
-                "# Relevant History\n\n"
-                "Previous execution trace summaries for this task:\n\n"
-                f"{history_lines}"
-            )})
+            messages.append(self._history_system_message(history, model))
 
         user_budget = None
         if self._budgets:
@@ -122,19 +112,7 @@ class MediatorAgent(BaseAgent):
 
         sections: list[BudgetSection] = []
         if trace := context.get("trace"):
-            trace_parts = ["## Execution Trace"]
-            if trace.stdout:
-                trace_parts.append(f"### stdout\n{trace.stdout}")
-            if trace.stderr:
-                trace_parts.append(f"### stderr\n{trace.stderr}")
-            if trace.test_results:
-                trace_parts.append(f"### test_results\n{trace.test_results}")
-            trace_parts.append(f"### reward: {trace.reward}")
-            sections.append(BudgetSection(
-                "execution_trace",
-                "\n\n".join(trace_parts),
-                max_tokens=self._budgets.trace_excerpt_tokens if self._budgets else None,
-            ))
+            sections.append(self._trace_section(trace))
 
         if task_context := context.get("task_context"):
             sections.append(BudgetSection(
@@ -149,6 +127,46 @@ class MediatorAgent(BaseAgent):
             user_content = "\n\n".join(section.content for section in sections)
         messages.append({"role": "user", "content": user_content})
         return messages
+
+    def _history_system_message(
+        self,
+        history: list[str],
+        model: str,
+    ) -> dict[str, Any]:
+        from mediated_coevo.token_budget import fit_text_to_tokens
+
+        history_lines = "\n".join(f"- {item}" for item in history[:5])
+        if self._budgets:
+            history_lines = fit_text_to_tokens(
+                model,
+                history_lines,
+                self._budgets.historical_summary_tokens,
+            )
+        return {
+            "role": "system",
+            "content": (
+                "# Relevant History\n\n"
+                "Previous execution trace summaries for this task:\n\n"
+                f"{history_lines}"
+            ),
+        }
+
+    def _trace_section(self, trace: ExecutionTrace) -> BudgetSection:
+        from mediated_coevo.token_budget import BudgetSection
+
+        trace_parts = ["## Execution Trace"]
+        if trace.stdout:
+            trace_parts.append(f"### stdout\n{trace.stdout}")
+        if trace.stderr:
+            trace_parts.append(f"### stderr\n{trace.stderr}")
+        if trace.test_results:
+            trace_parts.append(f"### test_results\n{trace.test_results}")
+        trace_parts.append(f"### reward: {trace.reward}")
+        return BudgetSection(
+            "execution_trace",
+            "\n\n".join(trace_parts),
+            max_tokens=self._budgets.trace_excerpt_tokens if self._budgets else None,
+        )
 
     async def process(self, context: dict[str, Any]) -> dict[str, Any]:
         messages = self.construct_messages(context)

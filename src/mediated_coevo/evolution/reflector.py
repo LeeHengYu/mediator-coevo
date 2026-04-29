@@ -16,7 +16,7 @@ import logging
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 from mediated_coevo.models.skill import (
@@ -90,73 +90,34 @@ class Reflector:
         current_skill = self._skill_store.read_skill(agent_role) or ""
         base_skill_hash = SkillStore.content_hash(current_skill)
 
-        if agent_role == "mediator":
-            messages = self._build_mediator_prompt(
-                current_skill,
-                pairs,
-                model=llm_client.model,
-                budgets=self._budgets,
-            )
-        else:
-            messages = self._build_planner_prompt(
-                current_skill,
-                pairs,
-                model=llm_client.model,
-                budgets=self._budgets,
-            )
+        messages = self._build_reflection_prompt(
+            agent_role,
+            current_skill,
+            pairs,
+            model=llm_client.model,
+        )
 
         try:
-            if self._budgets:
-                response = await llm_client.complete(
-                    messages=messages,
-                    temperature=0.4,
-                    max_tokens=self._budgets.reflector_completion_tokens,
-                    prompt_budget=self._budgets.reflector_prompt_tokens,
-                    budget_label=f"reflector.{agent_role}",
-                    budget_overflow_strategy="section_pack",
-                    condition_name=self._condition_name,
-                )
-            else:
-                response = await llm_client.complete(
-                    messages=messages,
-                    temperature=0.4,
-                    max_tokens=4096,
-                )
-            raw_content = response["content"].strip()
-
-            if raw_content == _NO_CHANGE_SENTINEL:
-                logger.info("%s reflection: LLM explicitly signalled no change.", agent_role)
-                return None
-
-            new_content = _parse_skill_content(raw_content)
-
-            if not new_content:
-                logger.info("%s reflection produced no parseable content.", agent_role)
-                return None
-
-            if current_skill and _is_semantically_similar(
-                current_skill, new_content, self._similarity_threshold
-            ):
-                logger.info(
-                    "%s reflection: new content too similar to current (threshold=%.2f); skipping.",
-                    agent_role,
-                    self._similarity_threshold,
-                )
+            raw_content = await self._complete_reflection(
+                agent_role=agent_role,
+                llm_client=llm_client,
+                messages=messages,
+            )
+            new_content = self._parse_reflected_skill(
+                agent_role=agent_role,
+                current_skill=current_skill,
+                raw_content=raw_content,
+            )
+            if new_content is None:
                 return None
 
             self._skill_store.write_skill(agent_role, new_content)
             logger.info("%s skill updated via reflection (%d chars).", agent_role, len(new_content))
-            pair_refs = _contrastive_pair_refs(pairs)
-            task_ids = sorted({ref.task_id for ref in pair_refs if ref.task_id})
-            provenance = ContrastiveReflectionProvenance(
-                batch_id=f"reflect-{agent_role}-iter-{iteration:04d}",
-                iteration=iteration,
-                skill_id=agent_role,
-                task_ids=task_ids,
+            provenance = self._build_reflection_provenance(
+                agent_role=agent_role,
                 base_skill_hash=base_skill_hash,
-                decision="committed",
-                reason=f"Updated via {len(pair_refs)} contrastive history pair(s).",
-                contrastive_pair_refs=pair_refs,
+                pairs=pairs,
+                iteration=iteration,
                 max_pairs=max_pairs,
                 selection_seed=selection_seed,
             )
@@ -169,6 +130,106 @@ class Reflector:
         except Exception as e:
             logger.error("Failed to reflect for %s: %s", agent_role, e)
             return None
+
+    def _build_reflection_prompt(
+        self,
+        agent_role: str,
+        current_skill: str,
+        pairs: list[tuple["HistoryEntry", "HistoryEntry"]],
+        *,
+        model: str = "",
+    ) -> list[dict[str, Any]]:
+        if agent_role == "mediator":
+            return self._build_mediator_prompt(
+                current_skill,
+                pairs,
+                model=model,
+                budgets=self._budgets,
+            )
+        return self._build_planner_prompt(
+            current_skill,
+            pairs,
+            model=model,
+            budgets=self._budgets,
+        )
+
+    async def _complete_reflection(
+        self,
+        *,
+        agent_role: str,
+        llm_client: LLMClient,
+        messages: list[dict[str, Any]],
+    ) -> str:
+        if self._budgets:
+            response = await llm_client.complete(
+                messages=messages,
+                temperature=0.4,
+                max_tokens=self._budgets.reflector_completion_tokens,
+                prompt_budget=self._budgets.reflector_prompt_tokens,
+                budget_label=f"reflector.{agent_role}",
+                budget_overflow_strategy="section_pack",
+                condition_name=self._condition_name,
+            )
+        else:
+            response = await llm_client.complete(
+                messages=messages,
+                temperature=0.4,
+                max_tokens=4096,
+            )
+        return response["content"].strip()
+
+    def _parse_reflected_skill(
+        self,
+        *,
+        agent_role: str,
+        current_skill: str,
+        raw_content: str,
+    ) -> str | None:
+        if raw_content == _NO_CHANGE_SENTINEL:
+            logger.info("%s reflection: LLM explicitly signalled no change.", agent_role)
+            return None
+
+        new_content = _parse_skill_content(raw_content)
+        if not new_content:
+            logger.info("%s reflection produced no parseable content.", agent_role)
+            return None
+
+        if current_skill and _is_semantically_similar(
+            current_skill, new_content, self._similarity_threshold
+        ):
+            logger.info(
+                "%s reflection: new content too similar to current (threshold=%.2f); skipping.",
+                agent_role,
+                self._similarity_threshold,
+            )
+            return None
+
+        return new_content
+
+    @staticmethod
+    def _build_reflection_provenance(
+        *,
+        agent_role: str,
+        base_skill_hash: str,
+        pairs: list[tuple["HistoryEntry", "HistoryEntry"]],
+        iteration: int,
+        max_pairs: int,
+        selection_seed: int | None,
+    ) -> ContrastiveReflectionProvenance:
+        pair_refs = _contrastive_pair_refs(pairs)
+        task_ids = sorted({ref.task_id for ref in pair_refs if ref.task_id})
+        return ContrastiveReflectionProvenance(
+            batch_id=f"reflect-{agent_role}-iter-{iteration:04d}",
+            iteration=iteration,
+            skill_id=agent_role,
+            task_ids=task_ids,
+            base_skill_hash=base_skill_hash,
+            decision="committed",
+            reason=f"Updated via {len(pair_refs)} contrastive history pair(s).",
+            contrastive_pair_refs=pair_refs,
+            max_pairs=max_pairs,
+            selection_seed=selection_seed,
+        )
 
     # ── Prompt Builders ──
 

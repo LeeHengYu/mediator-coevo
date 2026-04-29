@@ -30,6 +30,13 @@ Your responsibilities:
 
 You do NOT execute tasks yourself. You plan and refine skills."""
 
+PLAN_RESPONSE_SCHEMA = 'Respond with JSON: {"instruction": "...", "reasoning": "..."}'
+UPDATE_RESPONSE_SCHEMA = (
+    "Decide whether to update the skill. Respond with JSON:\n"
+    '{"no_update": true} if no change needed, or\n'
+    '{"new_content": "...", "reasoning": "..."}'
+)
+
 
 class PlannerAgent(BaseAgent):
     """Claude-backed planner. Plans tasks and decides skill updates."""
@@ -93,8 +100,6 @@ class PlannerAgent(BaseAgent):
             {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
         ]
 
-        from mediated_coevo.token_budget import count_message_tokens
-
         model = self.llm_client.model
 
         # Skill injection — separate system messages like OpenSpace
@@ -121,20 +126,47 @@ class PlannerAgent(BaseAgent):
                 content=self._skill_context,
             )
 
-        action = context.get("action", "plan_task")
-        user_budget = None
-        if self._budgets:
-            system_tokens = count_message_tokens(model, messages)
-            user_budget = max(1, self._budgets.planner_context_tokens - system_tokens)
-        if action == "plan_task":
-            user_content = self._build_plan_prompt(context, model=model, budgets=self._budgets, budget=user_budget)
-        elif action == "update_skill":
-            user_content = self._build_update_prompt(context, model=model, budgets=self._budgets, budget=user_budget)
-        else:
-            user_content = context.get("instruction", "")
-
+        user_budget = self._user_prompt_budget(model, messages)
+        user_content = self._build_user_prompt(context, model=model, budget=user_budget)
         messages.append({"role": "user", "content": user_content})
         return messages
+
+    def _user_prompt_budget(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+    ) -> int | None:
+        if not self._budgets:
+            return None
+
+        from mediated_coevo.token_budget import count_message_tokens
+
+        system_tokens = count_message_tokens(model, messages)
+        return max(1, self._budgets.planner_context_tokens - system_tokens)
+
+    def _build_user_prompt(
+        self,
+        context: dict[str, Any],
+        *,
+        model: str,
+        budget: int | None,
+    ) -> str:
+        action = context.get("action", "plan_task")
+        if action == "plan_task":
+            return self._build_plan_prompt(
+                context,
+                model=model,
+                budgets=self._budgets,
+                budget=budget,
+            )
+        if action == "update_skill":
+            return self._build_update_prompt(
+                context,
+                model=model,
+                budgets=self._budgets,
+                budget=budget,
+            )
+        return context.get("instruction", "")
 
     async def process(self, context: dict[str, Any]) -> dict[str, Any]:
         messages = self.construct_messages(context)
@@ -278,7 +310,7 @@ class PlannerAgent(BaseAgent):
                 ))
             sections.append(BudgetSection(
                 "response_schema",
-                'Respond with JSON: {"instruction": "...", "reasoning": "..."}',
+                PLAN_RESPONSE_SCHEMA,
                 required=True,
             ))
             return pack_sections(model, sections, budget)
@@ -293,10 +325,7 @@ class PlannerAgent(BaseAgent):
             )
         if report := context.get("mediator_report"):
             parts.append(f"\n## Feedback from previous execution\n{report}")
-        parts.append(
-            "\nRespond with JSON: "
-            '{"instruction": "...", "reasoning": "..."}'
-        )
+        parts.append(f"\n{PLAN_RESPONSE_SCHEMA}")
         return "\n".join(parts)
 
     @staticmethod
@@ -333,11 +362,7 @@ class PlannerAgent(BaseAgent):
                 ))
             sections.append(BudgetSection(
                 "response_schema",
-                (
-                    "Decide whether to update the skill. Respond with JSON:\n"
-                    '{"no_update": true} if no change needed, or\n'
-                    '{"new_content": "...", "reasoning": "..."}'
-                ),
+                UPDATE_RESPONSE_SCHEMA,
                 required=True,
             ))
             return pack_sections(model, sections, budget)
@@ -350,9 +375,5 @@ class PlannerAgent(BaseAgent):
             parts.append(f"\n## Execution Feedback\n{feedback}")
         if history := context.get("edit_history"):
             parts.append(f"\n## Recent Edit History\n{history}")
-        parts.append(
-            "\nDecide whether to update the skill. Respond with JSON:\n"
-            '{"no_update": true} if no change needed, or\n'
-            '{"new_content": "...", "reasoning": "..."}'
-        )
+        parts.append(f"\n{UPDATE_RESPONSE_SCHEMA}")
         return "\n".join(parts)

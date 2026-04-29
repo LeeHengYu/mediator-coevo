@@ -250,8 +250,8 @@ class HarborTraceParser:
         try:
             reward = self._parse_reward(trial_dir, result_json)
         except _MalformedReward as e:
-            return ExecutionTrace(
-                **full_base,
+            return self._trace_from(
+                full_base,
                 status="parse_error",
                 error_kind="malformed_reward",
                 error_detail=str(e),
@@ -315,6 +315,13 @@ class HarborTraceParser:
             ),
         )
 
+    def _trace(self, **overrides: Any) -> ExecutionTrace:
+        return self._trace_from(self.base, **overrides)
+
+    @staticmethod
+    def _trace_from(base: dict[str, Any], **overrides: Any) -> ExecutionTrace:
+        return ExecutionTrace(**{**base, **overrides})
+
     def _parse_reward(
         self,
         trial_dir: Path,
@@ -354,8 +361,7 @@ class HarborTraceParser:
             self.iteration,
             self.run_result.returncode,
         )
-        return ExecutionTrace(
-            **self.base,
+        return self._trace(
             status="env_failure",
             error_kind="missing_trial_dir",
             error_detail=self.run_result.stderr.strip() or None,
@@ -368,8 +374,7 @@ class HarborTraceParser:
             self.task_id,
             self.iteration,
         )
-        return ExecutionTrace(
-            **self.base,
+        return self._trace(
             status="env_failure",
             error_kind="missing_result_json",
             error_detail=f"result.json not found at {result_path}",
@@ -385,8 +390,7 @@ class HarborTraceParser:
             result_path,
             exc,
         )
-        return ExecutionTrace(
-            **self.base,
+        return self._trace(
             status="env_failure",
             error_kind="malformed_result_json",
             error_detail=str(exc),
@@ -409,8 +413,8 @@ class HarborTraceParser:
         else:
             status = "env_failure"
             error_kind = "no_reward"
-        return ExecutionTrace(
-            **full_base,
+        return self._trace_from(
+            full_base,
             status=status,
             error_kind=error_kind,
             error_detail=exception_info or self.run_result.stderr.strip() or None,
@@ -447,8 +451,9 @@ class HarborTraceParser:
             if self.run_result.returncode == 0 and exception_info
             else self.run_result.returncode
         )
-        return ExecutionTrace(
-            **{**full_base, "exit_code": exit_code},
+        return self._trace_from(
+            full_base,
+            exit_code=exit_code,
             reward=reward,
             status=status,
             error_kind=error_kind,
