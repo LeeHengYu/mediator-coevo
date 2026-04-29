@@ -7,8 +7,10 @@ Triggers co-evolution reflections every N iterations.
 from __future__ import annotations
 
 import logging
+import random
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.executor import ExecutorAgent
@@ -25,7 +27,12 @@ from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillProposal, SkillUpdate
+from mediated_coevo.models.skill import (
+    AdvisorBatchProvenance,
+    ProposalRef,
+    SkillProposal,
+    SkillUpdate,
+)
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.token_budget import TokenBudgetEvent
@@ -34,6 +41,9 @@ from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from mediated_coevo.evolution.reflector import ReflectionResult
 
 
 class Orchestrator:
@@ -260,7 +270,7 @@ class Orchestrator:
             agent_role="planner",
             tagged_only=True,
         )
-        proposal = await self.planner.register_skill_update(
+        proposal = await self.planner.suggest_skill_revision(
             current_skill_content=executor_skill,
             feedback=feedback,
             edit_history=edit_history,
@@ -431,14 +441,13 @@ class Orchestrator:
             return None
 
         logger.info("Advisor approved — Planner patching skill...")
-        contributing_task_ids = ",".join(
-            sorted({p.task_id for p in buffered_proposals if p.task_id})
-        )
+        contributing_tasks = sorted({p.task_id for p in buffered_proposals if p.task_id})
+        contributing_task_ids = ",".join(contributing_tasks)
         edit_history = self.history_store.query(
             agent_role="planner",
             tagged_only=True,
         )
-        draft_update = await self.planner.register_skill_update(
+        draft_update = await self.planner.suggest_skill_revision(
             current_skill_content=current_skill,
             feedback=advisor_feedback,
             edit_history=edit_history,
@@ -446,6 +455,27 @@ class Orchestrator:
             iteration=iteration,
         )
         if draft_update:
+            old_skill_hash = SkillStore.content_hash(current_skill)
+            new_skill_hash = SkillStore.content_hash(draft_update.new_content)
+            provenance = AdvisorBatchProvenance(
+                batch_id=f"coevo-iter-{iteration:04d}",
+                iteration=iteration,
+                skill_id="executor",
+                task_ids=contributing_tasks,
+                base_skill_hash=old_skill_hash,
+                decision="approved",
+                reason=advisor_feedback,
+                rollback_snapshot=self._rollback_snapshot(iteration),
+                proposal_refs=[
+                    ProposalRef(
+                        proposal_id=proposal.proposal_id,
+                        task_id=proposal.task_id,
+                        iteration=proposal.iteration,
+                        reward=proposal.reward,
+                    )
+                    for proposal in buffered_proposals
+                ],
+            )
             skill_update = SkillUpdate(
                 skill_id="executor",
                 task_id=contributing_task_ids,
@@ -453,8 +483,9 @@ class Orchestrator:
                 new_content=draft_update.new_content,
                 reasoning=advisor_feedback,
                 iteration=iteration,
-                old_skill_hash=SkillStore.content_hash(current_skill),
-                new_skill_hash=SkillStore.content_hash(draft_update.new_content),
+                old_skill_hash=old_skill_hash,
+                new_skill_hash=new_skill_hash,
+                provenance=provenance,
             )
             self.skill_store.write_skill("executor", skill_update.new_content)
             logger.info("Skill patched and written.")
@@ -480,25 +511,43 @@ class Orchestrator:
             budgets=self.config.budgets,
             condition_name=condition,
         )
+        skill_updates: list[SkillUpdate] = []
+        reflection_seed = random.randrange(1 << 32)
 
         # Mediator skill evolution only for learned_mediator
         if condition in MEDIATOR_EVOLVE_CONDITIONS:
-            new_protocol = await reflector.reflect("mediator", self.mediator.llm_client)
-            if new_protocol:
-                self.mediator.load_protocol(new_protocol)
+            mediator_result = await reflector.reflect(
+                "mediator",
+                self.mediator.llm_client,
+                iteration=iteration,
+                selection_seed=reflection_seed,
+            )
+            if mediator_result:
+                mediator_result.provenance.rollback_snapshot = self._rollback_snapshot(iteration)
+                self.mediator.load_protocol(mediator_result.new_content)
+                skill_updates.append(self._skill_update_from_reflection(mediator_result))
         else:
             logger.info("Mediator skill evolution skipped (condition=%s).", condition)
 
         # Planner reflects on skill-edit history
-        await reflector.reflect("planner", self.planner.llm_client)
+        planner_result = await reflector.reflect(
+            "planner",
+            self.planner.llm_client,
+            iteration=iteration,
+            selection_seed=reflection_seed + 1,
+        )
+        if planner_result:
+            planner_result.provenance.rollback_snapshot = self._rollback_snapshot(iteration)
+            skill_updates.append(self._skill_update_from_reflection(planner_result))
         llm_token_events = self._drain_llm_token_events()
-        if not llm_token_events:
+        if not llm_token_events and not skill_updates:
             return None
         return self._build_coevolution_record(
             iteration=iteration,
             condition=condition,
             start=start,
             llm_token_events=llm_token_events,
+            skill_updates=skill_updates,
         )
 
     def _write_metric(self, record: IterationRecord) -> None:
@@ -529,6 +578,29 @@ class Orchestrator:
         """Return the run-local skill snapshot label for an iteration."""
         return f"iter_{iteration:04d}"
 
+    @staticmethod
+    def _rollback_snapshot(iteration: int) -> str | None:   
+        """Return the prior snapshot label that can restore pre-update state."""
+        if iteration <= 0:
+            return None
+        return Orchestrator._skill_version(iteration - 1)
+
+    @staticmethod
+    def _skill_update_from_reflection(result: "ReflectionResult") -> SkillUpdate:
+        """Convert a committed reflection result into a metrics skill update."""
+        new_skill_hash = SkillStore.content_hash(result.new_content)
+        return SkillUpdate(
+            skill_id=result.skill_id,
+            task_id=",".join(result.provenance.task_ids),
+            old_content=result.old_content,
+            new_content=result.new_content,
+            reasoning=result.provenance.reason,
+            iteration=result.provenance.iteration,
+            old_skill_hash=result.provenance.base_skill_hash,
+            new_skill_hash=new_skill_hash,
+            provenance=result.provenance,
+        )
+
     def _current_skill_hashes(self) -> dict[str, str]:
         """Return skill hashes when the configured store supports them."""
         skill_hashes = getattr(self.skill_store, "skill_hashes", None)
@@ -546,8 +618,11 @@ class Orchestrator:
         if not record.skill_hashes:
             record.skill_hashes = dict(skill_hashes)
         record.skill_version = skill_version
+        skill_updates = list(record.skill_updates)
         if record.skill_update:
-            record.skill_update.skill_version = skill_version
+            skill_updates.append(record.skill_update)
+        for skill_update in skill_updates:
+            skill_update.skill_version = skill_version
 
     def _drain_llm_token_events(self) -> list[TokenBudgetEvent]:
         """Collect token telemetry from configured LLM clients."""
@@ -569,11 +644,13 @@ class Orchestrator:
         condition: ConditionName,
         start: float,
         llm_token_events: list[TokenBudgetEvent],
+        skill_updates: list[SkillUpdate] | None = None,
     ) -> IterationRecord:
         """Build a metrics-only row for co-evolution LLM telemetry."""
         return IterationRecord(
             iteration=iteration,
             task_id="__coevolution__",
+            skill_updates=list(skill_updates or []),
             total_tokens=sum(e.total_tokens for e in llm_token_events),
             llm_token_events=llm_token_events,
             duration_sec=time.time() - start,

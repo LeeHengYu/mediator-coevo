@@ -74,7 +74,7 @@ When buffer hits advisor_buffer_max (default 10):
   SkillAdvisor reviews the full batch → approve / reject
   Buffer is cleared regardless of outcome
   If approved: Planner drafts a new SkillUpdate (based on Advisor's aggregated feedback)
-             → written to skills/executor/SKILL.md
+             → written to skills/executor/SKILL.md with AdvisorBatchProvenance
 ```
 
 **Flow 2 — Agent meta-skill co-evolution (iteration-triggered)**
@@ -89,13 +89,15 @@ Every coevo_interval iterations (default 5):
   Mediator reflection → rewrites skills/mediator/SKILL.md
     (coordination-protocol: how to curate and present feedback)
     → loaded into MediatorAgent immediately
+    → recorded with ContrastiveReflectionProvenance
 
   Planner reflection → rewrites skills/planner/SKILL.md
     (skill-refiner: how to decide when and how to edit executor skills)
     → injected into Planner context at the next iteration start
+    → recorded with ContrastiveReflectionProvenance
 ```
 
-`SkillProposal` and `SkillUpdate` share a `SkillEdit` base (`old_content`, `new_content`, `reasoning`). Proposals are never written to `HistoryStore`; only committed `SkillUpdate`s appear in `IterationRecord` and `metrics.jsonl`.
+`SkillProposal` and `SkillUpdate` share a `SkillEdit` base (`old_content`, `new_content`, `reasoning`). Proposals are never written to `HistoryStore`; committed updates are serialized in `metrics.jsonl`. Executor updates use `IterationRecord.skill_update`; co-evolution checkpoints can record mediator/planner updates in `IterationRecord.skill_updates`. Provenance is intentionally concise and points back to proposal IDs, `HistoryStore` entry IDs, rewards, hashes, and skill snapshots instead of duplicating full evidence.
 
 ## Progress
 

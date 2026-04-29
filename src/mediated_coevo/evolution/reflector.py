@@ -15,21 +15,36 @@ import difflib
 import logging
 import textwrap
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
+from mediated_coevo.models.skill import (
+    ContrastivePairRef,
+    ContrastiveReflectionProvenance,
+)
+from mediated_coevo.stores.skill_store import SkillStore
 
 if TYPE_CHECKING:
     from mediated_coevo.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
-    from mediated_coevo.stores.skill_store import SkillStore
 
 logger = logging.getLogger(__name__)
 
 
 _NO_CHANGE_SENTINEL = "NO_CHANGE"
 _SIMILARITY_THRESHOLD = 0.95
+
+
+@dataclass(frozen=True)
+class ReflectionResult:
+    """Committed reflection result plus concise provenance."""
+
+    skill_id: str
+    old_content: str
+    new_content: str
+    provenance: ContrastiveReflectionProvenance
 
 
 class Reflector:
@@ -53,13 +68,19 @@ class Reflector:
         self,
         agent_role: str,
         llm_client: LLMClient,
+        iteration: int = 0,
         max_pairs: int = 5,
-    ) -> str | None:
+        selection_seed: int | None = None,
+    ) -> ReflectionResult | None:
         """Reflect on past actions for the given role, update the skill file.
 
-        Returns the new skill content, or None if no update was made.
+        Returns the committed reflection result, or None if no update was made.
         """
-        pairs = self._history_store.contrastive_pairs(agent_role, max_pairs=max_pairs)
+        pairs = self._history_store.contrastive_pairs(
+            agent_role,
+            max_pairs=max_pairs,
+            selection_seed=selection_seed,
+        )
         if not pairs:
             logger.info("No contrastive pairs for %s; skipping reflection.", agent_role)
             return None
@@ -67,6 +88,7 @@ class Reflector:
         logger.info("Reflector found %d contrastive pairs for %s.", len(pairs), agent_role)
 
         current_skill = self._skill_store.read_skill(agent_role) or ""
+        base_skill_hash = SkillStore.content_hash(current_skill)
 
         if agent_role == "mediator":
             messages = self._build_mediator_prompt(
@@ -124,7 +146,26 @@ class Reflector:
 
             self._skill_store.write_skill(agent_role, new_content)
             logger.info("%s skill updated via reflection (%d chars).", agent_role, len(new_content))
-            return new_content
+            pair_refs = _contrastive_pair_refs(pairs)
+            task_ids = sorted({ref.task_id for ref in pair_refs if ref.task_id})
+            provenance = ContrastiveReflectionProvenance(
+                batch_id=f"reflect-{agent_role}-iter-{iteration:04d}",
+                iteration=iteration,
+                skill_id=agent_role,
+                task_ids=task_ids,
+                base_skill_hash=base_skill_hash,
+                decision="committed",
+                reason=f"Updated via {len(pair_refs)} contrastive history pair(s).",
+                contrastive_pair_refs=pair_refs,
+                max_pairs=max_pairs,
+                selection_seed=selection_seed,
+            )
+            return ReflectionResult(
+                skill_id=agent_role,
+                old_content=current_skill,
+                new_content=new_content,
+                provenance=provenance,
+            )
         except Exception as e:
             logger.error("Failed to reflect for %s: %s", agent_role, e)
             return None
@@ -284,6 +325,30 @@ class Reflector:
             model=model,
             budgets=budgets,
         )
+
+
+def _contrastive_pair_refs(
+    pairs: list[tuple["HistoryEntry", "HistoryEntry"]],
+) -> list[ContrastivePairRef]:
+    """Convert selected history pairs into compact persisted references."""
+    refs: list[ContrastivePairRef] = []
+    for worse, better in pairs:
+        worse_reward = 0.0 if worse.reward is None else worse.reward
+        better_reward = 0.0 if better.reward is None else better.reward
+        task_id = str(
+            worse.metadata.get("task_id")
+            or better.metadata.get("task_id")
+            or ""
+        )
+        refs.append(ContrastivePairRef(
+            worse_entry_id=worse.entry_id,
+            better_entry_id=better.entry_id,
+            task_id=task_id,
+            worse_reward=worse_reward,
+            better_reward=better_reward,
+            reward_gap=better_reward - worse_reward,
+        ))
+    return refs
 
 
 def _is_semantically_similar(old: str, new: str, threshold: float) -> bool:

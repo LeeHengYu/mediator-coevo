@@ -287,6 +287,36 @@ def test_attach_skill_identity_populates_record_and_skill_update():
     assert record.skill_update.skill_version == "iter_0003"
 
 
+def test_attach_skill_identity_populates_coevolution_skill_updates():
+    mediator_update = SkillUpdate(
+        skill_id="mediator",
+        old_content="old mediator",
+        new_content="new mediator",
+    )
+    planner_update = SkillUpdate(
+        skill_id="planner",
+        old_content="old planner",
+        new_content="new planner",
+    )
+    record = IterationRecord(
+        iteration=3,
+        task_id="__coevolution__",
+        skill_updates=[mediator_update, planner_update],
+    )
+
+    Orchestrator._attach_skill_identity(
+        record,
+        {"mediator": "hash-a", "planner": "hash-b"},
+        "iter_0003",
+    )
+
+    assert record.skill_version == "iter_0003"
+    assert [update.skill_version for update in record.skill_updates] == [
+        "iter_0003",
+        "iter_0003",
+    ]
+
+
 def test_attach_skill_identity_preserves_existing_skill_hashes():
     record = IterationRecord(
         iteration=3,
@@ -321,12 +351,20 @@ def test_build_coevolution_record_captures_reflector_token_events():
         condition="learned_mediator",
         start=0.0,
         llm_token_events=[event],
+        skill_updates=[
+            SkillUpdate(
+                skill_id="planner",
+                old_content="old",
+                new_content="new",
+            ),
+        ],
     )
 
     assert record.task_id == "__coevolution__"
     assert record.iteration == 4
     assert record.total_tokens == 15
     assert record.llm_token_events == [event]
+    assert [update.skill_id for update in record.skill_updates] == ["planner"]
 
 
 class _NoCallPlanner:
@@ -538,6 +576,28 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
     assert update.reasoning == "approved"
     assert update.old_skill_hash == SkillStore.content_hash("old")
     assert update.new_skill_hash == SkillStore.content_hash("new")
+    assert update.provenance is not None
+    assert update.provenance.kind == "advisor_batch"
+    assert update.provenance.batch_id == "coevo-iter-0003"
+    assert update.provenance.task_ids == ["task-A", "task-B"]
+    assert update.provenance.base_skill_hash == SkillStore.content_hash("old")
+    assert update.provenance.reason == "approved"
+    assert update.provenance.rollback_snapshot == "iter_0002"
+    assert [ref.task_id for ref in update.provenance.proposal_refs] == [
+        "task-B",
+        "task-A",
+    ]
+    dumped = IterationRecord(
+        iteration=3,
+        task_id="task-A",
+        skill_update=update,
+    ).model_dump_json()
+    assert '"kind":"advisor_batch"' in dumped
+    assert '"proposal_refs"' in dumped
+    loaded = IterationRecord.model_validate_json(dumped)
+    assert loaded.skill_update is not None
+    assert loaded.skill_update.provenance is not None
+    assert loaded.skill_update.provenance.kind == "advisor_batch"
     assert len(orch.skill_advisor.seen) == 2
     assert orch._proposal_buffer == []
     assert orch.skill_store.writes == [("executor", "new")]

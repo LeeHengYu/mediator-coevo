@@ -183,7 +183,7 @@ class HistoryStore:
         task_id: str | None = None,
         top_frac: float = 0.3,
         bot_frac: float = 0.3,
-        rng: random.Random | None = None,
+        selection_seed: int | None = None,
     ) -> list[tuple[HistoryEntry, HistoryEntry]]:
         """Form same-task contrastive pairs from top/bottom reward buckets.
 
@@ -199,10 +199,8 @@ class HistoryStore:
             task_id: If set, restrict to entries whose metadata task_id matches.
             top_frac: Fraction of each task group to treat as the "better" bucket.
             bot_frac: Fraction of each task group to treat as the "worse" bucket.
-            rng: Injectable RNG for deterministic sampling.
+            selection_seed: Deterministic seed used when sampling from a large pool.
         """
-        rng = rng or random.Random()
-
         tagged = [
             _RewardedEntry(entry=e, reward=e.reward)
             for e in self._entries
@@ -255,7 +253,7 @@ class HistoryStore:
             return []
 
         if len(pool) > max_pairs:
-            pool = rng.sample(pool, max_pairs)
+            pool = random.Random(selection_seed).sample(pool, max_pairs)
 
         pool.sort(key=lambda p: p[1].reward - p[0].reward, reverse=True)
         return [(worse.entry, better.entry) for worse, better in pool]

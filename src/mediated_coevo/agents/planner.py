@@ -188,7 +188,7 @@ class PlannerAgent(BaseAgent):
             iteration=iteration,
         )
 
-    async def register_skill_update(
+    async def suggest_skill_revision(
         self,
         current_skill_content: str,
         feedback: str | None,

@@ -2,7 +2,8 @@
 
 SKILL.md files on disk are the source of truth for skill content. Per-iteration
 version history is captured by `snapshot()` into `experiment_dir/skills_snapshots/`.
-Edit provenance (reasoning, diff, reward) is tracked by `HistoryStore`.
+Committed edit provenance is serialized through `IterationRecord` metrics and
+points back to history entries, proposal refs, and snapshots.
 """
 
 from __future__ import annotations

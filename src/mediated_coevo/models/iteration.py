@@ -25,6 +25,7 @@ class IterationRecord(BaseModel):
     execution_trace: ExecutionTrace | None = None
     mediator_report: MediatorReport | None = None
     skill_update: SkillUpdate | None = None
+    skill_updates: list[SkillUpdate] = Field(default_factory=list)
 
     reward: float | None = None
     total_tokens: int = 0
