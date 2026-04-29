@@ -60,6 +60,28 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 - Skill directories require a canonical `SKILL.md` entrypoint, validated at startup by `SkillStore.validate()`.
 - History outcome tagging uses stable entry IDs so multi-task runs cannot attribute a reward to the wrong task's planner/mediator entry.
 
+## Testing
+
+This project uses `uv` as the single test entrypoint. `uv` manages and reuses the local `.venv`, so tests should be run through `uv` instead of mixing direct `.venv/bin/python` and `uv run` commands.
+
+Install/sync dependencies:
+
+```
+uv sync --dev
+```
+
+Run the default unit suite:
+
+```
+uv run pytest
+```
+
+Run the opt-in Harbor integration test:
+
+```
+uv run pytest tests/test_skillsbench_integration.py -m integration -v -s
+```
+
 ### Two Distinct Skill Update Flows
 
 **Flow 1 — Executor skill gating (count-triggered)**
@@ -101,7 +123,7 @@ Every coevo_interval iterations (default 5):
 
 ## Progress
 
-P0 1-7, Week 1 scope + a bit of Week 2
+P0, Week 1 scope + a bit of Week 2
 
 ## Further Direction
 

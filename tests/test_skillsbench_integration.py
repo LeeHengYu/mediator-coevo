@@ -9,7 +9,10 @@ Run explicitly:
 
     uv run pytest tests/test_skillsbench_integration.py -m integration -v -s
 
-Set ``MEDIATED_COEVO_INTEGRATION_MODEL`` (default: gemini-2.5-flash) to
+Use ``uv`` as the test entrypoint; it manages and reuses the local
+``.venv`` for this project.
+
+Set ``MEDIATED_COEVO_INTEGRATION_MODEL`` (default: google/gemini-2.5-flash) to
 override the executor model. Skip with ``MEDIATED_COEVO_SKIP_INTEGRATION=1``.
 """
 
@@ -33,7 +36,7 @@ BENCH_ROOT = PROJECT_ROOT / "benchmarks" / "skillsbench"
 TASK_ID = "fix-build-google-auto"
 
 INTEGRATION_MODEL = os.environ.get(
-    "MEDIATED_COEVO_INTEGRATION_MODEL", "gemini-2.5-flash"
+    "MEDIATED_COEVO_INTEGRATION_MODEL", "google/gemini-2.5-flash"
 )
 SKIP_FLAG = os.environ.get("MEDIATED_COEVO_SKIP_INTEGRATION") == "1"
 
