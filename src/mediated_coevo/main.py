@@ -120,7 +120,7 @@ class ExperimentFactory:
     @staticmethod
     def _save_config(config: Config, experiment_dir: Path) -> None:
         with open(experiment_dir / "config.toml", "wb") as f:
-            tomli_w.dump(config.model_dump(), f)
+            tomli_w.dump(config.model_dump(exclude_none=True), f)
 
     @staticmethod
     def _build_planner(config: Config) -> PlannerAgent:
