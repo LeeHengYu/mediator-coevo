@@ -7,7 +7,13 @@ from mediated_coevo.main import ExperimentFactory
 
 
 def test_save_config_omits_none_values_for_toml(tmp_path):
-    config = Config()
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     config.experiment.shared_notes = None
 
     ExperimentFactory._save_config(config, tmp_path)

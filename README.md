@@ -82,6 +82,11 @@ Run the opt-in Harbor integration test:
 uv run pytest tests/test_skillsbench_integration.py -m integration -v -s
 ```
 
+The integration test uses Harbor's `opencode` agent with
+`openrouter/google/<model>` by default. Source the shell
+environment that exports `OPENROUTER_API_KEY` before running it, or override
+with `MEDIATED_COEVO_INTEGRATION_AGENT` and `MEDIATED_COEVO_INTEGRATION_MODEL`.
+
 ### Two Distinct Skill Update Flows
 
 **Flow 1 — Executor skill gating (count-triggered)**

@@ -11,9 +11,9 @@ from mediated_coevo.conditions import ConditionName
 
 
 class ModelsConfig(BaseModel):
-    planner: str = "anthropic/claude-opus-4"
-    executor: str = "gemini-3-flash-preview"  # Used directly by SkillsBench.
-    mediator: str = "openai/gpt-5.4"
+    planner: str
+    executor: str
+    mediator: str
 
 
 class BudgetsConfig(BaseModel):
@@ -52,7 +52,7 @@ class PathsConfig(BaseModel):
 
 class ExecutorRuntimeConfig(BaseModel):
     backend: str = "skillsbench"
-    agent_name: str = "gemini"
+    agent_name: str = "opencode"
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     injected_skill_name: str = "executor-evolved"
@@ -68,7 +68,7 @@ class ExecutorRuntimeConfig(BaseModel):
 class Config(BaseModel):
     """Top-level configuration. Loaded from TOML."""
 
-    models: ModelsConfig = Field(default_factory=ModelsConfig)
+    models: ModelsConfig
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)

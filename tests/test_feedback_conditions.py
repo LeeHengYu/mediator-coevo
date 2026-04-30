@@ -202,7 +202,13 @@ def _orchestrator(
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
     orch.benchmark_repo = _TaskRepo()
-    orch.config = Config()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     orch.config.experiment.condition_name = condition
     orch.config.experiment.shared_notes = "shared note"
     orch.experiment_dir = tmp_path
@@ -410,7 +416,13 @@ async def test_long_trace_stderr_falls_back_when_llm_compactor_fails(tmp_path):
 
 
 def test_condition_assignment_and_cli_validation_reject_unknown_names():
-    config = Config()
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     with pytest.raises(ValidationError):
         config.experiment.condition_name = "bad-condition"
 

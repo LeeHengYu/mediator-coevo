@@ -55,7 +55,13 @@ def _proposal(task_id: str, reward: float) -> SkillProposal:
 def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _SkillStore]:
     skill_store = _SkillStore()
     orch = Orchestrator.__new__(Orchestrator)
-    orch.config = Config()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     orch.config.experiment.advisor_buffer_max = 2
     orch.skill_store = skill_store
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")

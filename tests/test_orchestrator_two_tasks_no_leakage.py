@@ -137,7 +137,13 @@ class _Advisor:
 async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
     tmp_path,
 ):
-    config = Config()
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     config.experiment.condition_name = "learned_mediator"
     config.experiment.coevo_interval = 99
     config.experiment.advisor_buffer_max = 99

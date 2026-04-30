@@ -194,7 +194,13 @@ async def test_llm_client_raises_when_usage_is_missing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
-    config = Config()
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     config.budgets.trace_excerpt_tokens = 20
     config.budgets.historical_summary_tokens = 30
     store = ArtifactStore(base_dir=tmp_path / "artifacts")
@@ -241,7 +247,13 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
 
 
 def test_planner_constructed_prompt_fits_budget():
-    config = Config()
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     config.budgets.max_skill_tokens = 30
     config.budgets.mediator_report_tokens = 30
     config.budgets.planner_context_tokens = 500

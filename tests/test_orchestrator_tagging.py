@@ -343,7 +343,13 @@ def test_build_coevolution_record_captures_reflector_token_events():
         total_tokens=15,
     )
     orch = Orchestrator.__new__(Orchestrator)
-    orch.config = Config()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     orch.skill_store = _EmptySkillStore()
 
     record = orch._build_coevolution_record(
@@ -416,7 +422,13 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
     orch.benchmark_repo = _MissingTaskRepo()
-    orch.config = Config()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
     orch._proposal_buffer = []
@@ -496,7 +508,13 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
     orch.benchmark_repo = _AnyTaskRepo()
-    orch.config = Config()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     orch.experiment_dir = tmp_path
     orch.skill_advisor = None
     orch._proposal_buffer = []
@@ -557,7 +575,13 @@ class _PatchPlanner:
 @pytest.mark.asyncio
 async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
     orch = Orchestrator.__new__(Orchestrator)
-    orch.config = Config()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
     orch.config.experiment.advisor_buffer_max = 2
     orch.skill_store = _MemorySkillStore()
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")

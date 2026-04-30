@@ -12,8 +12,11 @@ Run explicitly:
 Use ``uv`` as the test entrypoint; it manages and reuses the local
 ``.venv`` for this project.
 
-Set ``MEDIATED_COEVO_INTEGRATION_MODEL`` (default: google/gemini-2.5-flash) to
-override the executor model. Skip with ``MEDIATED_COEVO_SKIP_INTEGRATION=1``.
+Set ``MEDIATED_COEVO_INTEGRATION_AGENT`` (default: opencode) or
+``MEDIATED_COEVO_INTEGRATION_MODEL`` (default:
+openrouter/google/gemini-3-flash-preview) to override the executor. The default
+requires ``OPENROUTER_API_KEY``. Skip with
+``MEDIATED_COEVO_SKIP_INTEGRATION=1``.
 """
 
 from __future__ import annotations
@@ -35,8 +38,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BENCH_ROOT = PROJECT_ROOT / "benchmarks" / "skillsbench"
 TASK_ID = "fix-build-google-auto"
 
+INTEGRATION_AGENT = os.environ.get("MEDIATED_COEVO_INTEGRATION_AGENT", "opencode")
 INTEGRATION_MODEL = os.environ.get(
-    "MEDIATED_COEVO_INTEGRATION_MODEL", "google/gemini-2.5-flash"
+    "MEDIATED_COEVO_INTEGRATION_MODEL",
+    "openrouter/google/gemini-3-flash-preview",
 )
 SKIP_FLAG = os.environ.get("MEDIATED_COEVO_SKIP_INTEGRATION") == "1"
 
@@ -72,7 +77,7 @@ async def test_harbor_run_produces_classified_trace(tmp_path, capsys):
     )
 
     runner = HarborRunner(
-        agent_name="gemini-cli",
+        agent_name=INTEGRATION_AGENT,
         jobs_dir=tmp_path / "jobs",
         timeout_sec=900.0,
     )
@@ -88,7 +93,8 @@ async def test_harbor_run_produces_classified_trace(tmp_path, capsys):
     # Print diagnostics so a failure is debuggable without re-running.
     with capsys.disabled():
         print(
-            f"\n[integration] status={trace.status} "
+            f"\n[integration] agent={INTEGRATION_AGENT} "
+            f"model={INTEGRATION_MODEL} status={trace.status} "
             f"error_kind={trace.error_kind} reward={trace.reward} "
             f"returncode={result.returncode} trial_dir={result.trial_dir}"
         )
