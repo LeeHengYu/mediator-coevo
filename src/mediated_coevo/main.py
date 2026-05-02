@@ -19,9 +19,15 @@ from rich.logging import RichHandler
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.baselines import (
+    BASELINE_PRESET_NAMES,
+    BaselinePreset,
+    get_baseline_preset,
+    parse_skill_updates,
+)
 from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository
 from mediated_coevo.conditions import ConditionName
-from mediated_coevo.config import Config, load_config
+from mediated_coevo.config import Config, SkillUpdateConfig, load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.orchestrator import Orchestrator
@@ -45,6 +51,23 @@ class ExperimentRuntime:
     orchestrator: Orchestrator
 
 
+@dataclass(frozen=True)
+class MatrixRuntime:
+    """Runtime plus preset metadata for one baseline-matrix row."""
+
+    preset_name: str
+    runtime: ExperimentRuntime
+
+
+@dataclass(frozen=True)
+class ExperimentStores:
+    """Persistent stores for one experiment runtime."""
+
+    skill_store: SkillStore
+    artifact_store: ArtifactStore
+    history_store: HistoryStore
+
+
 class ExperimentFactory:
     """Build the object graph for one mediated co-evolution run."""
 
@@ -57,24 +80,25 @@ class ExperimentFactory:
         config: Config,
         seed: int,
         condition_name: ConditionName,
+        experiment_dir: Path | None = None,
+        isolate_skills: bool = False,
     ) -> ExperimentRuntime:
-        experiment_dir = self._create_experiment_dir(seed, condition_name)
+        experiment_dir = self._resolve_experiment_dir(
+            config=config,
+            seed=seed,
+            condition_name=condition_name,
+            experiment_dir=experiment_dir,
+        )
+        skills_dir = self._resolve_skills_dir(
+            config=config,
+            experiment_dir=experiment_dir,
+            isolate_skills=isolate_skills,
+        )
         self._save_config(config, experiment_dir)
 
-        skill_store = SkillStore(self._project_root / config.paths.skills_dir)
-        skill_store.validate()
-        artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
-        history_store = HistoryStore(history_dir=experiment_dir / "history")
-        benchmark_repo = SkillsBenchRepository(
-            root_dir=self._project_root / config.paths.benchmarks_dir,
-            task_dirs=config.executor_runtime.task_dirs,
-        )
-        harbor_runner = HarborRunner(
-            agent_name=config.executor_runtime.agent_name,
-            jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
-            timeout_sec=config.executor_runtime.harbor_timeout_sec,
-        )
-
+        stores = self._build_stores(experiment_dir, skills_dir)
+        benchmark_repo = self._build_benchmark_repo(config)
+        harbor_runner = self._build_harbor_runner(config, experiment_dir)
         planner = self._build_planner(config)
         executor = ExecutorAgent(
             model=config.models.executor,
@@ -83,7 +107,11 @@ class ExperimentFactory:
             workspace_root=experiment_dir / "benchmarks",
             injected_skill_name=config.executor_runtime.injected_skill_name,
         )
-        mediator = self._build_mediator(config, artifact_store, skill_store)
+        mediator = self._build_mediator(
+            config,
+            stores.artifact_store,
+            stores.skill_store,
+        )
         skill_advisor = self._build_skill_advisor(config)
 
         return ExperimentRuntime(
@@ -92,9 +120,9 @@ class ExperimentFactory:
                 planner=planner,
                 executor=executor,
                 mediator=mediator,
-                skill_store=skill_store,
-                artifact_store=artifact_store,
-                history_store=history_store,
+                skill_store=stores.skill_store,
+                artifact_store=stores.artifact_store,
+                history_store=stores.history_store,
                 benchmark_repo=benchmark_repo,
                 config=config,
                 experiment_dir=experiment_dir,
@@ -102,20 +130,99 @@ class ExperimentFactory:
             ),
         )
 
+    def _resolve_experiment_dir(
+        self,
+        *,
+        config: Config,
+        seed: int,
+        condition_name: ConditionName,
+        experiment_dir: Path | None,
+    ) -> Path:
+        if experiment_dir is None:
+            return self._create_experiment_dir(
+                seed,
+                condition_name,
+                data_dir=config.paths.data_dir,
+                baseline_preset=config.experiment.baseline_preset,
+            )
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        return experiment_dir
+
+    def _resolve_skills_dir(
+        self,
+        *,
+        config: Config,
+        experiment_dir: Path,
+        isolate_skills: bool,
+    ) -> Path:
+        source = self._project_root / config.paths.skills_dir
+        if not isolate_skills:
+            return source
+        return self._copy_initial_skills(
+            source=source,
+            destination=experiment_dir / "skills",
+        )
+
+    @staticmethod
+    def _build_stores(experiment_dir: Path, skills_dir: Path) -> ExperimentStores:
+        skill_store = SkillStore(skills_dir)
+        skill_store.validate()
+        return ExperimentStores(
+            skill_store=skill_store,
+            artifact_store=ArtifactStore(base_dir=experiment_dir / "artifacts"),
+            history_store=HistoryStore(history_dir=experiment_dir / "history"),
+        )
+
+    def _build_benchmark_repo(self, config: Config) -> SkillsBenchRepository:
+        return SkillsBenchRepository(
+            root_dir=self._project_root / config.paths.benchmarks_dir,
+            task_dirs=config.executor_runtime.task_dirs,
+        )
+
+    @staticmethod
+    def _build_harbor_runner(
+        config: Config,
+        experiment_dir: Path,
+    ) -> HarborRunner:
+        return HarborRunner(
+            agent_name=config.executor_runtime.agent_name,
+            jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
+            timeout_sec=config.executor_runtime.harbor_timeout_sec,
+        )
+
     def _create_experiment_dir(
         self,
         seed: int,
         condition_name: ConditionName,
+        data_dir: str,
+        baseline_preset: str | None = None,
     ) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        suffix = baseline_preset or condition_name
         experiment_dir = (
             self._project_root
-            / "data"
+            / data_dir
             / "experiments"
-            / f"{timestamp}-{seed}-{condition_name}"
+            / f"{timestamp}-{seed}-{suffix}"
         )
         experiment_dir.mkdir(parents=True, exist_ok=True)
         return experiment_dir
+
+    def create_matrix_dir(self, seed: int, data_dir: str) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        matrix_dir = (
+            self._project_root
+            / data_dir
+            / "experiments"
+            / f"{timestamp}-{seed}-baseline-matrix"
+        )
+        matrix_dir.mkdir(parents=True, exist_ok=True)
+        return matrix_dir
+
+    @staticmethod
+    def _copy_initial_skills(source: Path, destination: Path) -> Path:
+        shutil.copytree(source, destination)
+        return destination
 
     @staticmethod
     def _save_config(config: Config, experiment_dir: Path) -> None:
@@ -178,6 +285,80 @@ def _validate_condition_name(condition: str) -> ConditionName:
     return cast(ConditionName, condition)
 
 
+def _parse_skill_updates(raw_value: str) -> SkillUpdateConfig:
+    """Parse CLI skill-update input and adapt parser errors to Typer."""
+    try:
+        return parse_skill_updates(raw_value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _validate_baseline_preset(preset_name: str) -> BaselinePreset:
+    try:
+        return get_baseline_preset(preset_name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _task_ids_from_cli(tasks: str) -> list[str]:
+    task_ids = [task.strip() for task in tasks.split(",") if task.strip()]
+    if not task_ids:
+        raise typer.BadParameter("at least one task ID is required")
+    return task_ids
+
+
+def _ensure_harbor_available(config: Config) -> None:
+    if config.executor_runtime.harbor_required and shutil.which("harbor") is None:
+        console.print(
+            "[bold red]ERROR:[/] harbor CLI not found on PATH. Install harbor, "
+            "or set executor_runtime.harbor_required = false in config."
+        )
+        raise typer.Exit(code=1)
+
+
+def _apply_experiment_settings(
+    config: Config,
+    *,
+    iterations: int,
+    seed: int,
+    condition_name: ConditionName | None = None,
+    skill_updates: SkillUpdateConfig | None = None,
+    baseline_preset: str | None = None,
+) -> Config:
+    """Apply CLI experiment settings to a loaded config object."""
+    config.experiment.num_iterations = iterations
+    config.experiment.seed = seed
+    if condition_name is not None:
+        config.experiment.condition_name = condition_name
+    if skill_updates is not None:
+        config.experiment.skill_updates = skill_updates
+    config.experiment.baseline_preset = baseline_preset
+    return config
+
+
+def _build_matrix_runtimes(
+    *,
+    factory: ExperimentFactory,
+    base_config: Config,
+    seed: int,
+    matrix_dir: Path,
+) -> list[MatrixRuntime]:
+    """Build all baseline-matrix rows with isolated skill stores."""
+    rows: list[MatrixRuntime] = []
+    for preset_name in BASELINE_PRESET_NAMES:
+        preset = _validate_baseline_preset(preset_name)
+        row_config = preset.build_config(base_config, seed=seed)
+        runtime = factory.build(
+            config=row_config,
+            seed=seed,
+            condition_name=preset.condition_name,
+            experiment_dir=matrix_dir / preset_name,
+            isolate_skills=True,
+        )
+        rows.append(MatrixRuntime(preset_name=preset_name, runtime=runtime))
+    return rows
+
+
 def _setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
@@ -199,6 +380,32 @@ def _reward_summary(records: list[IterationRecord]) -> tuple[int, int, float]:
     return scored_count, failure_count, avg_reward
 
 
+def _print_model_summary(config: Config) -> None:
+    console.print(
+        "[bold]Models:[/] "
+        f"planner={config.models.planner} "
+        f"executor={config.models.executor} "
+        f"mediator={config.models.mediator}"
+    )
+
+
+def _print_result_summary(
+    *,
+    records: list[IterationRecord],
+    data_dir: Path,
+    header: str,
+) -> None:
+    scored_count, failure_count, avg_reward = _reward_summary(records)
+    total_tokens = sum(record.total_tokens for record in records)
+    console.print(f"\n[bold]{header}:[/]")
+    console.print(f"  Iterations: {len(records)}")
+    console.print(f"  Scored: {scored_count}")
+    console.print(f"  Env failures: {failure_count}")
+    console.print(f"  Avg reward (scored only): {avg_reward:.3f}")
+    console.print(f"  Total tokens: {total_tokens:,}")
+    console.print(f"  Data: {data_dir}")
+
+
 @app.command()
 def run(
     tasks: str = typer.Option("fix-build-google-auto", help="Comma-separated task IDs"),
@@ -208,6 +415,11 @@ def run(
         "learned_mediator",
         help="Experiment condition: no_feedback | full_traces | shared_notes | static_mediator | learned_mediator",
     ),
+    skill_updates: str = typer.Option(
+        "all",
+        "--skill-updates",
+        help="Comma-separated skill updates allowed: none | executor | planner | mediator | all",
+    ),
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -216,24 +428,25 @@ def run(
     random.seed(seed)
 
     condition_name = _validate_condition_name(condition)
+    skill_update_config = _parse_skill_updates(skill_updates)
 
-    config = load_config(config_dir)
-    config.experiment.seed = seed
-    config.experiment.condition_name = condition_name
+    config = _apply_experiment_settings(
+        load_config(config_dir),
+        iterations=iterations,
+        seed=seed,
+        condition_name=condition_name,
+        skill_updates=skill_update_config,
+    )
 
-    if config.executor_runtime.harbor_required and shutil.which("harbor") is None:
-        console.print(
-            "[bold red]ERROR:[/] harbor CLI not found on PATH. Install harbor, "
-            "or set executor_runtime.harbor_required = false in config."
-        )
-        raise typer.Exit(code=1)
+    _ensure_harbor_available(config)
 
-    task_ids = [t.strip() for t in tasks.split(",")]
+    task_ids = _task_ids_from_cli(tasks)
 
     console.print(f"[bold]Tasks:[/] {task_ids}")
     console.print(f"[bold]Iterations:[/] {iterations}")
     console.print(f"[bold]Condition:[/] {condition_name}")
-    console.print(f"[bold]Models:[/] planner={config.models.planner} executor={config.models.executor} mediator={config.models.mediator}")
+    console.print(f"[bold]Skill updates:[/] {skill_update_config.model_dump()}")
+    _print_model_summary(config)
 
     runtime = ExperimentFactory(PROJECT_ROOT).build(
         config=config,
@@ -245,16 +458,66 @@ def run(
     console.print(f"\n[bold green]Starting experiment:[/] {runtime.experiment_dir}\n")
     records = asyncio.run(runtime.orchestrator.run_experiment(task_ids, iterations))
 
-    # Summary
-    scored_count, failure_count, avg_reward = _reward_summary(records)
-    total_tokens = sum(r.total_tokens for r in records)
-    console.print("\n[bold]Results:[/]")
-    console.print(f"  Iterations: {len(records)}")
-    console.print(f"  Scored: {scored_count}")
-    console.print(f"  Env failures: {failure_count}")
-    console.print(f"  Avg reward (scored only): {avg_reward:.3f}")
-    console.print(f"  Total tokens: {total_tokens:,}")
-    console.print(f"  Data: {runtime.experiment_dir}")
+    _print_result_summary(
+        records=records,
+        data_dir=runtime.experiment_dir,
+        header="Results",
+    )
+
+
+@app.command()
+def matrix(
+    tasks: str = typer.Option("fix-build-google-auto", help="Comma-separated task IDs"),
+    iterations: int = typer.Option(30, help="Number of iterations per row"),
+    seed: int = typer.Option(42, help="Random seed reused for every row"),
+    config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run the seven-row baseline matrix with isolated per-row skills."""
+    _setup_logging(verbose)
+
+    task_ids = _task_ids_from_cli(tasks)
+    config = _apply_experiment_settings(
+        load_config(config_dir),
+        iterations=iterations,
+        seed=seed,
+    )
+    _ensure_harbor_available(config)
+
+    factory = ExperimentFactory(PROJECT_ROOT)
+    matrix_dir = factory.create_matrix_dir(seed=seed, data_dir=config.paths.data_dir)
+    rows = _build_matrix_runtimes(
+        factory=factory,
+        base_config=config,
+        seed=seed,
+        matrix_dir=matrix_dir,
+    )
+
+    console.print(f"[bold]Tasks:[/] {task_ids}")
+    console.print(f"[bold]Iterations per row:[/] {iterations}")
+    console.print(f"[bold]Seed per row:[/] {seed}")
+    console.print(f"[bold]Matrix:[/] {matrix_dir}")
+    console.print(f"[bold]Rows:[/] {', '.join(BASELINE_PRESET_NAMES)}")
+
+    for row in rows:
+        row_config = row.runtime.orchestrator.config
+        random.seed(seed)
+        console.print(
+            "\n[bold green]Starting matrix row:[/] "
+            f"{row.preset_name} "
+            f"(condition={row_config.experiment.condition_name}, "
+            f"skill_updates={row_config.experiment.skill_updates.model_dump()})"
+        )
+        records = asyncio.run(
+            row.runtime.orchestrator.run_experiment(task_ids, iterations)
+        )
+        _print_result_summary(
+            records=records,
+            data_dir=row.runtime.experiment_dir,
+            header=f"Row results: {row.preset_name}",
+        )
+
+    console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
 
 
 if __name__ == "__main__":

@@ -32,6 +32,14 @@ class BudgetsConfig(BaseModel):
     reflector_completion_tokens: int = 4096
 
 
+class SkillUpdateConfig(BaseModel):
+    """Independent permissions for committing each runtime skill family."""
+
+    executor: bool = True
+    planner: bool = True
+    mediator: bool = True
+
+
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
@@ -40,6 +48,8 @@ class ExperimentConfig(BaseModel):
     seed: int = 42
     advisor_buffer_max: int = 10
     condition_name: ConditionName = "learned_mediator"
+    skill_updates: SkillUpdateConfig = Field(default_factory=SkillUpdateConfig)
+    baseline_preset: str | None = None
     shared_notes: str | None = None
     allow_cross_task_feedback: bool = False
 

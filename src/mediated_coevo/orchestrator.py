@@ -10,7 +10,7 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.executor import ExecutorAgent
@@ -18,7 +18,6 @@ from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.conditions import (
     ConditionName,
-    MEDIATOR_EVOLVE_CONDITIONS,
     get_cross_task_prior_context,
     get_prior_context,
 )
@@ -44,6 +43,12 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from mediated_coevo.evolution.reflector import ReflectionResult
+
+
+class _ExperimentRecordFields(TypedDict):
+    baseline_preset: str | None
+    cross_task_feedback_enabled: bool
+    skill_update_policy: dict[str, bool]
 
 
 class Orchestrator:
@@ -247,9 +252,7 @@ class Orchestrator:
             llm_token_events=llm_token_events,
             total_tokens=sum(e.total_tokens for e in llm_token_events),
             condition_name=condition,
-            cross_task_feedback_enabled=(
-                self.config.experiment.allow_cross_task_feedback
-            ),
+            **self._experiment_record_fields(),
             skill_hashes=dict(skill_hashes),
         )
 
@@ -261,6 +264,9 @@ class Orchestrator:
         executor_skill: str,
         feedback: str | None,
     ) -> None:
+        if not self.config.experiment.skill_updates.executor:
+            logger.info("Step 4: Skipped (executor skill updates disabled).")
+            return
         if not feedback or not executor_skill:
             logger.info("Step 4: Skipped (no mediator feedback).")
             return
@@ -356,9 +362,7 @@ class Orchestrator:
             mediator_history_entry_id=mediator_entry_id,
             planner_history_entry_id=planner_entry_id,
             condition_name=condition,
-            cross_task_feedback_enabled=(
-                self.config.experiment.allow_cross_task_feedback
-            ),
+            **self._experiment_record_fields(),
             skill_hashes=dict(skill_hashes),
         )
         reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
@@ -424,6 +428,15 @@ class Orchestrator:
         Clears the buffer regardless of outcome.
         Returns the committed SkillUpdate if a patch was applied, else None.
         """
+        if not self.config.experiment.skill_updates.executor:
+            if self._proposal_buffer:
+                logger.info(
+                    "Executor skill updates disabled; clearing %d buffered proposal(s).",
+                    len(self._proposal_buffer),
+                )
+                self._proposal_buffer.clear()
+            return None
+
         if len(self._proposal_buffer) < self.config.experiment.advisor_buffer_max:
             return None
 
@@ -514,8 +527,7 @@ class Orchestrator:
         skill_updates: list[SkillUpdate] = []
         reflection_seed = random.randrange(1 << 32)
 
-        # Mediator skill evolution only for learned_mediator
-        if condition in MEDIATOR_EVOLVE_CONDITIONS:
+        if self.config.experiment.skill_updates.mediator:
             mediator_result = await reflector.reflect(
                 "mediator",
                 self.mediator.llm_client,
@@ -527,18 +539,20 @@ class Orchestrator:
                 self.mediator.load_protocol(mediator_result.new_content)
                 skill_updates.append(self._skill_update_from_reflection(mediator_result))
         else:
-            logger.info("Mediator skill evolution skipped (condition=%s).", condition)
+            logger.info("Mediator skill evolution skipped (skill updates disabled).")
 
-        # Planner reflects on skill-edit history
-        planner_result = await reflector.reflect(
-            "planner",
-            self.planner.llm_client,
-            iteration=iteration,
-            selection_seed=reflection_seed + 1,
-        )
-        if planner_result:
-            planner_result.provenance.rollback_snapshot = self._rollback_snapshot(iteration)
-            skill_updates.append(self._skill_update_from_reflection(planner_result))
+        if self.config.experiment.skill_updates.planner:
+            planner_result = await reflector.reflect(
+                "planner",
+                self.planner.llm_client,
+                iteration=iteration,
+                selection_seed=reflection_seed + 1,
+            )
+            if planner_result:
+                planner_result.provenance.rollback_snapshot = self._rollback_snapshot(iteration)
+                skill_updates.append(self._skill_update_from_reflection(planner_result))
+        else:
+            logger.info("Planner skill evolution skipped (skill updates disabled).")
         llm_token_events = self._drain_llm_token_events()
         if not llm_token_events and not skill_updates:
             return None
@@ -608,6 +622,20 @@ class Orchestrator:
             return {}
         return dict(skill_hashes())
 
+    def _skill_update_policy(self) -> dict[str, bool]:
+        """Return the configured update permissions for metrics rows."""
+        return self.config.experiment.skill_updates.model_dump()
+
+    def _experiment_record_fields(self) -> _ExperimentRecordFields:
+        """Return shared experiment metadata for metrics records."""
+        return {
+            "baseline_preset": self.config.experiment.baseline_preset,
+            "cross_task_feedback_enabled": (
+                self.config.experiment.allow_cross_task_feedback
+            ),
+            "skill_update_policy": self._skill_update_policy(),
+        }
+
     @staticmethod
     def _attach_skill_identity(
         record: IterationRecord,
@@ -655,8 +683,6 @@ class Orchestrator:
             llm_token_events=llm_token_events,
             duration_sec=time.time() - start,
             condition_name=condition,
-            cross_task_feedback_enabled=(
-                self.config.experiment.allow_cross_task_feedback
-            ),
+            **self._experiment_record_fields(),
             skill_hashes=self._current_skill_hashes(),
         )

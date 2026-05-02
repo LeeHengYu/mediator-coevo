@@ -21,3 +21,8 @@ def test_save_config_omits_none_values_for_toml(tmp_path):
     saved = tomllib.loads((tmp_path / "config.toml").read_text())
     assert "shared_notes" not in saved["experiment"]
     assert saved["experiment"]["allow_cross_task_feedback"] is False
+    assert saved["experiment"]["skill_updates"] == {
+        "executor": True,
+        "planner": True,
+        "mediator": True,
+    }

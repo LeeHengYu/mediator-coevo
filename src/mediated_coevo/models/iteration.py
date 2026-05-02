@@ -35,6 +35,8 @@ class IterationRecord(BaseModel):
     mediator_history_entry_id: str | None = None
     planner_history_entry_id: str | None = None
     condition_name: ConditionName = "learned_mediator"
+    baseline_preset: str | None = None
     cross_task_feedback_enabled: bool = False
+    skill_update_policy: dict[str, bool] = Field(default_factory=dict)
     skill_hashes: dict[str, str] = Field(default_factory=dict)
     skill_version: str | None = None

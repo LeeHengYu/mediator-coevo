@@ -56,9 +56,52 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 - Executor runs a vendored local SkillsBench-style Harbor task and parses the resulting `reward`, verifier output, and agent logs into `ExecutionTrace`.
 - The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
 - Experiment conditions selectable via `--condition` (`no_feedback` | `full_traces` | `shared_notes` | `static_mediator` | `learned_mediator`).
+- Skill update permissions are independently selectable via `--skill-updates` (`none` | `executor` | `planner` | `mediator` | `all`, comma-separated except for `none` and `all`).
 - Previous-report state is task-keyed; cross-task feedback is opt-in via `experiment.allow_cross_task_feedback` (default `false`).
 - Skill directories require a canonical `SKILL.md` entrypoint, validated at startup by `SkillStore.validate()`.
 - History outcome tagging uses stable entry IDs so multi-task runs cannot attribute a reward to the wrong task's planner/mediator entry.
+
+### Baseline Matrix
+
+The baseline matrix separates two axes:
+
+1. Feedback routing, controlled by `--condition` and responsible for Planner prior context plus Mediator calls.
+2. Skill-update permission, controlled by `--skill-updates` or by a matrix preset and responsible only for whether committed skill edits are allowed.
+
+Run one custom row:
+
+```
+uv run medcoevo run --condition learned_mediator --skill-updates executor,planner,mediator
+```
+
+Run all seven baseline rows with identical tasks, seed, model config, budgets, and isolated per-row skill copies:
+
+```
+uv run medcoevo matrix --tasks fix-build-google-auto --iterations 30 --seed 42
+```
+
+Matrix rows:
+
+| Preset | Feedback condition | Skill updates |
+| --- | --- | --- |
+| `no_feedback` | `no_feedback` | `none` |
+| `full_trace_same_task` | `full_traces` | `none` |
+| `static_mediator_same_task` | `static_mediator` | `none` |
+| `learned_mediator_same_task` | `learned_mediator` | `mediator` |
+| `planner_only_skill_evolution` | `learned_mediator` | `planner` |
+| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator` |
+| `full_coevolution` | `learned_mediator` | `executor,planner,mediator` |
+
+The `matrix` command copies the initial configured `skills/` tree into each row's experiment directory before the row starts. Matrix rows therefore cannot write to repo-level skills or contaminate one another.
+
+Assumptions encoded in the presets:
+
+- `learned_mediator_same_task` uses learned Mediator reports and allows the Mediator skill to evolve; Planner and Executor updates stay disabled.
+- `planner_only_skill_evolution` uses learned Mediator reports, but only the Planner meta-skill evolves.
+- `mediator_only_protocol_evolution` disables Executor skill updates and allows only Mediator protocol evolution.
+- `full_coevolution` is the only baseline row that permits Executor, Planner, and Mediator skill commits together.
+
+Metrics persist `baseline_preset` when present and `skill_update_policy` for every row. The existing `skill_updates` metrics field remains the list of committed co-evolution skill updates.
 
 ## Testing
 
@@ -92,6 +135,7 @@ with `MEDIATED_COEVO_INTEGRATION_AGENT` and `MEDIATED_COEVO_INTEGRATION_MODEL`.
 **Flow 1 — Executor skill gating (count-triggered)**
 
 Updates `skills/executor/SKILL.md` — what the Executor knows how to do.
+Enabled only when `skill_updates.executor = true`.
 
 ```
 Each iteration:
@@ -107,6 +151,7 @@ When buffer hits advisor_buffer_max (default 10):
 **Flow 2 — Agent meta-skill co-evolution (iteration-triggered)**
 
 Updates `skills/mediator/SKILL.md` and `skills/planner/SKILL.md` — _how_ each agent behaves, not what the Executor executes.
+Mediator reflection requires `skill_updates.mediator = true`; Planner reflection requires `skill_updates.planner = true`.
 
 ```
 Every coevo_interval iterations (default 5):
