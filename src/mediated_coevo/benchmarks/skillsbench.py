@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import shutil
 import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
+import zipfile
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
 
 logger = logging.getLogger(__name__)
+
+SKILLSBENCH_ARCHIVE_URL = (
+    "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
+)
 
 
 class HarborNotFoundError(RuntimeError):
@@ -24,6 +33,18 @@ class HarborNotFoundError(RuntimeError):
 
 class HarborTimeoutError(RuntimeError):
     """Raised when a Harbor subprocess exceeds the configured timeout."""
+
+
+class SkillsBenchFetchError(FileNotFoundError):
+    """Raised when a remote SkillsBench task cannot be fetched or materialized."""
+
+
+@dataclass(frozen=True, slots=True)
+class SkillsBenchRemoteConfig:
+    """Remote archive settings for on-demand SkillsBench task fetching."""
+
+    enabled: bool = False
+    timeout_sec: float = 60.0
 
 
 @dataclass(slots=True)
@@ -51,19 +72,267 @@ class HarborRunResult:
 class SkillsBenchRepository:
     """Resolve local SkillsBench-style tasks and materialize run workspaces."""
 
-    def __init__(self, root_dir: Path, task_dirs: list[str]) -> None:
+    def __init__(
+        self,
+        root_dir: Path,
+        task_dirs: list[str],
+        remote: SkillsBenchRemoteConfig | None = None,
+    ) -> None:
         self.root_dir = root_dir
         self.task_dirs = task_dirs
+        self.remote = remote or SkillsBenchRemoteConfig()
+        self._archive_cache: dict[str, bytes] = {}
+
+    def default_local_cache_dir(self) -> Path:
+        """Return the local directory where task folders are cached."""
+        return self.root_dir / self.task_dirs[0]
 
     def resolve(self, task_id: str) -> SkillsBenchTask:
-        for task_dir_name in self.task_dirs:
-            candidate = self.root_dir / task_dir_name / task_id
-            if candidate.exists():
-                return self._load_task(candidate, task_id)
-        searched = [str(self.root_dir / name / task_id) for name in self.task_dirs]
+        local_task_dir = self._resolve_local_task_dir(task_id)
+        if local_task_dir is not None:
+            return self._load_task(local_task_dir, task_id)
+
+        if self.remote.enabled:
+            fetched_task_dir = self._fetch_task(task_id)
+            return self._load_task(fetched_task_dir, task_id)
+
+        searched = [str(self.default_local_cache_dir() / task_id)]
         raise FileNotFoundError(
             f"Task '{task_id}' not found under local benchmark root. Searched: {searched}"
         )
+
+    def list_local_task_ids(self) -> list[str]:
+        """Return safe task IDs already present in local task dirs."""
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        task_dir = self.default_local_cache_dir()
+        if not task_dir.exists():
+            return task_ids
+        for candidate in sorted(task_dir.iterdir(), key=lambda path: path.name):
+            task_id = candidate.name
+            if (
+                candidate.is_dir()
+                and task_id not in seen
+                and self._is_safe_task_id(task_id)
+            ):
+                task_ids.append(task_id)
+                seen.add(task_id)
+        return task_ids
+
+    def list_remote_task_ids(self) -> list[str]:
+        """Return safe task IDs advertised by the provided remote archive."""
+        if not self.remote.enabled:
+            raise SkillsBenchFetchError(
+                "Remote SkillsBench task discovery is disabled; set "
+                "executor_runtime.remote_fetch = true to use skillsbench-all."
+            )
+
+        archive_url = SKILLSBENCH_ARCHIVE_URL
+        archive_bytes = self._archive_bytes(archive_url)
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
+        except zipfile.BadZipFile as exc:
+            raise SkillsBenchFetchError(
+                f"Remote SkillsBench archive {archive_url!r} is not a valid zip file"
+            ) from exc
+
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        with archive:
+            task_dir_name = self.task_dirs[0]
+            for task_id in self._task_ids_from_archive(
+                archive.namelist(),
+                task_dir_name,
+            ):
+                if task_id not in seen:
+                    task_ids.append(task_id)
+                    seen.add(task_id)
+        return task_ids
+
+    def sync_tasks(self, task_ids: list[str]) -> list[SkillsBenchTask]:
+        """Ensure selected tasks are present locally, fetching missing ones."""
+        if not task_ids:
+            raise SkillsBenchFetchError("At least one SkillsBench task ID is required")
+        return [self.resolve(task_id) for task_id in task_ids]
+
+    def _resolve_local_task_dir(self, task_id: str) -> Path | None:
+        candidate = self.default_local_cache_dir() / task_id
+        if candidate.exists():
+            return candidate
+        return None
+
+    def _fetch_task(self, task_id: str) -> Path:
+        self._validate_task_id(task_id)
+        archive_url = SKILLSBENCH_ARCHIVE_URL
+        try:
+            archive_bytes = self._archive_bytes(archive_url)
+        except SkillsBenchFetchError as exc:
+            searched = [str(self.default_local_cache_dir() / task_id)]
+            raise SkillsBenchFetchError(
+                f"Task '{task_id}' is not available locally and remote fetch failed. "
+                f"Searched local paths: {searched}. Remote archive: {archive_url!r}. "
+                f"Cause: {exc}"
+            ) from exc
+
+        task_dir_name = self.task_dirs[0]
+        target = self.default_local_cache_dir() / task_id
+        remote_paths = [f"{task_dir_name}/{task_id}"]
+        if target.exists():
+            return target
+        materialized = self._extract_task_from_archive(
+            archive_bytes=archive_bytes,
+            task_dir_name=task_dir_name,
+            task_id=task_id,
+            target=target,
+            archive_url=archive_url,
+        )
+        if materialized is not None:
+            return materialized
+
+        raise SkillsBenchFetchError(
+            f"Task '{task_id}' not found in remote SkillsBench archive "
+            f"{archive_url!r}. Searched remote paths: {remote_paths}"
+        )
+
+    def _download_archive(self, archive_url: str) -> bytes:
+        parsed = urllib.parse.urlparse(archive_url)
+        try:
+            if parsed.scheme == "":
+                return Path(archive_url).read_bytes()
+            with urllib.request.urlopen(archive_url, timeout=self.remote.timeout_sec) as response:
+                return response.read()
+        except (OSError, urllib.error.URLError) as exc:
+            raise SkillsBenchFetchError(
+                f"Failed to fetch SkillsBench archive {archive_url!r}: {exc}"
+            ) from exc
+
+    def _archive_bytes(self, archive_url: str) -> bytes:
+        cached = self._archive_cache.get(archive_url)
+        if cached is not None:
+            return cached
+        archive_bytes = self._download_archive(archive_url)
+        self._archive_cache[archive_url] = archive_bytes
+        return archive_bytes
+
+    def _extract_task_from_archive(
+        self,
+        *,
+        archive_bytes: bytes,
+        task_dir_name: str,
+        task_id: str,
+        target: Path,
+        archive_url: str,
+    ) -> Path | None:
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
+        except zipfile.BadZipFile as exc:
+            raise SkillsBenchFetchError(
+                f"Remote SkillsBench archive {archive_url!r} is not a valid zip file"
+            ) from exc
+
+        with archive:
+            prefix = self._find_task_prefix(archive.namelist(), task_dir_name, task_id)
+            if prefix is None:
+                return None
+
+            temp_dir = self._new_fetch_temp_dir(task_dir_name, task_id)
+            for member in archive.infolist():
+                member_name = member.filename
+                if not member_name.startswith(prefix) or member_name == prefix:
+                    continue
+                relative = PurePosixPath(member_name[len(prefix) :])
+                self._validate_relative_archive_path(relative, member_name)
+                destination = temp_dir.joinpath(*relative.parts)
+                if member.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, open(destination, "wb") as sink:
+                    shutil.copyfileobj(source, sink)
+
+        self._load_task(temp_dir, task_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            return target
+        temp_dir.replace(target)
+        logger.info("Fetched SkillsBench task %s into %s", task_id, target)
+        return target
+
+    def _new_fetch_temp_dir(self, task_dir_name: str, task_id: str) -> Path:
+        temp_dir = (
+            self.root_dir
+            / ".fetch-tmp"
+            / task_dir_name
+            / f"{task_id}-{uuid.uuid4().hex[:8]}"
+        )
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        return temp_dir
+
+    @staticmethod
+    def _find_task_prefix(
+        member_names: list[str],
+        task_dir_name: str,
+        task_id: str,
+    ) -> str | None:
+        for raw_name in member_names:
+            parts = PurePosixPath(raw_name).parts
+            for offset in (0, 1):
+                if (
+                    len(parts) >= offset + 2
+                    and parts[offset] == task_dir_name
+                    and parts[offset + 1] == task_id
+                ):
+                    return "/".join(parts[: offset + 2]) + "/"
+        return None
+
+    @classmethod
+    def _task_ids_from_archive(
+        cls,
+        member_names: list[str],
+        task_dir_name: str,
+    ) -> list[str]:
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_name in member_names:
+            parts = PurePosixPath(raw_name).parts
+            for offset in (0, 1):
+                if len(parts) < offset + 3 or parts[offset] != task_dir_name:
+                    continue
+                task_id = parts[offset + 1]
+                if not cls._is_safe_task_id(task_id) or task_id in seen:
+                    continue
+                task_ids.append(task_id)
+                seen.add(task_id)
+        return sorted(task_ids)
+
+    @staticmethod
+    def _is_safe_task_id(task_id: str) -> bool:
+        return (
+            bool(task_id)
+            and task_id not in {".", ".."}
+            and not task_id.startswith(".")
+            and "/" not in task_id
+            and "\\" not in task_id
+        )
+
+    @staticmethod
+    def _validate_task_id(task_id: str) -> None:
+        if not SkillsBenchRepository._is_safe_task_id(task_id):
+            raise SkillsBenchFetchError(f"Unsafe SkillsBench task_id: {task_id!r}")
+
+    @staticmethod
+    def _validate_relative_archive_path(
+        relative: PurePosixPath,
+        member_name: str,
+    ) -> None:
+        if (
+            not relative.parts
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise SkillsBenchFetchError(
+                f"Unsafe path in SkillsBench archive member {member_name!r}"
+            )
 
     def prepare_run_workspace(
         self,

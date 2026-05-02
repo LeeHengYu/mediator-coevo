@@ -119,9 +119,15 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
     for row in rows:
         row_config = row.runtime.orchestrator.config
         skill_dir = row.runtime.orchestrator.skill_store._skills_dir
+        benchmark_repo = row.runtime.orchestrator.benchmark_repo
         row_skill_dirs.append(skill_dir)
         assert skill_dir == matrix_dir / row.preset_name / "skills"
         assert (skill_dir / "executor" / "SKILL.md").read_text() == "# Executor\n"
+        assert benchmark_repo.root_dir == tmp_path / "benchmarks" / "skillsbench"
+        assert (
+            benchmark_repo.default_local_cache_dir()
+            == tmp_path / "benchmarks" / "skillsbench" / "tasks"
+        )
         assert row_config.experiment.seed == 123
         assert row_config.experiment.num_iterations == 8
         assert row_config.experiment.baseline_preset == row.preset_name

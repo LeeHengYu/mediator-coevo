@@ -66,6 +66,7 @@ class ExecutorRuntimeConfig(BaseModel):
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     injected_skill_name: str = "executor-evolved"
+    remote_fetch: bool = True
     # Hard wall-clock cap on a single Harbor subprocess (seconds). Prevents
     # a hung run from blocking the orchestrator indefinitely.
     harbor_timeout_sec: float = 1800.0

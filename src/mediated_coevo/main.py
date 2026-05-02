@@ -21,11 +21,20 @@ from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.baselines import (
     BASELINE_PRESET_NAMES,
-    BaselinePreset,
     get_baseline_preset,
     parse_skill_updates,
 )
-from mediated_coevo.benchmarks import HarborRunner, SkillsBenchRepository
+from mediated_coevo.benchmarks import (
+    HarborRunner,
+    SkillsBenchFetchError,
+    SkillsBenchRemoteConfig,
+    SkillsBenchRepository,
+)
+from mediated_coevo.benchmarks.task_sets import (
+    TASK_SETS,
+    TaskSetError,
+    resolve_task_selection,
+)
 from mediated_coevo.conditions import ConditionName
 from mediated_coevo.config import Config, SkillUpdateConfig, load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
@@ -36,11 +45,15 @@ from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
 app = typer.Typer(name="medcoevo", help="Mediated Co-Evolution Experiment Runner")
+skillsbench_app = typer.Typer(help="Manage the local SkillsBench task cache")
+app.add_typer(skillsbench_app, name="skillsbench")
 console = Console()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 VALID_CONDITION_NAMES = set(get_args(ConditionName))
+DEFAULT_TASKS = "fix-build-google-auto"
+SKILLSBENCH_ALL_TASK_SET = "skillsbench-all"
 
 
 @dataclass(frozen=True)
@@ -59,15 +72,6 @@ class MatrixRuntime:
     runtime: ExperimentRuntime
 
 
-@dataclass(frozen=True)
-class ExperimentStores:
-    """Persistent stores for one experiment runtime."""
-
-    skill_store: SkillStore
-    artifact_store: ArtifactStore
-    history_store: HistoryStore
-
-
 class ExperimentFactory:
     """Build the object graph for one mediated co-evolution run."""
 
@@ -82,24 +86,50 @@ class ExperimentFactory:
         condition_name: ConditionName,
         experiment_dir: Path | None = None,
         isolate_skills: bool = False,
+        benchmark_repo: SkillsBenchRepository | None = None,
     ) -> ExperimentRuntime:
-        experiment_dir = self._resolve_experiment_dir(
-            config=config,
-            seed=seed,
-            condition_name=condition_name,
-            experiment_dir=experiment_dir,
-        )
-        skills_dir = self._resolve_skills_dir(
-            config=config,
-            experiment_dir=experiment_dir,
-            isolate_skills=isolate_skills,
-        )
-        self._save_config(config, experiment_dir)
+        from mediated_coevo.llm.client import LLMClient
 
-        stores = self._build_stores(experiment_dir, skills_dir)
-        benchmark_repo = self._build_benchmark_repo(config)
-        harbor_runner = self._build_harbor_runner(config, experiment_dir)
-        planner = self._build_planner(config)
+        if experiment_dir is None:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            suffix = config.experiment.baseline_preset or condition_name
+            experiment_dir = (
+                self._project_root
+                / config.paths.data_dir
+                / "experiments"
+                / f"{timestamp}-{seed}-{suffix}"
+            )
+            experiment_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            experiment_dir.mkdir(parents=True, exist_ok=True)
+
+        source_skills_dir = self._project_root / config.paths.skills_dir
+        runtime_skills_dir = source_skills_dir
+        if isolate_skills:
+            runtime_skills_dir = shutil.copytree(
+                source_skills_dir,
+                experiment_dir / "skills",
+            )
+
+        with open(experiment_dir / "config.toml", "wb") as f:
+            tomli_w.dump(config.model_dump(exclude_none=True), f)
+
+        skill_store = SkillStore(runtime_skills_dir)
+        skill_store.validate()
+        artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
+        history_store = HistoryStore(history_dir=experiment_dir / "history")
+        if benchmark_repo is None:
+            benchmark_repo = _build_benchmark_repo(self._project_root, config)
+        harbor_runner = HarborRunner(
+            agent_name=config.executor_runtime.agent_name,
+            jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
+            timeout_sec=config.executor_runtime.harbor_timeout_sec,
+        )
+        planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
+        planner.configure_token_budget(
+            config.budgets,
+            condition_name=config.experiment.condition_name,
+        )
         executor = ExecutorAgent(
             model=config.models.executor,
             benchmark_repo=benchmark_repo,
@@ -107,12 +137,24 @@ class ExperimentFactory:
             workspace_root=experiment_dir / "benchmarks",
             injected_skill_name=config.executor_runtime.injected_skill_name,
         )
-        mediator = self._build_mediator(
-            config,
-            stores.artifact_store,
-            stores.skill_store,
+        mediator = MediatorAgent(
+            llm_client=LLMClient(model=config.models.mediator),
+            artifact_store=artifact_store,
         )
-        skill_advisor = self._build_skill_advisor(config)
+        mediator.configure_token_budget(
+            config.budgets,
+            condition_name=config.experiment.condition_name,
+        )
+        protocol = skill_store.read_skill("mediator")
+        if protocol:
+            mediator.load_protocol(protocol)
+        skill_advisor = SkillAdvisor(
+            llm_client=LLMClient(model=config.models.planner)
+        )
+        skill_advisor.configure_token_budget(
+            config.budgets,
+            condition_name=config.experiment.condition_name,
+        )
 
         return ExperimentRuntime(
             experiment_dir=experiment_dir,
@@ -120,93 +162,15 @@ class ExperimentFactory:
                 planner=planner,
                 executor=executor,
                 mediator=mediator,
-                skill_store=stores.skill_store,
-                artifact_store=stores.artifact_store,
-                history_store=stores.history_store,
+                skill_store=skill_store,
+                artifact_store=artifact_store,
+                history_store=history_store,
                 benchmark_repo=benchmark_repo,
                 config=config,
                 experiment_dir=experiment_dir,
                 skill_advisor=skill_advisor,
             ),
         )
-
-    def _resolve_experiment_dir(
-        self,
-        *,
-        config: Config,
-        seed: int,
-        condition_name: ConditionName,
-        experiment_dir: Path | None,
-    ) -> Path:
-        if experiment_dir is None:
-            return self._create_experiment_dir(
-                seed,
-                condition_name,
-                data_dir=config.paths.data_dir,
-                baseline_preset=config.experiment.baseline_preset,
-            )
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-        return experiment_dir
-
-    def _resolve_skills_dir(
-        self,
-        *,
-        config: Config,
-        experiment_dir: Path,
-        isolate_skills: bool,
-    ) -> Path:
-        source = self._project_root / config.paths.skills_dir
-        if not isolate_skills:
-            return source
-        return self._copy_initial_skills(
-            source=source,
-            destination=experiment_dir / "skills",
-        )
-
-    @staticmethod
-    def _build_stores(experiment_dir: Path, skills_dir: Path) -> ExperimentStores:
-        skill_store = SkillStore(skills_dir)
-        skill_store.validate()
-        return ExperimentStores(
-            skill_store=skill_store,
-            artifact_store=ArtifactStore(base_dir=experiment_dir / "artifacts"),
-            history_store=HistoryStore(history_dir=experiment_dir / "history"),
-        )
-
-    def _build_benchmark_repo(self, config: Config) -> SkillsBenchRepository:
-        return SkillsBenchRepository(
-            root_dir=self._project_root / config.paths.benchmarks_dir,
-            task_dirs=config.executor_runtime.task_dirs,
-        )
-
-    @staticmethod
-    def _build_harbor_runner(
-        config: Config,
-        experiment_dir: Path,
-    ) -> HarborRunner:
-        return HarborRunner(
-            agent_name=config.executor_runtime.agent_name,
-            jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
-            timeout_sec=config.executor_runtime.harbor_timeout_sec,
-        )
-
-    def _create_experiment_dir(
-        self,
-        seed: int,
-        condition_name: ConditionName,
-        data_dir: str,
-        baseline_preset: str | None = None,
-    ) -> Path:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        suffix = baseline_preset or condition_name
-        experiment_dir = (
-            self._project_root
-            / data_dir
-            / "experiments"
-            / f"{timestamp}-{seed}-{suffix}"
-        )
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-        return experiment_dir
 
     def create_matrix_dir(self, seed: int, data_dir: str) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -219,61 +183,6 @@ class ExperimentFactory:
         matrix_dir.mkdir(parents=True, exist_ok=True)
         return matrix_dir
 
-    @staticmethod
-    def _copy_initial_skills(source: Path, destination: Path) -> Path:
-        shutil.copytree(source, destination)
-        return destination
-
-    @staticmethod
-    def _save_config(config: Config, experiment_dir: Path) -> None:
-        with open(experiment_dir / "config.toml", "wb") as f:
-            tomli_w.dump(config.model_dump(exclude_none=True), f)
-
-    @staticmethod
-    def _build_planner(config: Config) -> PlannerAgent:
-        from mediated_coevo.llm.client import LLMClient
-
-        planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
-        planner.configure_token_budget(
-            config.budgets,
-            condition_name=config.experiment.condition_name,
-        )
-        return planner
-
-    @staticmethod
-    def _build_mediator(
-        config: Config,
-        artifact_store: ArtifactStore,
-        skill_store: SkillStore,
-    ) -> MediatorAgent:
-        from mediated_coevo.llm.client import LLMClient
-
-        mediator = MediatorAgent(
-            llm_client=LLMClient(model=config.models.mediator),
-            artifact_store=artifact_store,
-        )
-        mediator.configure_token_budget(
-            config.budgets,
-            condition_name=config.experiment.condition_name,
-        )
-        protocol = skill_store.read_skill("mediator")
-        if protocol:
-            mediator.load_protocol(protocol)
-        return mediator
-
-    @staticmethod
-    def _build_skill_advisor(config: Config) -> SkillAdvisor:
-        from mediated_coevo.llm.client import LLMClient
-
-        skill_advisor = SkillAdvisor(
-            llm_client=LLMClient(model=config.models.planner)
-        )
-        skill_advisor.configure_token_budget(
-            config.budgets,
-            condition_name=config.experiment.condition_name,
-        )
-        return skill_advisor
-
 
 def _validate_condition_name(condition: str) -> ConditionName:
     """Validate CLI condition names before mutating the config object."""
@@ -285,26 +194,80 @@ def _validate_condition_name(condition: str) -> ConditionName:
     return cast(ConditionName, condition)
 
 
-def _parse_skill_updates(raw_value: str) -> SkillUpdateConfig:
-    """Parse CLI skill-update input and adapt parser errors to Typer."""
+def _task_ids_from_cli(tasks: str | None, task_set: str | None) -> list[str]:
     try:
-        return parse_skill_updates(raw_value)
-    except ValueError as exc:
+        return resolve_task_selection(
+            tasks=tasks,
+            task_set=task_set,
+            default_tasks=DEFAULT_TASKS,
+        )
+    except TaskSetError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
 
-def _validate_baseline_preset(preset_name: str) -> BaselinePreset:
-    try:
-        return get_baseline_preset(preset_name)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+def _build_benchmark_repo(project_root: Path, config: Config) -> SkillsBenchRepository:
+    return SkillsBenchRepository(
+        root_dir=project_root / config.paths.benchmarks_dir,
+        task_dirs=config.executor_runtime.task_dirs,
+        remote=SkillsBenchRemoteConfig(
+            enabled=config.executor_runtime.remote_fetch,
+        ),
+    )
 
 
-def _task_ids_from_cli(tasks: str) -> list[str]:
-    task_ids = [task.strip() for task in tasks.split(",") if task.strip()]
+def _available_task_set_help() -> str:
+    return ", ".join(sorted([*TASK_SETS, SKILLSBENCH_ALL_TASK_SET]))
+
+
+def _skillsbench_all_task_ids(benchmark_repo: SkillsBenchRepository) -> list[str]:
+    task_ids = benchmark_repo.list_local_task_ids()
+    seen = set(task_ids)
+
+    if benchmark_repo.remote.enabled:
+        try:
+            remote_task_ids = benchmark_repo.list_remote_task_ids()
+        except SkillsBenchFetchError as exc:
+            if task_ids:
+                return task_ids
+            raise typer.BadParameter(
+                f"failed to resolve task set {SKILLSBENCH_ALL_TASK_SET!r}: {exc}"
+            ) from exc
+        for task_id in remote_task_ids:
+            if task_id not in seen:
+                task_ids.append(task_id)
+                seen.add(task_id)
+
     if not task_ids:
-        raise typer.BadParameter("at least one task ID is required")
+        raise typer.BadParameter(
+            f"task set {SKILLSBENCH_ALL_TASK_SET!r} resolved to no local tasks; "
+            "enable executor_runtime.remote_fetch or sync selected tasks first"
+        )
     return task_ids
+
+
+def _task_ids_from_cli_with_repo(
+    tasks: str | None,
+    task_set: str | None,
+    benchmark_repo: SkillsBenchRepository,
+) -> list[str]:
+    if tasks is not None:
+        return _task_ids_from_cli(tasks, task_set)
+    if task_set is not None and task_set.strip() == SKILLSBENCH_ALL_TASK_SET:
+        return _skillsbench_all_task_ids(benchmark_repo)
+    return _task_ids_from_cli(tasks, task_set)
+
+
+def _sync_task_ids_from_cli(tasks: str | None, task_set: str | None) -> list[str]:
+    if tasks is not None:
+        return _task_ids_from_cli(tasks, task_set)
+    if task_set is None:
+        raise typer.BadParameter("provide --tasks or --task-set to sync selected tasks")
+    if task_set.strip() == SKILLSBENCH_ALL_TASK_SET:
+        raise typer.BadParameter(
+            f"syncing {SKILLSBENCH_ALL_TASK_SET!r} is intentionally unsupported; "
+            "use --tasks or --task-set skillsbench-10"
+        )
+    return _task_ids_from_cli(tasks, task_set)
 
 
 def _ensure_harbor_available(config: Config) -> None:
@@ -342,11 +305,12 @@ def _build_matrix_runtimes(
     base_config: Config,
     seed: int,
     matrix_dir: Path,
+    benchmark_repo: SkillsBenchRepository | None = None,
 ) -> list[MatrixRuntime]:
     """Build all baseline-matrix rows with isolated skill stores."""
     rows: list[MatrixRuntime] = []
     for preset_name in BASELINE_PRESET_NAMES:
-        preset = _validate_baseline_preset(preset_name)
+        preset = get_baseline_preset(preset_name)
         row_config = preset.build_config(base_config, seed=seed)
         runtime = factory.build(
             config=row_config,
@@ -354,6 +318,7 @@ def _build_matrix_runtimes(
             condition_name=preset.condition_name,
             experiment_dir=matrix_dir / preset_name,
             isolate_skills=True,
+            benchmark_repo=benchmark_repo,
         )
         rows.append(MatrixRuntime(preset_name=preset_name, runtime=runtime))
     return rows
@@ -368,8 +333,12 @@ def _setup_logging(verbose: bool = False) -> None:
     )
 
 
-def _reward_summary(records: list[IterationRecord]) -> tuple[int, int, float]:
-    """Return (scored_count, failure_count, avg_reward) for CLI reporting."""
+def _print_result_summary(
+    *,
+    records: list[IterationRecord],
+    data_dir: Path,
+    header: str,
+) -> None:
     rewards = [
         reward for record in records
         if (reward := record.reward) is not None
@@ -377,25 +346,6 @@ def _reward_summary(records: list[IterationRecord]) -> tuple[int, int, float]:
     scored_count = len(rewards)
     failure_count = len(records) - scored_count
     avg_reward = sum(rewards) / scored_count if rewards else 0.0
-    return scored_count, failure_count, avg_reward
-
-
-def _print_model_summary(config: Config) -> None:
-    console.print(
-        "[bold]Models:[/] "
-        f"planner={config.models.planner} "
-        f"executor={config.models.executor} "
-        f"mediator={config.models.mediator}"
-    )
-
-
-def _print_result_summary(
-    *,
-    records: list[IterationRecord],
-    data_dir: Path,
-    header: str,
-) -> None:
-    scored_count, failure_count, avg_reward = _reward_summary(records)
     total_tokens = sum(record.total_tokens for record in records)
     console.print(f"\n[bold]{header}:[/]")
     console.print(f"  Iterations: {len(records)}")
@@ -408,7 +358,19 @@ def _print_result_summary(
 
 @app.command()
 def run(
-    tasks: str = typer.Option("fix-build-google-auto", help="Comma-separated task IDs"),
+    tasks: str | None = typer.Option(
+        None,
+        "--tasks",
+        help="Comma-separated task IDs. Overrides --task-set when provided.",
+    ),
+    task_set: str | None = typer.Option(
+        None,
+        "--task-set",
+        help=(
+            "Named task set to run when --tasks is omitted. "
+            f"Available: {_available_task_set_help()}"
+        ),
+    ),
     iterations: int = typer.Option(30, help="Number of iterations"),
     seed: int = typer.Option(42, help="Random seed"),
     condition: str = typer.Option(
@@ -428,7 +390,10 @@ def run(
     random.seed(seed)
 
     condition_name = _validate_condition_name(condition)
-    skill_update_config = _parse_skill_updates(skill_updates)
+    try:
+        skill_update_config = parse_skill_updates(skill_updates)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     config = _apply_experiment_settings(
         load_config(config_dir),
@@ -440,21 +405,29 @@ def run(
 
     _ensure_harbor_available(config)
 
-    task_ids = _task_ids_from_cli(tasks)
+    benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
+    task_ids = _task_ids_from_cli_with_repo(tasks, task_set, benchmark_repo)
 
     console.print(f"[bold]Tasks:[/] {task_ids}")
+    if tasks is None and task_set is not None:
+        console.print(f"[bold]Task set:[/] {task_set}")
     console.print(f"[bold]Iterations:[/] {iterations}")
     console.print(f"[bold]Condition:[/] {condition_name}")
     console.print(f"[bold]Skill updates:[/] {skill_update_config.model_dump()}")
-    _print_model_summary(config)
+    console.print(
+        "[bold]Models:[/] "
+        f"planner={config.models.planner} "
+        f"executor={config.models.executor} "
+        f"mediator={config.models.mediator}"
+    )
 
     runtime = ExperimentFactory(PROJECT_ROOT).build(
         config=config,
         seed=seed,
         condition_name=condition_name,
+        benchmark_repo=benchmark_repo,
     )
 
-    # Run
     console.print(f"\n[bold green]Starting experiment:[/] {runtime.experiment_dir}\n")
     records = asyncio.run(runtime.orchestrator.run_experiment(task_ids, iterations))
 
@@ -467,7 +440,19 @@ def run(
 
 @app.command()
 def matrix(
-    tasks: str = typer.Option("fix-build-google-auto", help="Comma-separated task IDs"),
+    tasks: str | None = typer.Option(
+        None,
+        "--tasks",
+        help="Comma-separated task IDs. Overrides --task-set when provided.",
+    ),
+    task_set: str | None = typer.Option(
+        None,
+        "--task-set",
+        help=(
+            "Named task set to run when --tasks is omitted. "
+            f"Available: {_available_task_set_help()}"
+        ),
+    ),
     iterations: int = typer.Option(30, help="Number of iterations per row"),
     seed: int = typer.Option(42, help="Random seed reused for every row"),
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
@@ -476,13 +461,14 @@ def matrix(
     """Run the seven-row baseline matrix with isolated per-row skills."""
     _setup_logging(verbose)
 
-    task_ids = _task_ids_from_cli(tasks)
     config = _apply_experiment_settings(
         load_config(config_dir),
         iterations=iterations,
         seed=seed,
     )
     _ensure_harbor_available(config)
+    benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
+    task_ids = _task_ids_from_cli_with_repo(tasks, task_set, benchmark_repo)
 
     factory = ExperimentFactory(PROJECT_ROOT)
     matrix_dir = factory.create_matrix_dir(seed=seed, data_dir=config.paths.data_dir)
@@ -491,9 +477,12 @@ def matrix(
         base_config=config,
         seed=seed,
         matrix_dir=matrix_dir,
+        benchmark_repo=benchmark_repo,
     )
 
     console.print(f"[bold]Tasks:[/] {task_ids}")
+    if tasks is None and task_set is not None:
+        console.print(f"[bold]Task set:[/] {task_set}")
     console.print(f"[bold]Iterations per row:[/] {iterations}")
     console.print(f"[bold]Seed per row:[/] {seed}")
     console.print(f"[bold]Matrix:[/] {matrix_dir}")
@@ -518,6 +507,40 @@ def matrix(
         )
 
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
+
+
+@skillsbench_app.command("sync")
+def sync_skillsbench(
+    tasks: str | None = typer.Option(
+        None,
+        "--tasks",
+        help="Comma-separated task IDs to sync into the local SkillsBench cache.",
+    ),
+    task_set: str | None = typer.Option(
+        None,
+        "--task-set",
+        help=(
+            "Named task set to sync when --tasks is omitted. "
+            "Use skillsbench-10; skillsbench-all is intentionally unsupported."
+        ),
+    ),
+    config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Fetch selected SkillsBench tasks into the configured local cache."""
+    _setup_logging(verbose)
+    config = load_config(config_dir)
+    benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
+    task_ids = _sync_task_ids_from_cli(tasks, task_set)
+
+    try:
+        synced_tasks = benchmark_repo.sync_tasks(task_ids)
+    except (FileNotFoundError, SkillsBenchFetchError) as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[bold]Synced tasks:[/] {[task.task_id for task in synced_tasks]}")
+    console.print(f"[bold]Cache:[/] {benchmark_repo.default_local_cache_dir()}")
 
 
 if __name__ == "__main__":
