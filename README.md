@@ -55,11 +55,90 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 - Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
 - Executor runs a vendored local SkillsBench-style Harbor task and parses the resulting `reward`, verifier output, and agent logs into `ExecutionTrace`.
 - The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
+- Missing SkillsBench tasks are fetched on demand from the provided SkillsBench archive by default; fetched tasks are cached under `benchmarks/skillsbench/tasks/`.
+- A curated `skillsbench-10` task set is available via `--task-set skillsbench-10` for broad early experiments across build, control, networking, logistics, documents, science, visualization, and parsing tasks. `--task-set skillsbench-all` dynamically discovers local and remote task IDs, then fetches each missing task lazily as it runs.
 - Experiment conditions selectable via `--condition` (`no_feedback` | `full_traces` | `shared_notes` | `static_mediator` | `learned_mediator`).
 - Skill update permissions are independently selectable via `--skill-updates` (`none` | `executor` | `planner` | `mediator` | `all`, comma-separated except for `none` and `all`).
 - Previous-report state is task-keyed; cross-task feedback is opt-in via `experiment.allow_cross_task_feedback` (default `false`).
 - Skill directories require a canonical `SKILL.md` entrypoint, validated at startup by `SkillStore.validate()`.
 - History outcome tagging uses stable entry IDs so multi-task runs cannot attribute a reward to the wrong task's planner/mediator entry.
+
+## CLI Usage
+
+Use `uv run medcoevo --help` to see the top-level commands:
+
+```
+uv run medcoevo run
+uv run medcoevo matrix
+uv run medcoevo skillsbench sync
+```
+
+Top-level shell completion helpers are also available:
+
+```
+uv run medcoevo --install-completion
+uv run medcoevo --show-completion
+```
+
+### Task Selection
+
+`run` and `matrix` share the same task-selection behavior:
+
+- No task option: runs the legacy default task, `fix-build-google-auto`.
+- `--tasks task-a,task-b`: runs explicit comma-separated task IDs.
+- `--task-set skillsbench-10`: runs the curated 10-task subset.
+- `--task-set skillsbench-all`: dynamically discovers all local and remote SkillsBench task IDs, then fetches missing task contents lazily as each task runs.
+
+`--tasks` always overrides `--task-set` when both are provided. Missing local tasks are fetched on demand from the provided SkillsBench archive by default. If the local copy is missing and the network/archive fetch fails, the command fails explicitly instead of silently skipping the task.
+
+Pre-cache selected tasks before running:
+
+```
+uv run medcoevo skillsbench sync --tasks fix-build-agentops,dialogue-parser
+uv run medcoevo skillsbench sync --task-set skillsbench-10
+```
+
+`skillsbench sync` intentionally does not support `skillsbench-all`, because syncing every task can be costly. It is for selected task IDs or the curated 10-task preset only.
+
+To disable on-demand fetching, override `remote_fetch` in `config/default.toml`:
+
+```
+[executor_runtime]
+remote_fetch = false
+```
+
+### Run Command
+
+`run` executes one configured experiment condition:
+
+```
+uv run medcoevo run --tasks fix-build-google-auto --iterations 30 --seed 42
+```
+
+Useful options:
+
+- `--condition`: `no_feedback`, `full_traces`, `shared_notes`, `static_mediator`, or `learned_mediator`; default is `learned_mediator`.
+- `--skill-updates`: `none`, `executor`, `planner`, `mediator`, or `all`; comma-separated combinations such as `executor,planner,mediator` are allowed, except with `none` or `all`.
+- `--iterations`: number of iterations; default is `30`.
+- `--seed`: random seed; default is `42`.
+- `--config-dir`: directory containing `default.toml`; defaults to this repo's `config/`.
+- `--verbose` / `-v`: enables debug logging.
+
+Example custom row:
+
+```
+uv run medcoevo run --task-set skillsbench-10 --condition learned_mediator --skill-updates executor,planner,mediator
+```
+
+### Matrix Command
+
+`matrix` runs all seven baseline rows with the same tasks, seed, model config, budgets, and isolated per-row skill copies:
+
+```
+uv run medcoevo matrix --task-set skillsbench-10 --iterations 30 --seed 42
+```
+
+`matrix` supports the same `--tasks`, `--task-set`, `--iterations`, `--seed`, `--config-dir`, and `--verbose` options as `run`, except that `--iterations` applies to each row. The command copies the configured `skills/` tree into each row's experiment directory before that row starts, so rows cannot write to repo-level skills or contaminate one another.
 
 ### Baseline Matrix
 
@@ -68,31 +147,17 @@ The baseline matrix separates two axes:
 1. Feedback routing, controlled by `--condition` and responsible for Planner prior context plus Mediator calls.
 2. Skill-update permission, controlled by `--skill-updates` or by a matrix preset and responsible only for whether committed skill edits are allowed.
 
-Run one custom row:
-
-```
-uv run medcoevo run --condition learned_mediator --skill-updates executor,planner,mediator
-```
-
-Run all seven baseline rows with identical tasks, seed, model config, budgets, and isolated per-row skill copies:
-
-```
-uv run medcoevo matrix --tasks fix-build-google-auto --iterations 30 --seed 42
-```
-
 Matrix rows:
 
-| Preset | Feedback condition | Skill updates |
-| --- | --- | --- |
-| `no_feedback` | `no_feedback` | `none` |
-| `full_trace_same_task` | `full_traces` | `none` |
-| `static_mediator_same_task` | `static_mediator` | `none` |
-| `learned_mediator_same_task` | `learned_mediator` | `mediator` |
-| `planner_only_skill_evolution` | `learned_mediator` | `planner` |
-| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator` |
-| `full_coevolution` | `learned_mediator` | `executor,planner,mediator` |
-
-The `matrix` command copies the initial configured `skills/` tree into each row's experiment directory before the row starts. Matrix rows therefore cannot write to repo-level skills or contaminate one another.
+| Preset                             | Feedback condition | Skill updates               |
+| ---------------------------------- | ------------------ | --------------------------- |
+| `no_feedback`                      | `no_feedback`      | `none`                      |
+| `full_trace_same_task`             | `full_traces`      | `none`                      |
+| `static_mediator_same_task`        | `static_mediator`  | `none`                      |
+| `learned_mediator_same_task`       | `learned_mediator` | `mediator`                  |
+| `planner_only_skill_evolution`     | `learned_mediator` | `planner`                   |
+| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator`                  |
+| `full_coevolution`                 | `learned_mediator` | `executor,planner,mediator` |
 
 Assumptions encoded in the presets:
 
@@ -174,6 +239,7 @@ Every coevo_interval iterations (default 5):
 ## Progress
 
 P0, Week 1 scope + a bit of Week 2
+Configure experiment option/baselines, wire with Skillsbench
 
 ## Further Direction
 

@@ -12,10 +12,10 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
-from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.executor import ExecutorAgent
-from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.agents.mediator import MediatorAgent
+from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.conditions import (
     ConditionName,
     get_cross_task_prior_context,
@@ -593,7 +593,7 @@ class Orchestrator:
         return f"iter_{iteration:04d}"
 
     @staticmethod
-    def _rollback_snapshot(iteration: int) -> str | None:   
+    def _rollback_snapshot(iteration: int) -> str | None:
         """Return the prior snapshot label that can restore pre-update state."""
         if iteration <= 0:
             return None
