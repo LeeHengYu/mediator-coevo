@@ -12,6 +12,8 @@ from mediated_coevo.benchmarks.skillsbench import (
 )
 from mediated_coevo.benchmarks.task_sets import (
     SKILLSBENCH_10_TASK_IDS,
+    SKILLSBENCH_10_TASK_METADATA,
+    SKILLSBENCH_VERIFIER_TYPE,
 )
 from mediated_coevo.main import (
     SKILLSBENCH_ALL_TASK_SET,
@@ -52,6 +54,25 @@ def test_curated_skillsbench_task_ids_are_safe_and_unique():
         assert "/" not in task_id
         assert "\\" not in task_id
         assert task_id not in {".", ".."}
+
+
+def test_curated_skillsbench_tasks_have_complete_metadata():
+    assert set(SKILLSBENCH_10_TASK_METADATA) == set(SKILLSBENCH_10_TASK_IDS)
+    for task_id in SKILLSBENCH_10_TASK_IDS:
+        metadata = SKILLSBENCH_10_TASK_METADATA[task_id]
+        low, high = metadata.expected_reward_range
+        assert metadata.category
+        assert metadata.difficulty in {"easy", "medium", "hard"}
+        assert metadata.verifier_type == SKILLSBENCH_VERIFIER_TYPE
+        assert 0.0 <= low <= high <= 1.0
+
+
+def test_curated_skillsbench_tasks_span_multiple_categories():
+    categories = {
+        SKILLSBENCH_10_TASK_METADATA[task_id].category
+        for task_id in SKILLSBENCH_10_TASK_IDS
+    }
+    assert len(categories) >= 5
 
 
 def test_dynamic_skillsbench_all_resolves_local_then_remote(tmp_path):

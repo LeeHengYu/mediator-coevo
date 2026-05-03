@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 class TaskSetError(ValueError):
     """Raised when a named task set or task selection is invalid."""
 
+
+@dataclass(frozen=True, slots=True)
+class TaskMetadata:
+    """Experiment-facing metadata for a curated benchmark task."""
+
+    category: str
+    difficulty: str
+    expected_reward_range: tuple[float, float]
+    verifier_type: str
+
+
+SKILLSBENCH_EXPECTED_REWARD_RANGE: tuple[float, float] = (0.0, 1.0)
+SKILLSBENCH_VERIFIER_TYPE = "skillsbench_pytest"
 
 SKILLSBENCH_10_TASK_IDS: tuple[str, ...] = (
     "fix-build-google-auto",
@@ -19,6 +34,69 @@ SKILLSBENCH_10_TASK_IDS: tuple[str, ...] = (
     "data-to-d3",
     "dialogue-parser",
 )
+
+SKILLSBENCH_10_TASK_METADATA: dict[str, TaskMetadata] = {
+    "fix-build-google-auto": TaskMetadata(
+        category="Compilation & Build",
+        difficulty="easy",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "fix-build-agentops": TaskMetadata(
+        category="Compilation & Build",
+        difficulty="easy",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "adaptive-cruise-control": TaskMetadata(
+        category="control-systems",
+        difficulty="medium",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "azure-bgp-oscillation-route-leak": TaskMetadata(
+        category="bgp-route",
+        difficulty="medium",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "bike-rebalance": TaskMetadata(
+        category="transportation-logistics",
+        difficulty="medium",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "citation-check": TaskMetadata(
+        category="research",
+        difficulty="medium",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "court-form-filling": TaskMetadata(
+        category="document-processing",
+        difficulty="easy",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "crystallographic-wyckoff-position-analysis": TaskMetadata(
+        category="materials_science",
+        difficulty="medium",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "data-to-d3": TaskMetadata(
+        category="Data Visualization",
+        difficulty="medium",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+    "dialogue-parser": TaskMetadata(
+        category="game",
+        difficulty="easy",
+        expected_reward_range=SKILLSBENCH_EXPECTED_REWARD_RANGE,
+        verifier_type=SKILLSBENCH_VERIFIER_TYPE,
+    ),
+}
 
 TASK_SETS: dict[str, tuple[str, ...]] = {
     "skillsbench-10": SKILLSBENCH_10_TASK_IDS,
