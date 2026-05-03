@@ -40,6 +40,13 @@ from mediated_coevo.config import Config, SkillUpdateConfig, load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.orchestrator import Orchestrator
+from mediated_coevo.reporting import (
+    BootstrapConfidenceInterval,
+    ExperimentScoreSummary,
+    TaskScoreSummary,
+    build_score_summary,
+    write_score_summary,
+)
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
@@ -335,25 +342,82 @@ def _setup_logging(verbose: bool = False) -> None:
 
 def _print_result_summary(
     *,
+    summary: ExperimentScoreSummary,
+    data_dir: Path,
+    summary_path: Path,
+    header: str,
+) -> None:
+    console.print(f"\n[bold]{header}:[/]")
+    console.print(f"  Runs: {summary.total_runs}")
+    console.print(f"  Scored: {summary.scored_count}")
+    console.print(f"  Env failures: {summary.env_failure_count}")
+    console.print(f"  Mean reward: {_format_score(summary.mean_reward)}")
+    console.print(f"  Median reward: {_format_score(summary.median_reward)}")
+    console.print(f"  Macro mean reward: {_format_score(summary.macro_mean_reward)}")
+    console.print(f"  Bootstrap CI: {_format_ci(summary.bootstrap_ci)}")
+    console.print(f"  Total tokens: {summary.total_tokens:,}")
+    if summary.per_task:
+        console.print("  Per-task:")
+        for task_summary in summary.per_task:
+            console.print(
+                "    "
+                f"{task_summary.task_id}{_format_task_metadata(task_summary)}: "
+                f"mean={_format_score(task_summary.mean_reward)} "
+                f"median={_format_score(task_summary.median_reward)} "
+                f"scored={task_summary.scored_count}/{task_summary.total_runs} "
+                f"env_failures={task_summary.env_failure_count} "
+                f"ci={_format_ci(task_summary.bootstrap_ci)}"
+            )
+    if summary.dominance_warning and summary.dominant_task_id:
+        console.print(
+            "  [yellow]Dominance warning:[/] "
+            f"{summary.dominant_task_id} contributed "
+            f"{summary.max_task_scored_share:.1%} of scored runs "
+            f"(threshold {summary.dominance_threshold:.1%})."
+        )
+    console.print(f"  Summary: {summary_path}")
+    console.print(f"  Data: {data_dir}")
+
+
+def _write_and_print_result_summary(
+    *,
     records: list[IterationRecord],
     data_dir: Path,
     header: str,
 ) -> None:
-    rewards = [
-        reward for record in records
-        if (reward := record.reward) is not None
-    ]
-    scored_count = len(rewards)
-    failure_count = len(records) - scored_count
-    avg_reward = sum(rewards) / scored_count if rewards else 0.0
-    total_tokens = sum(record.total_tokens for record in records)
-    console.print(f"\n[bold]{header}:[/]")
-    console.print(f"  Iterations: {len(records)}")
-    console.print(f"  Scored: {scored_count}")
-    console.print(f"  Env failures: {failure_count}")
-    console.print(f"  Avg reward (scored only): {avg_reward:.3f}")
-    console.print(f"  Total tokens: {total_tokens:,}")
-    console.print(f"  Data: {data_dir}")
+    summary = build_score_summary(records)
+    summary_path = data_dir / "summary.json"
+    write_score_summary(summary, summary_path)
+    _print_result_summary(
+        summary=summary,
+        data_dir=data_dir,
+        summary_path=summary_path,
+        header=header,
+    )
+
+
+def _format_score(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
+
+
+def _format_ci(interval: BootstrapConfidenceInterval) -> str:
+    if interval.lower is None or interval.upper is None:
+        return "n/a"
+    confidence = round(interval.confidence_level * 100)
+    return f"{confidence}% [{interval.lower:.3f}, {interval.upper:.3f}]"
+
+
+def _format_task_metadata(task_summary: TaskScoreSummary) -> str:
+    metadata = []
+    if task_summary.task_category:
+        metadata.append(task_summary.task_category)
+    if task_summary.task_difficulty:
+        metadata.append(task_summary.task_difficulty)
+    if not metadata:
+        return ""
+    return f" ({', '.join(metadata)})"
 
 
 def _print_task_selection(
@@ -440,7 +504,7 @@ def run(
     console.print(f"\n[bold green]Starting experiment:[/] {runtime.experiment_dir}\n")
     records = asyncio.run(runtime.orchestrator.run_experiment(task_ids, iterations))
 
-    _print_result_summary(
+    _write_and_print_result_summary(
         records=records,
         data_dir=runtime.experiment_dir,
         header="Results",
@@ -507,7 +571,7 @@ def matrix(
         records = asyncio.run(
             row.runtime.orchestrator.run_experiment(task_ids, iterations)
         )
-        _print_result_summary(
+        _write_and_print_result_summary(
             records=records,
             data_dir=row.runtime.experiment_dir,
             header=f"Row results: {row.preset_name}",

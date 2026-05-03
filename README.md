@@ -239,7 +239,7 @@ Every coevo_interval iterations (default 5):
 ## Progress
 
 P0, Week 1 scope + a bit of Week 2
-Configure experiment option/baselines, wire with Skillsbench
+Configure experiment option/baselines, wire with Skillsbench, item 11 complete and in review
 
 ## Further Direction
 
