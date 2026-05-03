@@ -9,13 +9,19 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.benchmarks import SkillsBenchRepository
+from mediated_coevo.benchmarks.task_sets import (
+    SKILLSBENCH_10_TASK_METADATA,
+    SKILLSBENCH_EXPECTED_REWARD_RANGE,
+    SKILLSBENCH_VERIFIER_TYPE,
+)
 from mediated_coevo.conditions import (
     ConditionName,
     get_cross_task_prior_context,
@@ -49,6 +55,13 @@ class _ExperimentRecordFields(TypedDict):
     baseline_preset: str | None
     cross_task_feedback_enabled: bool
     skill_update_policy: dict[str, bool]
+
+
+class _TaskMetadataFields(TypedDict):
+    task_category: str | None
+    task_difficulty: str | None
+    expected_reward_range: tuple[float, float] | None
+    verifier_type: str | None
 
 
 class Orchestrator:
@@ -145,6 +158,10 @@ class Orchestrator:
                 exc=e,
                 skill_hashes=skill_hashes,
             )
+        task_metadata = self._task_metadata_fields(
+            task_id=task_id,
+            task_config=getattr(benchmark_task, "task_config", None),
+        )
 
         self.planner.set_skill_context(
             executor_skills=executor_skill_text,
@@ -208,6 +225,7 @@ class Orchestrator:
             mediator_entry_id=mediator_entry_id,
             planner_entry_id=planner_entry_id,
             skill_hashes=skill_hashes,
+            task_metadata=task_metadata,
         )
 
     def _record_missing_task(
@@ -253,6 +271,7 @@ class Orchestrator:
             total_tokens=sum(e.total_tokens for e in llm_token_events),
             condition_name=condition,
             **self._experiment_record_fields(),
+            **self._task_metadata_fields(task_id=task_id, task_config=None),
             skill_hashes=dict(skill_hashes),
         )
 
@@ -342,6 +361,7 @@ class Orchestrator:
         mediator_entry_id: str | None,
         planner_entry_id: str | None,
         skill_hashes: dict[str, str],
+        task_metadata: _TaskMetadataFields,
     ) -> IterationRecord:
         duration = time.time() - start
         llm_token_events = self._drain_llm_token_events()
@@ -363,6 +383,7 @@ class Orchestrator:
             planner_history_entry_id=planner_entry_id,
             condition_name=condition,
             **self._experiment_record_fields(),
+            **task_metadata,
             skill_hashes=dict(skill_hashes),
         )
         reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
@@ -637,6 +658,44 @@ class Orchestrator:
         }
 
     @staticmethod
+    def _task_metadata_fields(
+        *,
+        task_id: str,
+        task_config: dict[str, Any] | None,
+    ) -> _TaskMetadataFields:
+        """Return flat task metadata fields for metrics rows."""
+        metadata = _mapping_value(task_config.get("metadata")) if task_config else {}
+        verifier = _mapping_value(task_config.get("verifier")) if task_config else {}
+        curated_metadata = SKILLSBENCH_10_TASK_METADATA.get(task_id)
+
+        category = _string_value(metadata.get("category"))
+        difficulty = _string_value(metadata.get("difficulty"))
+        expected_reward_range = _reward_range_value(
+            metadata.get("expected_reward_range")
+        )
+        verifier_type = _string_value(verifier.get("type"))
+
+        if curated_metadata:
+            category = category or curated_metadata.category
+            difficulty = difficulty or curated_metadata.difficulty
+            expected_reward_range = (
+                expected_reward_range or curated_metadata.expected_reward_range
+            )
+            verifier_type = verifier_type or curated_metadata.verifier_type
+        elif task_config:
+            expected_reward_range = (
+                expected_reward_range or SKILLSBENCH_EXPECTED_REWARD_RANGE
+            )
+            verifier_type = verifier_type or SKILLSBENCH_VERIFIER_TYPE
+
+        return {
+            "task_category": category,
+            "task_difficulty": difficulty,
+            "expected_reward_range": expected_reward_range,
+            "verifier_type": verifier_type,
+        }
+
+    @staticmethod
     def _attach_skill_identity(
         record: IterationRecord,
         skill_hashes: dict[str, str],
@@ -686,3 +745,30 @@ class Orchestrator:
             **self._experiment_record_fields(),
             skill_hashes=self._current_skill_hashes(),
         )
+
+
+def _string_value(value: object) -> str | None:
+    """Return stripped non-empty strings only."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _mapping_value(value: object) -> Mapping[str, Any]:
+    """Return mapping values only."""
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _reward_range_value(value: object) -> tuple[float, float] | None:
+    """Parse a two-number expected reward range if present."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        low = float(value[0])
+        high = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    return (low, high)

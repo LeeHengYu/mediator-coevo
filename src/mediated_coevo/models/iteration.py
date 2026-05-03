@@ -40,3 +40,8 @@ class IterationRecord(BaseModel):
     skill_update_policy: dict[str, bool] = Field(default_factory=dict)
     skill_hashes: dict[str, str] = Field(default_factory=dict)
     skill_version: str | None = None
+
+    task_category: str | None = None
+    task_difficulty: str | None = None
+    expected_reward_range: tuple[float, float] | None = None
+    verifier_type: str | None = None

@@ -26,6 +26,15 @@ class _LLM:
 class _Task:
     def __init__(self, task_id: str) -> None:
         self.instruction = f"base instruction for {task_id}"
+        self.task_config = {
+            "metadata": {
+                "category": f"category-{task_id}",
+                "difficulty": "medium",
+            },
+            "verifier": {
+                "type": "custom_pytest",
+            },
+        }
 
 
 class _TaskRepo:
@@ -207,6 +216,21 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
         "iter_0001",
         "iter_0001",
     ]
+    assert [
+        (
+            record.task_id,
+            record.task_category,
+            record.task_difficulty,
+            record.expected_reward_range,
+            record.verifier_type,
+        )
+        for record in records
+    ] == [
+        ("task-A", "category-task-A", "medium", (0.0, 1.0), "custom_pytest"),
+        ("task-B", "category-task-B", "medium", (0.0, 1.0), "custom_pytest"),
+        ("task-A", "category-task-A", "medium", (0.0, 1.0), "custom_pytest"),
+        ("task-B", "category-task-B", "medium", (0.0, 1.0), "custom_pytest"),
+    ]
 
     metrics = [
         json.loads(line)
@@ -221,3 +245,18 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
     assert {row["skill_hashes"]["executor"] for row in metrics} == {
         SkillStore.content_hash("# Executor\n")
     }
+    assert [
+        (
+            row["task_id"],
+            row["task_category"],
+            row["task_difficulty"],
+            row["expected_reward_range"],
+            row["verifier_type"],
+        )
+        for row in metrics
+    ] == [
+        ("task-A", "category-task-A", "medium", [0.0, 1.0], "custom_pytest"),
+        ("task-B", "category-task-B", "medium", [0.0, 1.0], "custom_pytest"),
+        ("task-A", "category-task-A", "medium", [0.0, 1.0], "custom_pytest"),
+        ("task-B", "category-task-B", "medium", [0.0, 1.0], "custom_pytest"),
+    ]
