@@ -53,7 +53,7 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 ## Current Implementation
 
 - Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
-- Executor runs a vendored local SkillsBench-style Harbor task and parses the resulting `reward`, verifier output, and agent logs into `ExecutionTrace`.
+- Executor runs a vendored local SkillsBench-style Harbor task and parses the Harbor job reward, optional CTRF diagnostics, and agent logs into `ExecutionTrace`.
 - The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
 - Missing SkillsBench tasks are fetched on demand from the provided SkillsBench archive by default; fetched tasks are cached under `benchmarks/skillsbench/tasks/`.
 - A curated `skillsbench-10` task set is available via `--task-set skillsbench-10` for broad early experiments across build, control, networking, logistics, documents, science, visualization, and parsing tasks. `--task-set skillsbench-all` dynamically discovers local and remote task IDs, then fetches each missing task lazily as it runs.

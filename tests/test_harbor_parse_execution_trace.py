@@ -1,14 +1,15 @@
 """Unit tests for parse_execution_trace.
 
 These pin down the contract from P0 #5: every Harbor-side failure mode
-must surface as an explicitly classified ExecutionTrace, and a legitimate
-reward of 0.0 must never be silently overridden.
+must surface as an explicitly classified ExecutionTrace, and the Harbor
+job aggregate mean reward is the canonical score for an iteration.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,32 +19,57 @@ from mediated_coevo.benchmarks.skillsbench import (
 )
 
 
+_MISSING_JOB_RESULT = object()
+
+
+def _job_result(mean: Any = 0.75) -> dict[str, Any]:
+    return {
+        "stats": {
+            "evals": {
+                "opencode__model__adhoc": {
+                    "metrics": [{"mean": mean}],
+                }
+            }
+        }
+    }
+
+
 def _make_trial(
     tmp_path: Path,
     *,
-    result_json: dict | str | None = None,
-    reward_txt: str | None = None,
-    ctrf_json: dict | str | None = None,
+    trial_result_json: dict[str, Any] | str | None = None,
+    job_result_json: Any = _MISSING_JOB_RESULT,
+    ctrf_json: dict[str, Any] | str | None = None,
     agent_summary: str | None = None,
 ) -> Path:
     """Build a minimal trial directory; pass None to omit a given file."""
-    trial_dir = tmp_path / "job-001" / "trial-001"
+    job_dir = tmp_path / "job-001"
+    trial_dir = job_dir / "trial-001"
     trial_dir.mkdir(parents=True)
 
-    if result_json is not None:
+    if job_result_json is _MISSING_JOB_RESULT:
+        job_result_json = _job_result()
+    if job_result_json is not None:
         text = (
-            result_json if isinstance(result_json, str) else json.dumps(result_json)
+            job_result_json
+            if isinstance(job_result_json, str)
+            else json.dumps(job_result_json)
+        )
+        (job_dir / "result.json").write_text(text)
+
+    if trial_result_json is not None:
+        text = (
+            trial_result_json
+            if isinstance(trial_result_json, str)
+            else json.dumps(trial_result_json)
         )
         (trial_dir / "result.json").write_text(text)
 
-    if reward_txt is not None or ctrf_json is not None:
+    if ctrf_json is not None:
         verifier_dir = trial_dir / "verifier"
         verifier_dir.mkdir()
-        if reward_txt is not None:
-            (verifier_dir / "reward.txt").write_text(reward_txt)
-        if ctrf_json is not None:
-            text = ctrf_json if isinstance(ctrf_json, str) else json.dumps(ctrf_json)
-            (verifier_dir / "ctrf.json").write_text(text)
+        text = ctrf_json if isinstance(ctrf_json, str) else json.dumps(ctrf_json)
+        (verifier_dir / "ctrf.json").write_text(text)
 
     if agent_summary is not None:
         agent_dir = trial_dir / "agent"
@@ -72,13 +98,13 @@ def _run_result(
 # ── Happy path ──────────────────────────────────────────────────────────
 
 
-def test_happy_path_reward_from_reward_txt(tmp_path):
+def test_happy_path_reward_from_job_result_json(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={
+        trial_result_json={
             "agent_result": {"n_input_tokens": 100, "n_output_tokens": 50},
         },
-        reward_txt="0.75",
+        job_result_json=_job_result(0.75),
         ctrf_json={
             "results": {
                 "summary": {"passed": 3, "failed": 0},
@@ -99,39 +125,52 @@ def test_happy_path_reward_from_reward_txt(tmp_path):
     assert "Did the thing." in trace.stdout
 
 
-def test_reward_falls_back_to_result_json_when_reward_txt_missing(tmp_path):
+def test_verifier_dir_is_not_required_for_reward(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={
-            "verifier_result": {"rewards": {"reward": 0.6}},
+        trial_result_json={
+            "agent_result": {},
         },
-        reward_txt=None,
+        job_result_json=_job_result(0.6),
     )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
     assert trace.status == "ok"
     assert trace.reward == pytest.approx(0.6)
+    assert trace.test_results is None
 
 
-# ── Regression: legitimate 0.0 must NOT trigger the result.json fallback ─
+# ── Regression: legitimate 0.0 must NOT be silently overridden ─
 
 
 def test_legitimate_zero_reward_is_preserved(tmp_path):
-    """The old code overwrote a real 0.0 from reward.txt with whatever was
-    nested in result.json. This regression test pins the fix.
-    """
     trial = _make_trial(
         tmp_path,
-        result_json={
-            "verifier_result": {"rewards": {"reward": 1.0}},  # would-be override
+        trial_result_json={
+            "verifier_result": {"rewards": {"reward": 1.0}},
         },
-        reward_txt="0.0",
+        job_result_json=_job_result(0.0),
     )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
     assert trace.status == "ok"
     assert trace.reward == pytest.approx(0.0)
     assert trace.error_kind is None
+
+
+def test_trial_reward_cannot_override_job_result_json(tmp_path):
+    trial = _make_trial(
+        tmp_path,
+        trial_result_json={
+            "agent_result": {},
+            "verifier_result": {"rewards": {"reward": 1.0}},
+        },
+        job_result_json=_job_result(0.25),
+    )
+    trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
+
+    assert trace.status == "ok"
+    assert trace.reward == pytest.approx(0.25)
 
 
 # ── Failure modes ───────────────────────────────────────────────────────
@@ -151,8 +190,12 @@ def test_no_trial_dir_yields_env_failure(tmp_path):
     assert "harbor died" in (trace.error_detail or "")
 
 
-def test_missing_result_json_yields_env_failure(tmp_path):
-    trial = _make_trial(tmp_path, result_json=None, reward_txt="1.0")
+def test_missing_trial_result_json_yields_env_failure(tmp_path):
+    trial = _make_trial(
+        tmp_path,
+        trial_result_json=None,
+        job_result_json=_job_result(1.0),
+    )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
     assert trace.status == "env_failure"
@@ -160,8 +203,12 @@ def test_missing_result_json_yields_env_failure(tmp_path):
     assert trace.reward is None
 
 
-def test_malformed_result_json_yields_env_failure(tmp_path):
-    trial = _make_trial(tmp_path, result_json="{not json", reward_txt="1.0")
+def test_malformed_trial_result_json_yields_env_failure(tmp_path):
+    trial = _make_trial(
+        tmp_path,
+        trial_result_json="{not json",
+        job_result_json=_job_result(1.0),
+    )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
     assert trace.status == "env_failure"
@@ -169,50 +216,76 @@ def test_malformed_result_json_yields_env_failure(tmp_path):
     assert trace.reward is None
 
 
-def test_malformed_reward_txt_yields_parse_error(tmp_path):
+def test_missing_job_result_json_yields_env_failure(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={"agent_result": {}},
-        reward_txt="not-a-number",
-    )
-    trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
-
-    assert trace.status == "parse_error"
-    assert trace.error_kind == "malformed_reward"
-    assert trace.reward is None
-    # The bare ValueError must NOT escape.
-
-
-def test_no_reward_source_yields_env_failure(tmp_path):
-    trial = _make_trial(
-        tmp_path,
-        result_json={"agent_result": {}},
-        reward_txt=None,
+        trial_result_json={"agent_result": {}},
+        job_result_json=None,
     )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
     assert trace.status == "env_failure"
-    assert trace.error_kind == "no_reward"
+    assert trace.error_kind == "missing_job_result_json"
     assert trace.reward is None
 
 
-def test_harbor_nonzero_with_no_reward_yields_harbor_failed(tmp_path):
+def test_malformed_job_result_json_yields_env_failure(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={"agent_result": {}},
-        reward_txt=None,
+        trial_result_json={"agent_result": {}},
+        job_result_json="{not json",
     )
-    trace = parse_execution_trace(
-        _run_result(trial, returncode=2, stderr="harbor crashed"),
-        "task-A",
-        0,
-        1.0,
-    )
+    trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
-    assert trace.status == "harbor_failed"
-    assert trace.error_kind == "harbor_nonzero_no_reward"
+    assert trace.status == "env_failure"
+    assert trace.error_kind == "malformed_job_result_json"
     assert trace.reward is None
-    assert trace.exit_code == 2
+
+
+def test_missing_job_reward_yields_env_failure(tmp_path):
+    trial = _make_trial(
+        tmp_path,
+        trial_result_json={"agent_result": {}},
+        job_result_json={"stats": {"evals": {"eval": {"metrics": [{}]}}}},
+    )
+    trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
+
+    assert trace.status == "env_failure"
+    assert trace.error_kind == "missing_job_reward"
+    assert trace.reward is None
+
+
+def test_malformed_job_reward_yields_env_failure(tmp_path):
+    trial = _make_trial(
+        tmp_path,
+        trial_result_json={"agent_result": {}},
+        job_result_json=_job_result("not-a-number"),
+    )
+    trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
+
+    assert trace.status == "env_failure"
+    assert trace.error_kind == "malformed_job_reward"
+    assert trace.reward is None
+
+
+def test_ambiguous_job_reward_yields_env_failure(tmp_path):
+    trial = _make_trial(
+        tmp_path,
+        trial_result_json={"agent_result": {}},
+        job_result_json={
+            "stats": {
+                "evals": {
+                    "eval-a": {"metrics": [{"mean": 0.2}]},
+                    "eval-b": {"metrics": [{"mean": 0.8}]},
+                }
+            }
+        },
+    )
+    trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
+
+    assert trace.status == "env_failure"
+    assert trace.error_kind == "ambiguous_job_reward"
+    assert trace.reward is None
 
 
 def test_harbor_nonzero_with_reward_keeps_reward_but_marks_harbor_failed(
@@ -220,8 +293,8 @@ def test_harbor_nonzero_with_reward_keeps_reward_but_marks_harbor_failed(
 ):
     trial = _make_trial(
         tmp_path,
-        result_json={"agent_result": {}},
-        reward_txt="0.4",
+        trial_result_json={"agent_result": {}},
+        job_result_json=_job_result(0.4),
     )
     trace = parse_execution_trace(
         _run_result(trial, returncode=1, stderr="warning: weird"),
@@ -241,11 +314,11 @@ def test_harbor_nonzero_with_reward_keeps_reward_but_marks_harbor_failed(
 def test_exception_info_propagates_into_error_detail(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={
+        trial_result_json={
             "agent_result": {},
             "exception_info": {"type": "RuntimeError", "msg": "boom"},
         },
-        reward_txt="0.5",
+        job_result_json=_job_result(0.5),
     )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
@@ -256,11 +329,11 @@ def test_exception_info_propagates_into_error_detail(tmp_path):
     assert trace.exit_code == 1
 
 
-def test_ctrf_failed_tests_with_perfect_reward_flags_mismatch(tmp_path):
+def test_ctrf_diagnostics_are_copied_without_affecting_reward(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={"agent_result": {}},
-        reward_txt="1.0",
+        trial_result_json={"agent_result": {}},
+        job_result_json=_job_result(1.0),
         ctrf_json={
             "results": {
                 "summary": {"passed": 1, "failed": 1},
@@ -273,19 +346,20 @@ def test_ctrf_failed_tests_with_perfect_reward_flags_mismatch(tmp_path):
     )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
-    assert trace.status == "ok"  # sanity flag, not a failure
-    assert trace.error_kind == "reward_ctrf_mismatch"
+    assert trace.status == "ok"
+    assert trace.error_kind is None
+    assert trace.reward == pytest.approx(1.0)
     assert trace.test_results is not None
     assert any(
         t["name"] == "t2" for t in trace.test_results["failed_tests"]
     )
 
 
-def test_ctrf_all_passed_with_zero_reward_flags_mismatch(tmp_path):
+def test_ctrf_diagnostics_do_not_override_zero_reward(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={"agent_result": {}},
-        reward_txt="0.0",
+        trial_result_json={"agent_result": {}},
+        job_result_json=_job_result(0.0),
         ctrf_json={
             "results": {
                 "summary": {"passed": 3, "failed": 0},
@@ -296,20 +370,22 @@ def test_ctrf_all_passed_with_zero_reward_flags_mismatch(tmp_path):
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
     assert trace.status == "ok"
-    assert trace.error_kind == "reward_ctrf_mismatch"
+    assert trace.error_kind is None
     assert trace.reward == pytest.approx(0.0)
+    assert trace.test_results is not None
+    assert trace.test_results["summary"]["passed"] == 3
 
 
 def test_malformed_token_counts_do_not_escape(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={
+        trial_result_json={
             "agent_result": {
                 "n_input_tokens": "not-an-int",
                 "n_output_tokens": "also-not-an-int",
             }
         },
-        reward_txt="0.5",
+        job_result_json=_job_result(0.5),
     )
     trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
 
@@ -322,8 +398,8 @@ def test_malformed_token_counts_do_not_escape(tmp_path):
 def test_malformed_ctrf_summary_counts_do_not_escape(tmp_path):
     trial = _make_trial(
         tmp_path,
-        result_json={"agent_result": {}},
-        reward_txt="1.0",
+        trial_result_json={"agent_result": {}},
+        job_result_json=_job_result(1.0),
         ctrf_json={
             "results": {
                 "summary": {"passed": "several", "failed": "many"},
@@ -336,3 +412,18 @@ def test_malformed_ctrf_summary_counts_do_not_escape(tmp_path):
     assert trace.status == "ok"
     assert trace.reward == pytest.approx(1.0)
     assert trace.error_kind is None
+
+
+def test_malformed_ctrf_json_is_ignored_for_score(tmp_path):
+    trial = _make_trial(
+        tmp_path,
+        trial_result_json={"agent_result": {}},
+        job_result_json=_job_result(0.8),
+        ctrf_json="{not json",
+    )
+    trace = parse_execution_trace(_run_result(trial), "task-A", 0, 1.0)
+
+    assert trace.status == "ok"
+    assert trace.reward == pytest.approx(0.8)
+    assert trace.error_kind is None
+    assert trace.test_results is None

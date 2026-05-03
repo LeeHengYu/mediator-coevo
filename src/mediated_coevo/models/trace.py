@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 # Status classification for an ExecutionTrace.
-#   ok            — Harbor ran, verifier produced a reward, no env hiccups.
+#   ok            — Harbor ran, job result JSON produced a reward, no env hiccups.
 #   task_failed   — Reserved for downstream consumers (orchestrator) to mark a
 #                   legitimate task failure when reward < threshold; the parser
 #                   itself never assigns this — a parsed-but-low reward stays "ok".
@@ -40,7 +40,7 @@ class ExecutionTrace(BaseModel):
     stdout: str = ""
     stderr: str = ""
     exit_code: int = 0
-    test_results: dict | None = None
+    test_results: dict | None = None  # Optional diagnostic summary, not score authority
     reward: float | None = None  # 0.0–1.0; None when no reward could be parsed
     status: TraceStatus = "ok"
     error_kind: str | None = None

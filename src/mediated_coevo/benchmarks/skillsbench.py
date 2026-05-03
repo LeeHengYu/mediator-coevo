@@ -452,8 +452,12 @@ class HarborRunner:
         )
 
 
-class _MalformedReward(ValueError):
-    """Raised when reward.txt exists but cannot be parsed as a number."""
+class _JobRewardError(ValueError):
+    """Raised when the Harbor job aggregate does not contain one usable reward."""
+
+    def __init__(self, error_kind: str, detail: str) -> None:
+        super().__init__(detail)
+        self.error_kind = error_kind
 
 
 class HarborTraceParser:
@@ -485,39 +489,51 @@ class HarborTraceParser:
         if trial_dir is None:
             return self._missing_trial_dir()
 
-        result_path = trial_dir / "result.json"
+        trial_result_path = trial_dir / "result.json"
         try:
-            result_json = self._load_result_json(result_path)
+            trial_result_json = self._load_result_json(trial_result_path)
         except FileNotFoundError:
-            return self._missing_result_json(result_path)
+            return self._missing_result_json(trial_result_path)
         except json.JSONDecodeError as e:
-            return self._malformed_result_json(result_path, e)
+            return self._malformed_result_json(trial_result_path, e)
 
-        ctrf_json = self._load_ctrf_json(trial_dir)
-        exception_info = result_json.get("exception_info")
-        full_base = self._build_full_base(trial_dir, result_json, ctrf_json)
+        if self.run_result.job_dir is None:
+            return self._missing_job_result_json(None)
+
+        job_result_path = self.run_result.job_dir / "result.json"
+        try:
+            job_result_json = self._load_result_json(job_result_path)
+        except FileNotFoundError:
+            return self._missing_job_result_json(job_result_path)
+        except json.JSONDecodeError as e:
+            return self._malformed_job_result_json(job_result_path, e)
+
+        ctrf_diagnostics = self._load_ctrf_diagnostics(trial_dir)
+        exception_info = trial_result_json.get("exception_info")
+        full_base = self._build_full_base(
+            trial_dir,
+            trial_result_json,
+            ctrf_diagnostics,
+        )
 
         try:
-            reward = self._parse_reward(trial_dir, result_json)
-        except _MalformedReward as e:
+            reward = self._parse_job_reward(job_result_json)
+        except _JobRewardError as e:
             return self._trace_from(
                 full_base,
-                status="parse_error",
-                error_kind="malformed_reward",
+                status="env_failure",
+                error_kind=e.error_kind,
                 error_detail=str(e),
             )
 
-        if reward is None:
-            return self._missing_reward_trace(full_base, exception_info)
-
-        return self._rewarded_trace(full_base, ctrf_json, reward, exception_info)
+        return self._rewarded_trace(full_base, reward, exception_info)
 
     def _load_result_json(self, result_path: Path) -> dict[str, Any]:
         if not result_path.exists():
             raise FileNotFoundError(result_path)
         return json.loads(result_path.read_text())
 
-    def _load_ctrf_json(self, trial_dir: Path) -> dict[str, Any] | None:
+    def _load_ctrf_diagnostics(self, trial_dir: Path) -> dict[str, Any] | None:
         ctrf_path = trial_dir / "verifier" / "ctrf.json"
         if not ctrf_path.exists():
             return None
@@ -535,7 +551,7 @@ class HarborTraceParser:
         self,
         trial_dir: Path,
         result_json: dict[str, Any],
-        ctrf_json: dict[str, Any] | None,
+        ctrf_diagnostics: dict[str, Any] | None,
     ) -> dict[str, Any]:
         agent_result = _mapping_or_empty(result_json.get("agent_result"))
         return dict(
@@ -548,7 +564,7 @@ class HarborTraceParser:
                 self.run_result.stderr,
                 result_json.get("exception_info"),
             ),
-            test_results=_summarize_ctrf(ctrf_json),
+            test_results=_summarize_ctrf_diagnostics(ctrf_diagnostics),
             token_usage=TokenUsage(
                 input_tokens=_safe_int(
                     agent_result.get("n_input_tokens", 0),
@@ -572,37 +588,45 @@ class HarborTraceParser:
     def _trace_from(base: dict[str, Any], **overrides: Any) -> ExecutionTrace:
         return ExecutionTrace(**{**base, **overrides})
 
-    def _parse_reward(
+    def _parse_job_reward(
         self,
-        trial_dir: Path,
-        result_json: dict[str, Any],
-    ) -> float | None:
-        """Parse reward.txt first; fall back to result.json only when absent."""
-        reward_path = trial_dir / "verifier" / "reward.txt"
-        if reward_path.exists():
-            reward_text = reward_path.read_text().strip()
-            try:
-                return float(reward_text)
-            except ValueError as e:
-                logger.warning(
-                    "parse_execution_trace: malformed reward.txt at %s (content=%r)",
-                    reward_path,
-                    reward_text,
-                )
-                raise _MalformedReward(
-                    f"reward.txt at {reward_path} contained non-numeric value: "
-                    f"{reward_text!r}"
-                ) from e
+        job_result_json: dict[str, Any],
+    ) -> float:
+        """Parse the canonical SkillsBench/Harbor aggregate mean reward."""
+        stats = _mapping_or_empty(job_result_json.get("stats"))
+        evals = _mapping_or_empty(stats.get("evals"))
+        if not evals:
+            raise _JobRewardError(
+                "missing_job_reward",
+                "job result.json does not contain stats.evals",
+            )
+        if len(evals) > 1:
+            raise _JobRewardError(
+                "ambiguous_job_reward",
+                f"job result.json contains multiple eval entries: {sorted(evals)}",
+            )
 
-        nested = _mapping_or_empty(
-            _mapping_or_empty(result_json.get("verifier_result")).get("rewards")
-        ).get("reward")
-        if nested is None:
-            return None
+        eval_name, eval_result = next(iter(evals.items()))
+        metrics = _mapping_or_empty(eval_result).get("metrics")
+        if not isinstance(metrics, list) or not metrics:
+            raise _JobRewardError(
+                "missing_job_reward",
+                f"job result.json eval {eval_name!r} does not contain metrics",
+            )
+
+        mean = _mapping_or_empty(metrics[0]).get("mean")
+        if mean is None:
+            raise _JobRewardError(
+                "missing_job_reward",
+                f"job result.json eval {eval_name!r} metrics[0] has no mean",
+            )
         try:
-            return float(nested)
+            return float(mean)
         except (TypeError, ValueError):
-            return None
+            raise _JobRewardError(
+                "malformed_job_reward",
+                f"job result.json eval {eval_name!r} has non-numeric mean: {mean!r}",
+            ) from None
 
     def _missing_trial_dir(self) -> ExecutionTrace:
         logger.warning(
@@ -646,48 +670,51 @@ class HarborTraceParser:
             error_detail=str(exc),
         )
 
-    def _missing_reward_trace(
-        self,
-        full_base: dict[str, Any],
-        exception_info: Any,
-    ) -> ExecutionTrace:
+    def _missing_job_result_json(self, result_path: Path | None) -> ExecutionTrace:
+        location = str(result_path) if result_path is not None else "<missing job_dir>"
         logger.warning(
-            "parse_execution_trace: no reward parsed for task=%s iter=%d (returncode=%d)",
+            "parse_execution_trace: missing job result.json at %s (task=%s iter=%d)",
+            location,
             self.task_id,
             self.iteration,
-            self.run_result.returncode,
         )
-        if self.run_result.returncode != 0:
-            status: TraceStatus = "harbor_failed"
-            error_kind = "harbor_nonzero_no_reward"
-        else:
-            status = "env_failure"
-            error_kind = "no_reward"
-        return self._trace_from(
-            full_base,
-            status=status,
-            error_kind=error_kind,
-            error_detail=exception_info or self.run_result.stderr.strip() or None,
+        return self._trace(
+            status="env_failure",
+            error_kind="missing_job_result_json",
+            error_detail=f"job result.json not found at {location}",
+        )
+
+    def _malformed_job_result_json(
+        self,
+        result_path: Path,
+        exc: json.JSONDecodeError,
+    ) -> ExecutionTrace:
+        logger.warning(
+            "parse_execution_trace: malformed job result.json at %s: %s",
+            result_path,
+            exc,
+        )
+        return self._trace(
+            status="env_failure",
+            error_kind="malformed_job_result_json",
+            error_detail=str(exc),
         )
 
     def _rewarded_trace(
         self,
         full_base: dict[str, Any],
-        ctrf_json: dict[str, Any] | None,
         reward: float,
         exception_info: Any,
     ) -> ExecutionTrace:
-        error_kind, error_detail = _ctrf_mismatch(
-            ctrf_json,
-            reward,
-            task_id=self.task_id,
-            iteration=self.iteration,
-        )
-        if exception_info and error_kind is None:
+        error_kind = None
+        error_detail = None
+        if exception_info:
             error_kind = "harbor_exception"
             error_detail = exception_info
 
-        status: TraceStatus = "harbor_failed" if self.run_result.returncode != 0 else "ok"
+        status: TraceStatus = "ok"
+        if self.run_result.returncode != 0:
+            status = "harbor_failed"
         if self.run_result.returncode != 0 and error_kind is None:
             error_kind = "harbor_nonzero"
             error_detail = (
@@ -725,47 +752,18 @@ def parse_execution_trace(
 
     Status / error_kind matrix:
       env_failure    : missing_trial_dir | missing_result_json |
-                       malformed_result_json | no_reward
-      parse_error    : malformed_reward
-      harbor_failed  : harbor_nonzero | harbor_nonzero_no_reward
-      ok (warnings)  : reward_ctrf_mismatch | harbor_exception
+                       malformed_result_json | missing_job_result_json |
+                       malformed_job_result_json | missing_job_reward |
+                       malformed_job_reward | ambiguous_job_reward
+      harbor_failed  : harbor_nonzero
+      ok (warnings)  : harbor_exception
+
+    Reward is parsed only from the Harbor job-level result.json. CTRF output
+    under the trial verifier directory is optional diagnostic context and can
+    populate ``test_results``, but it never changes reward, status, or
+    ``error_kind``.
     """
     return HarborTraceParser(run_result, task_id, iteration, duration_sec).parse()
-
-
-def _ctrf_mismatch(
-    ctrf_json: dict[str, Any] | None,
-    reward: float,
-    *,
-    task_id: str,
-    iteration: int,
-) -> tuple[str | None, str | None]:
-    """Sanity-check reward against CTRF summary; return (kind, detail)."""
-    if ctrf_json is None:
-        return None, None
-    summary = _mapping_or_empty(
-        _mapping_or_empty(ctrf_json.get("results")).get("summary")
-    )
-    failed = _safe_int(
-        summary.get("failed", 0),
-        field="ctrf.results.summary.failed",
-        task_id=task_id, iteration=iteration,
-    )
-    passed = _safe_int(
-        summary.get("passed", 0),
-        field="ctrf.results.summary.passed",
-        task_id=task_id, iteration=iteration,
-    )
-    if failed > 0 and reward >= 0.999:
-        detail = f"reward={reward} but CTRF reports {failed} failed tests"
-    elif passed > 0 and failed == 0 and reward <= 0.001:
-        detail = f"reward={reward} but CTRF reports all {passed} tests passed"
-    else:
-        return None, None
-    logger.warning(
-        "parse_execution_trace: %s (task=%s iter=%d)", detail, task_id, iteration,
-    )
-    return "reward_ctrf_mismatch", detail
 
 
 def _format_harbor_stdout(harbor_stdout: str, agent_summary: str) -> str:
@@ -802,7 +800,9 @@ def _read_agent_summary(trial_dir: Path) -> str:
         return ""
 
 
-def _summarize_ctrf(ctrf_json: dict[str, Any] | None) -> dict[str, Any] | None:
+def _summarize_ctrf_diagnostics(
+    ctrf_json: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     if not ctrf_json:
         return None
     results = _mapping_or_empty(ctrf_json.get("results"))
