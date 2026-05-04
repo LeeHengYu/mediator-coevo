@@ -158,9 +158,10 @@ class Orchestrator:
                 exc=e,
                 skill_hashes=skill_hashes,
             )
+            
         task_metadata = self._task_metadata_fields(
             task_id=task_id,
-            task_config=getattr(benchmark_task, "task_config", None),
+            task_config=benchmark_task.task_config,
         )
 
         self.planner.set_skill_context(
@@ -637,15 +638,8 @@ class Orchestrator:
         )
 
     def _current_skill_hashes(self) -> dict[str, str]:
-        """Return skill hashes when the configured store supports them."""
-        skill_hashes = getattr(self.skill_store, "skill_hashes", None)
-        if not callable(skill_hashes):
-            return {}
-        return dict(skill_hashes())
-
-    def _skill_update_policy(self) -> dict[str, bool]:
-        """Return the configured update permissions for metrics rows."""
-        return self.config.experiment.skill_updates.model_dump()
+        """Return hashes for current SkillStore contents."""
+        return dict(self.skill_store.skill_hashes())
 
     def _experiment_record_fields(self) -> _ExperimentRecordFields:
         """Return shared experiment metadata for metrics records."""
@@ -654,7 +648,7 @@ class Orchestrator:
             "cross_task_feedback_enabled": (
                 self.config.experiment.allow_cross_task_feedback
             ),
-            "skill_update_policy": self._skill_update_policy(),
+            "skill_update_policy": self.config.experiment.skill_updates.model_dump(),
         }
 
     @staticmethod
@@ -715,13 +709,11 @@ class Orchestrator:
         """Collect token telemetry from configured LLM clients."""
         events: list[TokenBudgetEvent] = []
         for llm_client in (
-            getattr(self.planner, "llm_client", None),
-            getattr(self.mediator, "llm_client", None),
-            getattr(self.skill_advisor, "llm_client", None),
+            self.planner.llm_client,
+            self.mediator.llm_client,
+            self.skill_advisor.llm_client,
         ):
-            drain_token_events = getattr(llm_client, "drain_token_events", None)
-            if callable(drain_token_events):
-                events.extend(drain_token_events())
+            events.extend(llm_client.drain_token_events())
         return events
 
     def _build_coevolution_record(

@@ -20,6 +20,7 @@ from mediated_coevo.stores.history_store import HistoryStore
 
 class _Task:
     instruction = "base instruction"
+    task_config: dict = {}
 
 
 class _TaskRepo:
@@ -31,9 +32,15 @@ class _SkillStore:
     def read_skill(self, skill_name: str) -> str | None:
         return None
 
+    def skill_hashes(self) -> dict[str, str]:
+        return {}
+
 
 class _PlannerLLM:
     model = "test-model"
+
+    def drain_token_events(self):
+        return []
 
 
 class _Planner:
@@ -78,7 +85,7 @@ class _Mediator:
     def __init__(self, llm_client=None) -> None:
         self.process_calls = 0
         self.compact_calls = 0
-        self.llm_client = llm_client
+        self.llm_client = llm_client or _PlannerLLM()
 
     async def process_trace(
         self,
@@ -113,6 +120,8 @@ class _Mediator:
 
 
 class _TraceHistoryInspectingMediator:
+    llm_client = _PlannerLLM()
+
     def __init__(self, artifact_store: ArtifactStore) -> None:
         self.artifact_store = artifact_store
         self.trace_iterations_seen: list[int] = []
@@ -131,6 +140,8 @@ class _TraceHistoryInspectingMediator:
 
 
 class _WithholdingMediator:
+    llm_client = _PlannerLLM()
+
     async def mediate_trace(
         self,
         condition: str,
@@ -156,6 +167,8 @@ class _WithholdingMediator:
 
 
 class _FailingMediator:
+    llm_client = _PlannerLLM()
+
     async def mediate_trace(
         self,
         condition: str,
@@ -185,6 +198,13 @@ class _LLMCompactor:
             "raw": {},
         }
 
+    def drain_token_events(self):
+        return []
+
+
+class _Advisor:
+    llm_client = _PlannerLLM()
+
 
 def _orchestrator(
     tmp_path: Path,
@@ -212,7 +232,7 @@ def _orchestrator(
     orch.config.experiment.condition_name = condition
     orch.config.experiment.shared_notes = "shared note"
     orch.experiment_dir = tmp_path
-    orch.skill_advisor = None
+    orch.skill_advisor = _Advisor()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
     return orch, planner, mediator

@@ -387,7 +387,16 @@ class _NoCallMediator:
         raise AssertionError(f"mediator should not be called: {name}")
 
 
+class _NoCallAdvisor:
+    llm_client = _DrainClient("unused")
+
+    def __getattr__(self, name):
+        raise AssertionError(f"advisor should not be called: {name}")
+
+
 class _SkippingMediator:
+    llm_client = _DrainClient("unused")
+
     async def mediate_trace(
         self,
         condition: str,
@@ -405,6 +414,9 @@ class _NoCallExecutor:
 class _EmptySkillStore:
     def read_skill(self, skill_name: str) -> str | None:
         return None
+
+    def skill_hashes(self) -> dict[str, str]:
+        return {}
 
 
 class _MissingTaskRepo:
@@ -430,7 +442,7 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
         }
     )
     orch.experiment_dir = tmp_path
-    orch.skill_advisor = None
+    orch.skill_advisor = _NoCallAdvisor()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
 
@@ -448,6 +460,7 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
 
 class _ResolvedTask:
     instruction = "base instruction"
+    task_config: dict = {}
 
 
 class _AnyTaskRepo:
@@ -457,6 +470,9 @@ class _AnyTaskRepo:
 
 class _PlannerLLM:
     model = "test-model"
+
+    def drain_token_events(self) -> list[TokenBudgetEvent]:
+        return []
 
 
 class _RecordingPlanner:
@@ -516,7 +532,7 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
         }
     )
     orch.experiment_dir = tmp_path
-    orch.skill_advisor = None
+    orch.skill_advisor = _NoCallAdvisor()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {
         "task-A": MediatorReport(task_id="task-A", iteration=0, content="task-A report"),

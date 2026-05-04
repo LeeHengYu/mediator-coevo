@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict, cast
 
 import litellm
 from litellm.types.utils import ModelResponse
@@ -38,6 +38,16 @@ class CompletionResult(TypedDict):
 
 class LLMUsageError(RuntimeError):
     """Raised when a LiteLLM response does not include required usage data."""
+
+
+class _UsageCounts(Protocol):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class _UsageResponse(Protocol):
+    usage: _UsageCounts | None
 
 
 class LLMClient:
@@ -195,9 +205,12 @@ class LLMClient:
         )
 
         choice = response.choices[0]
-        input_tokens = _required_usage_int(response, "prompt_tokens")
-        output_tokens = _required_usage_int(response, "completion_tokens")
-        total_tokens = _required_usage_int(response, "total_tokens")
+        usage = cast(_UsageResponse, response).usage
+        if usage is None:
+            raise LLMUsageError("LiteLLM response did not include usage accounting")
+        input_tokens = int(usage.prompt_tokens)
+        output_tokens = int(usage.completion_tokens)
+        total_tokens = int(usage.total_tokens)
         if budget_label or prompt_budget is not None:
             self._token_events.append(
                 TokenBudgetEvent(
@@ -225,15 +238,3 @@ class LLMClient:
         events = list(self._token_events)
         self._token_events.clear()
         return events
-
-
-def _required_usage_int(response: ModelResponse, field: str) -> int:
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        raise LLMUsageError("LiteLLM response did not include usage accounting")
-    value = getattr(usage, field, None)
-    if value is None:
-        raise LLMUsageError(
-            f"LiteLLM response usage is missing required field {field!r}"
-        )
-    return int(value)

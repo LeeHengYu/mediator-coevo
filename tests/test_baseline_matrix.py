@@ -214,6 +214,11 @@ class _Advisor:
     llm_client = _LLM()
 
 
+class _SkillStore:
+    def skill_hashes(self) -> dict[str, str]:
+        return {}
+
+
 @pytest.mark.asyncio
 async def test_planner_and_mediator_reflection_are_independently_gated(monkeypatch):
     calls: list[str] = []
@@ -233,7 +238,7 @@ async def test_planner_and_mediator_reflection_are_independently_gated(monkeypat
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = _config()
     orch.history_store = object()
-    orch.skill_store = object()
+    orch.skill_store = _SkillStore()
     orch.planner = _Planner()
     orch.mediator = _Mediator()
     orch.skill_advisor = _Advisor()
@@ -265,7 +270,7 @@ def test_metrics_rows_include_baseline_and_skill_update_policy():
         planner=True,
         mediator=False,
     )
-    orch.skill_store = object()
+    orch.skill_store = _SkillStore()
 
     record = orch._build_coevolution_record(
         iteration=4,

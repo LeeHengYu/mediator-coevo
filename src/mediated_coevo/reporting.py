@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
-from typing import Any, SupportsFloat, TypedDict, cast
+from typing import Any, TypedDict
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -269,10 +270,14 @@ def _series_median(values: pd.Series) -> float | None:
     return float(values.median())
 
 
-def _optional_float(value: object) -> float | None:
-    if pd.isna(value):
+def _optional_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
         return None
-    return float(cast(SupportsFloat, value))
+    if math.isnan(number):
+        return None
+    return number
 
 
 def _bootstrap_mean_ci(
