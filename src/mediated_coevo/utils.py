@@ -4,9 +4,37 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from collections.abc import Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def as_nonempty_string(value: object) -> str | None:
+    """Return stripped non-empty strings only."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def as_mapping(value: object) -> Mapping[str, Any]:
+    """Return mapping values, or an empty mapping for invalid inputs."""
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def as_optional_float(value: object) -> float | None:
+    """Return a float conversion, or None for invalid and NaN values."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    return number
 
 
 def parse_json_object(text: str) -> dict:

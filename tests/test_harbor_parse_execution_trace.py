@@ -24,6 +24,7 @@ _MISSING_JOB_RESULT = object()
 
 def _job_result(mean: Any = 0.75) -> dict[str, Any]:
     return {
+        "id": "job-123",
         "stats": {
             "evals": {
                 "opencode__model__adhoc": {
@@ -102,6 +103,9 @@ def test_happy_path_reward_from_job_result_json(tmp_path):
     trial = _make_trial(
         tmp_path,
         trial_result_json={
+            "id": "trial-456",
+            "trial_name": "run-demo__abc123",
+            "trial_uri": "file:///tmp/run-demo__abc123",
             "agent_result": {"n_input_tokens": 100, "n_output_tokens": 50},
         },
         job_result_json=_job_result(0.75),
@@ -120,6 +124,16 @@ def test_happy_path_reward_from_job_result_json(tmp_path):
     assert trace.reward == pytest.approx(0.75)
     assert trace.token_usage.input_tokens == 100
     assert trace.token_usage.output_tokens == 50
+    assert trace.run_id == "job-123"
+    assert trace.harbor_trial_id == "trial-456"
+    assert trace.harbor_paths == {
+        "job": str(trial.parent),
+        "trial": str(trial),
+    }
+    assert trace.harbor_metadata == {
+        "trial_name": "run-demo__abc123",
+        "trial_uri": "file:///tmp/run-demo__abc123",
+    }
     assert trace.test_results is not None
     assert trace.test_results["summary"]["passed"] == 3
     assert "Did the thing." in trace.stdout

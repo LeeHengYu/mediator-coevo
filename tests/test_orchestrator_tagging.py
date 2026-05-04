@@ -19,9 +19,14 @@ import pytest
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillProposal, SkillUpdate
+from mediated_coevo.models.skill import (
+    AdvisorBatchProvenance,
+    ProposalRef,
+    SkillProposal,
+    SkillUpdate,
+)
 from mediated_coevo.models.task import TaskSpec
-from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 from mediated_coevo.config import Config
 from mediated_coevo.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
@@ -371,6 +376,247 @@ def test_build_coevolution_record_captures_reflector_token_events():
     assert record.total_tokens == 15
     assert record.llm_token_events == [event]
     assert [update.skill_id for update in record.skill_updates] == ["planner"]
+    assert record.seed == 42
+    assert record.models == {
+        "planner": "test-planner",
+        "executor": "test-executor",
+        "mediator": "test-mediator",
+    }
+    assert record.executor_agent == "opencode"
+    assert record.token_totals_by_agent == {"reflector": 15}
+
+
+def test_build_iteration_record_adds_compact_metric_fields():
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
+    orch._previous_reward_by_task = {"task-A": 0.25}
+    orch.planner = _LLMBackedComponent(_DrainClient("planner.plan_task"))
+    orch.mediator = _LLMBackedComponent(_DrainClient("mediator.process_trace"))
+    orch.skill_advisor = _LLMBackedComponent(_DrainClient("skill_advisor.review"))
+
+    report = MediatorReport(task_id="task-A", iteration=2)
+    update = SkillUpdate(
+        skill_id="executor",
+        old_content="old",
+        new_content="new",
+        provenance=AdvisorBatchProvenance(
+            batch_id="batch-1",
+            iteration=2,
+            skill_id="executor",
+            task_ids=["task-A"],
+            base_skill_hash="old-hash",
+            decision="approved",
+            reason="approved feedback",
+            proposal_refs=[
+                ProposalRef(
+                    proposal_id="proposal-1",
+                    task_id="task-A",
+                    iteration=1,
+                    reward=0.75,
+                )
+            ],
+        ),
+    )
+
+    record = orch._build_iteration_record(
+        task_id="task-A",
+        iteration=2,
+        condition="learned_mediator",
+        start=0.0,
+        task_spec=TaskSpec(task_id="task-A", instruction="do it", iteration=2),
+        trace=ExecutionTrace(
+            task_id="task-A",
+            iteration=2,
+            reward=0.75,
+            status="ok",
+            token_usage=TokenUsage(input_tokens=4, output_tokens=6),
+            run_id="job-123",
+        ),
+        report=report,
+        skill_update=update,
+        mediator_entry_id="mediator-entry",
+        planner_entry_id="planner-entry",
+        skill_hashes={"executor": "hash"},
+        task_metadata={
+            "task_category": "build",
+            "task_difficulty": "medium",
+            "expected_reward_range": (0.0, 1.0),
+            "verifier_type": "pytest",
+        },
+    )
+
+    assert record.run_id == "job-123"
+    assert record.seed == 42
+    assert record.models == {
+        "planner": "test-planner",
+        "executor": "test-executor",
+        "mediator": "test-mediator",
+    }
+    assert record.executor_agent == "opencode"
+    assert record.mediator_report_id == report.report_id
+    assert record.history_entry_ids == {
+        "mediator": "mediator-entry",
+        "planner": "planner-entry",
+    }
+    assert record.proposal_ids == ["proposal-1"]
+    assert record.success is True
+    assert record.verifier_status == "ok"
+    assert record.delta_reward == pytest.approx(0.5)
+    assert record.token_totals_by_agent == {
+        "executor": 10,
+        "planner": 3,
+        "mediator": 3,
+        "skill_advisor": 3,
+    }
+    assert record.advisor_decision == "approved"
+    assert record.advisor_reason == "approved feedback"
+
+
+def test_metric_row_excludes_large_artifacts_and_promotes_required_fields():
+    event = TokenBudgetEvent(
+        label="planner.plan_task",
+        model="test-planner",
+        condition_name="learned_mediator",
+        prompt_tokens=11,
+        completion_tokens=5,
+        total_tokens=16,
+        budget_limit=100,
+        budget_overflow_strategy="section_pack",
+    )
+    update = SkillUpdate(
+        skill_id="executor",
+        task_id="task-A",
+        iteration=0,
+        old_content="old content" * 100,
+        new_content="new content" * 100,
+        reasoning="short reason",
+        old_skill_hash="old-hash",
+        new_skill_hash="new-hash",
+        skill_version="iter_0000",
+    )
+    record = IterationRecord(
+        iteration=0,
+        task_id="task-A",
+        task_spec=TaskSpec(task_id="task-A", instruction="do it", iteration=0),
+        execution_trace=ExecutionTrace(
+            task_id="task-A",
+            iteration=0,
+            stdout="long harbor output" * 100,
+            reward=0.0,
+            status="ok",
+            token_usage=TokenUsage(input_tokens=4, output_tokens=6),
+            run_id="job-123",
+            harbor_trial_id="trial-123",
+            harbor_paths={"job": "/tmp/job", "trial": "/tmp/job/trial"},
+        ),
+        skill_update=update,
+        reward=0.0,
+        total_tokens=26,
+        llm_token_events=[event],
+        run_id="job-123",
+        condition_name="learned_mediator",
+        seed=42,
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        },
+        executor_agent="opencode",
+        skill_hashes={"executor": "hash"},
+        skill_version="iter_0000",
+        success=True,
+        verifier_status="ok",
+        task_category="build",
+        task_difficulty="easy",
+        expected_reward_range=(0.0, 1.0),
+        verifier_type="pytest",
+    )
+
+    row = Orchestrator._metric_row(record)
+
+    assert "task_spec" not in row
+    assert "execution_trace" not in row
+    assert "mediator_report" not in row
+    assert "skill_update" not in row
+    assert "long harbor output" not in str(row)
+    assert "old content" not in str(row)
+    assert "new content" not in str(row)
+    assert row["planner_model"] == "test-planner"
+    assert row["executor_model"] == "test-executor"
+    assert row["mediator_model"] == "test-mediator"
+    assert row["harbor_job_path"] == "/tmp/job"
+    assert row["harbor_trial_path"] == "/tmp/job/trial"
+    assert row["harbor_trial_id"] == "trial-123"
+    assert row["success"] is False
+    assert row["verifier_status"] == "task_failed"
+    assert row["prompt_tokens_by_agent"] == {"executor": 4, "planner": 11}
+    assert row["completion_tokens_by_agent"] == {"executor": 6, "planner": 5}
+    assert row["total_tokens_by_agent"] == {"executor": 10, "planner": 16}
+    assert row["llm_token_events"][0]["budget_limit"] == 100
+    assert row["expected_reward_range"] == [0.0, 1.0]
+    assert row["skill_updates"] == [
+        {
+            "skill_id": "executor",
+            "task_id": "task-A",
+            "iteration": 0,
+            "old_skill_hash": "old-hash",
+            "new_skill_hash": "new-hash",
+            "skill_version": "iter_0000",
+            "reasoning": "short reason",
+            "provenance": None,
+        }
+    ]
+
+
+def test_zero_reward_harbor_run_is_logged_as_task_failure():
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
+    orch._previous_reward_by_task = {}
+    orch.planner = _LLMBackedComponent(_DrainClient("planner.plan_task"))
+    orch.mediator = _LLMBackedComponent(_DrainClient("mediator.process_trace"))
+    orch.skill_advisor = _LLMBackedComponent(_DrainClient("skill_advisor.review"))
+
+    record = orch._build_iteration_record(
+        task_id="task-A",
+        iteration=0,
+        condition="no_feedback",
+        start=0.0,
+        task_spec=TaskSpec(task_id="task-A", instruction="do it", iteration=0),
+        trace=ExecutionTrace(
+            task_id="task-A",
+            iteration=0,
+            reward=0.0,
+            status="ok",
+            run_id="job-123",
+        ),
+        report=None,
+        skill_update=None,
+        mediator_entry_id=None,
+        planner_entry_id=None,
+        skill_hashes={"executor": "hash"},
+        task_metadata={
+            "task_category": "build",
+            "task_difficulty": "easy",
+            "expected_reward_range": (0.0, 1.0),
+            "verifier_type": "pytest",
+        },
+    )
+
+    assert record.success is False
+    assert record.verifier_status == "task_failed"
+    assert record.reward == 0.0
 
 
 class _NoCallPlanner:

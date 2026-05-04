@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -9,6 +8,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from mediated_coevo.models.iteration import IterationRecord
+from mediated_coevo.utils import as_optional_float
 
 ENV_FAILURE_STATUSES = {"env_failure", "parse_error", "harbor_failed"}
 COEVOLUTION_TASK_ID = "__coevolution__"
@@ -193,8 +193,8 @@ def _build_task_summaries(
                 scored_count=scored_count,
                 unscored_count=total_runs - scored_count,
                 env_failure_count=int(stats["env_failure_count"]),
-                mean_reward=_optional_float(stats["mean_reward"]),
-                median_reward=_optional_float(stats["median_reward"]),
+                mean_reward=as_optional_float(stats["mean_reward"]),
+                median_reward=as_optional_float(stats["median_reward"]),
                 bootstrap_ci=_bootstrap_mean_ci(
                     rewards,
                     samples=bootstrap_samples,
@@ -268,17 +268,6 @@ def _series_median(values: pd.Series) -> float | None:
     if values.empty:
         return None
     return float(values.median())
-
-
-def _optional_float(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if math.isnan(number):
-        return None
-    return number
-
 
 def _bootstrap_mean_ci(
     values: pd.Series,

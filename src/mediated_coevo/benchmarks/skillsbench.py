@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
+from mediated_coevo.utils import as_mapping, as_nonempty_string
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +482,7 @@ class HarborTraceParser:
             exit_code=run_result.returncode,
             stdout=_format_harbor_stdout(run_result.stdout, ""),
             stderr=_format_harbor_stderr(run_result.stderr, None),
+            harbor_paths=_harbor_paths(run_result),
         )
 
     def parse(self) -> ExecutionTrace:
@@ -513,6 +515,7 @@ class HarborTraceParser:
         full_base = self._build_full_base(
             trial_dir,
             trial_result_json,
+            job_result_json,
             ctrf_diagnostics,
         )
 
@@ -551,11 +554,15 @@ class HarborTraceParser:
         self,
         trial_dir: Path,
         result_json: dict[str, Any],
+        job_result_json: dict[str, Any],
         ctrf_diagnostics: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        agent_result = _mapping_or_empty(result_json.get("agent_result"))
+        agent_result = as_mapping(result_json.get("agent_result"))
         return dict(
             self.base,
+            run_id=as_nonempty_string(job_result_json.get("id")),
+            harbor_trial_id=as_nonempty_string(result_json.get("id")),
+            harbor_metadata=_harbor_metadata(result_json),
             stdout=_format_harbor_stdout(
                 self.run_result.stdout,
                 _read_agent_summary(trial_dir),
@@ -593,8 +600,8 @@ class HarborTraceParser:
         job_result_json: dict[str, Any],
     ) -> float:
         """Parse the canonical SkillsBench/Harbor aggregate mean reward."""
-        stats = _mapping_or_empty(job_result_json.get("stats"))
-        evals = _mapping_or_empty(stats.get("evals"))
+        stats = as_mapping(job_result_json.get("stats"))
+        evals = as_mapping(stats.get("evals"))
         if not evals:
             raise _JobRewardError(
                 "missing_job_reward",
@@ -607,14 +614,14 @@ class HarborTraceParser:
             )
 
         eval_name, eval_result = next(iter(evals.items()))
-        metrics = _mapping_or_empty(eval_result).get("metrics")
+        metrics = as_mapping(eval_result).get("metrics")
         if not isinstance(metrics, list) or not metrics:
             raise _JobRewardError(
                 "missing_job_reward",
                 f"job result.json eval {eval_name!r} does not contain metrics",
             )
 
-        mean = _mapping_or_empty(metrics[0]).get("mean")
+        mean = as_mapping(metrics[0]).get("mean")
         if mean is None:
             raise _JobRewardError(
                 "missing_job_reward",
@@ -805,8 +812,8 @@ def _summarize_ctrf_diagnostics(
 ) -> dict[str, Any] | None:
     if not ctrf_json:
         return None
-    results = _mapping_or_empty(ctrf_json.get("results"))
-    summary = _mapping_or_empty(results.get("summary"))
+    results = as_mapping(ctrf_json.get("results"))
+    summary = as_mapping(results.get("summary"))
     tests = results.get("tests", [])
     if not isinstance(tests, list):
         tests = []
@@ -824,10 +831,22 @@ def _summarize_ctrf_diagnostics(
     }
 
 
-def _mapping_or_empty(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
+def _harbor_paths(run_result: HarborRunResult) -> dict[str, str]:
+    paths: dict[str, str] = {}
+    if run_result.job_dir is not None:
+        paths["job"] = str(run_result.job_dir)
+    if run_result.trial_dir is not None:
+        paths["trial"] = str(run_result.trial_dir)
+    return paths
+
+
+def _harbor_metadata(result_json: dict[str, Any]) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for key in ("trial_name", "trial_uri"):
+        value = as_nonempty_string(result_json.get(key))
+        if value is not None:
+            metadata[key] = value
+    return metadata
 
 
 def _safe_int(value: Any, *, field: str, task_id: str, iteration: int) -> int:

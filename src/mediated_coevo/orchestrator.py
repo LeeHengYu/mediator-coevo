@@ -6,10 +6,10 @@ Triggers co-evolution reflections every N iterations.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import time
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -44,6 +44,7 @@ from mediated_coevo.token_budget import TokenBudgetEvent
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
+from mediated_coevo.utils import as_mapping, as_nonempty_string
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class Orchestrator:
 
         self._metrics_path = experiment_dir / "metrics.jsonl"
         self._previous_report_by_task: dict[str, MediatorReport] = {}
+        self._previous_reward_by_task: dict[str, float] = {}
 
     async def run_experiment(
         self,
@@ -272,8 +274,15 @@ class Orchestrator:
             total_tokens=sum(e.total_tokens for e in llm_token_events),
             condition_name=condition,
             **self._experiment_record_fields(),
+            **self._runtime_record_fields(),
             **self._task_metadata_fields(task_id=task_id, task_config=None),
             skill_hashes=dict(skill_hashes),
+            success=trace.is_usable_feedback_signal,
+            verifier_status=trace.status,
+            token_totals_by_agent=self._token_totals_by_agent(
+                trace,
+                llm_token_events,
+            ),
         )
 
     async def _ask_planner_for_skill_proposal(
@@ -366,8 +375,32 @@ class Orchestrator:
     ) -> IterationRecord:
         duration = time.time() - start
         llm_token_events = self._drain_llm_token_events()
-        executor_tokens = trace.token_usage.input_tokens + trace.token_usage.output_tokens
+        executor_tokens = (
+            trace.token_usage.input_tokens + trace.token_usage.output_tokens
+        )
         total_tokens = executor_tokens + sum(e.total_tokens for e in llm_token_events)
+        history_entry_ids: dict[str, str] = {}
+        if mediator_entry_id:
+            history_entry_ids["mediator"] = mediator_entry_id
+        if planner_entry_id:
+            history_entry_ids["planner"] = planner_entry_id
+
+        advisor_provenance: AdvisorBatchProvenance | None = None
+        if skill_update and isinstance(
+            skill_update.provenance,
+            AdvisorBatchProvenance,
+        ):
+            advisor_provenance = skill_update.provenance
+        proposal_ids = (
+            [ref.proposal_id for ref in advisor_provenance.proposal_refs]
+            if advisor_provenance
+            else []
+        )
+        advisor_decision = None
+        advisor_reason = None
+        if advisor_provenance:
+            advisor_decision = advisor_provenance.decision
+            advisor_reason = advisor_provenance.reason or None
 
         record = IterationRecord(
             iteration=iteration,
@@ -380,12 +413,26 @@ class Orchestrator:
             total_tokens=total_tokens,
             llm_token_events=llm_token_events,
             duration_sec=duration,
+            run_id=trace.run_id,
             mediator_history_entry_id=mediator_entry_id,
             planner_history_entry_id=planner_entry_id,
+            history_entry_ids=history_entry_ids,
+            mediator_report_id=report.report_id if report else None,
+            proposal_ids=proposal_ids,
             condition_name=condition,
             **self._experiment_record_fields(),
+            **self._runtime_record_fields(),
             **task_metadata,
             skill_hashes=dict(skill_hashes),
+            success=_metric_success(trace),
+            verifier_status=_metric_verifier_status(trace),
+            delta_reward=self._delta_reward(task_id, trace),
+            token_totals_by_agent=self._token_totals_by_agent(
+                trace,
+                llm_token_events,
+            ),
+            advisor_decision=advisor_decision,
+            advisor_reason=advisor_reason,
         )
         reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
         logger.info(
@@ -589,7 +636,96 @@ class Orchestrator:
     def _write_metric(self, record: IterationRecord) -> None:
         """Append an iteration record to metrics.jsonl."""
         with open(self._metrics_path, "a") as f:
-            f.write(record.model_dump_json() + "\n")
+            f.write(json.dumps(self._metric_row(record), sort_keys=True) + "\n")
+
+    @staticmethod
+    def _metric_row(record: IterationRecord) -> dict[str, Any]:
+        """Return a compact metrics row without bulky artifacts or prompts."""
+        trace = record.execution_trace
+        token_usage_by_agent = _token_usage_by_agent(record)
+        skill_updates = []
+        if record.skill_update:
+            skill_updates.append(record.skill_update)
+        skill_updates.extend(record.skill_updates)
+        skill_update_summaries = [
+            _skill_update_summary(update)
+            for update in skill_updates
+        ]
+        success = record.success
+        verifier_status = record.verifier_status
+        harbor_job_path = None
+        harbor_trial_path = None
+        harbor_trial_id = None
+        trace_artifact_path = None
+        if trace is not None:
+            success = _metric_success(trace)
+            verifier_status = _metric_verifier_status(trace)
+            harbor_job_path = trace.harbor_paths.get("job")
+            harbor_trial_path = trace.harbor_paths.get("trial")
+            harbor_trial_id = trace.harbor_trial_id
+            trace_artifact_path = (
+                f"artifacts/traces/{record.task_id}_iter{record.iteration:04d}.json"
+            )
+
+        return {
+            "iteration": record.iteration,
+            "task_id": record.task_id,
+            "timestamp": record.timestamp.isoformat(),
+            "run_id": record.run_id,
+            "condition_name": record.condition_name,
+            "seed": record.seed,
+            "baseline_preset": record.baseline_preset,
+            "cross_task_feedback_enabled": record.cross_task_feedback_enabled,
+            "skill_update_policy": record.skill_update_policy,
+            "planner_model": record.models.get("planner"),
+            "executor_model": record.models.get("executor"),
+            "mediator_model": record.models.get("mediator"),
+            "executor_agent": record.executor_agent,
+            "skill_hashes": record.skill_hashes,
+            "skill_version": record.skill_version,
+            "mediator_history_entry_id": record.mediator_history_entry_id,
+            "planner_history_entry_id": record.planner_history_entry_id,
+            "history_entry_ids": record.history_entry_ids,
+            "mediator_report_id": record.mediator_report_id,
+            "proposal_ids": record.proposal_ids,
+            "reward": record.reward,
+            "delta_reward": record.delta_reward,
+            "success": success,
+            "verifier_status": verifier_status,
+            "duration_sec": record.duration_sec,
+            "total_tokens": record.total_tokens,
+            "prompt_tokens_by_agent": {
+                agent: usage["prompt_tokens"]
+                for agent, usage in token_usage_by_agent.items()
+            },
+            "completion_tokens_by_agent": {
+                agent: usage["completion_tokens"]
+                for agent, usage in token_usage_by_agent.items()
+            },
+            "total_tokens_by_agent": {
+                agent: usage["total_tokens"]
+                for agent, usage in token_usage_by_agent.items()
+            },
+            "llm_token_events": [
+                event.model_dump(mode="json")
+                for event in record.llm_token_events
+            ],
+            "harbor_job_path": harbor_job_path,
+            "harbor_trial_path": harbor_trial_path,
+            "harbor_trial_id": harbor_trial_id,
+            "trace_artifact_path": trace_artifact_path,
+            "advisor_decision": record.advisor_decision,
+            "advisor_reason": record.advisor_reason,
+            "task_category": record.task_category,
+            "task_difficulty": record.task_difficulty,
+            "expected_reward_range": (
+                list(record.expected_reward_range)
+                if record.expected_reward_range is not None
+                else None
+            ),
+            "verifier_type": record.verifier_type,
+            "skill_updates": skill_update_summaries,
+        }
 
     def _snapshot_and_write_metrics(
         self,
@@ -651,6 +787,14 @@ class Orchestrator:
             "skill_update_policy": self.config.experiment.skill_updates.model_dump(),
         }
 
+    def _runtime_record_fields(self) -> dict[str, Any]:
+        """Return compact runtime fields that should travel with every row."""
+        return {
+            "seed": self.config.experiment.seed,
+            "models": self.config.models.model_dump(),
+            "executor_agent": self.config.executor_runtime.agent_name,
+        }
+
     @staticmethod
     def _task_metadata_fields(
         *,
@@ -658,16 +802,16 @@ class Orchestrator:
         task_config: dict[str, Any] | None,
     ) -> _TaskMetadataFields:
         """Return flat task metadata fields for metrics rows."""
-        metadata = _mapping_value(task_config.get("metadata")) if task_config else {}
-        verifier = _mapping_value(task_config.get("verifier")) if task_config else {}
+        metadata = as_mapping(task_config.get("metadata")) if task_config else {}
+        verifier = as_mapping(task_config.get("verifier")) if task_config else {}
         curated_metadata = SKILLSBENCH_10_TASK_METADATA.get(task_id)
 
-        category = _string_value(metadata.get("category"))
-        difficulty = _string_value(metadata.get("difficulty"))
+        category = as_nonempty_string(metadata.get("category"))
+        difficulty = as_nonempty_string(metadata.get("difficulty"))
         expected_reward_range = _reward_range_value(
             metadata.get("expected_reward_range")
         )
-        verifier_type = _string_value(verifier.get("type"))
+        verifier_type = as_nonempty_string(verifier.get("type"))
 
         if curated_metadata:
             category = category or curated_metadata.category
@@ -716,6 +860,37 @@ class Orchestrator:
             events.extend(llm_client.drain_token_events())
         return events
 
+    def _delta_reward(self, task_id: str, trace: ExecutionTrace) -> float | None:
+        """Return reward delta against the previous scored run for this task."""
+        if not hasattr(self, "_previous_reward_by_task"):
+            self._previous_reward_by_task = {}
+        if not trace.is_usable_feedback_signal or trace.reward is None:
+            return None
+
+        previous_reward = self._previous_reward_by_task.get(task_id)
+        self._previous_reward_by_task[task_id] = trace.reward
+        if previous_reward is None:
+            return None
+        return trace.reward - previous_reward
+
+    @staticmethod
+    def _token_totals_by_agent(
+        trace: ExecutionTrace | None,
+        llm_token_events: list[TokenBudgetEvent],
+    ) -> dict[str, int]:
+        """Return compact token totals grouped by component."""
+        totals: dict[str, int] = {}
+        if trace:
+            executor_tokens = (
+                trace.token_usage.input_tokens + trace.token_usage.output_tokens
+            )
+            if executor_tokens:
+                totals["executor"] = executor_tokens
+        for event in llm_token_events:
+            agent = event.label.split(".", 1)[0] if event.label else "llm"
+            totals[agent] = totals.get(agent, 0) + event.total_tokens
+        return totals
+
     def _build_coevolution_record(
         self,
         *,
@@ -735,23 +910,13 @@ class Orchestrator:
             duration_sec=time.time() - start,
             condition_name=condition,
             **self._experiment_record_fields(),
+            **self._runtime_record_fields(),
             skill_hashes=self._current_skill_hashes(),
+            token_totals_by_agent=self._token_totals_by_agent(
+                None,
+                llm_token_events,
+            ),
         )
-
-
-def _string_value(value: object) -> str | None:
-    """Return stripped non-empty strings only."""
-    if not isinstance(value, str):
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _mapping_value(value: object) -> Mapping[str, Any]:
-    """Return mapping values only."""
-    if isinstance(value, Mapping):
-        return value
-    return {}
 
 
 def _reward_range_value(value: object) -> tuple[float, float] | None:
@@ -764,3 +929,74 @@ def _reward_range_value(value: object) -> tuple[float, float] | None:
     except (TypeError, ValueError):
         return None
     return (low, high)
+
+
+def _metric_success(trace: ExecutionTrace) -> bool:
+    """Return whether a scored task run succeeded."""
+    return trace.status == "ok" and trace.reward is not None and trace.reward > 0
+
+
+def _metric_verifier_status(trace: ExecutionTrace) -> str:
+    """Distinguish valid zero-reward task failures from environment failures."""
+    if trace.status == "ok" and trace.reward == 0:
+        return "task_failed"
+    return trace.status
+
+
+def _token_usage_by_agent(record: IterationRecord) -> dict[str, dict[str, int]]:
+    """Return prompt/completion/total token counts grouped by agent."""
+    usage_by_agent: dict[str, dict[str, int]] = {}
+    if record.execution_trace is not None:
+        _add_token_usage(
+            usage_by_agent,
+            "executor",
+            prompt_tokens=record.execution_trace.token_usage.input_tokens,
+            completion_tokens=record.execution_trace.token_usage.output_tokens,
+        )
+
+    for event in record.llm_token_events:
+        _add_token_usage(
+            usage_by_agent,
+            _agent_from_event_label(event.label),
+            prompt_tokens=event.prompt_tokens,
+            completion_tokens=event.completion_tokens,
+        )
+    return usage_by_agent
+
+
+def _add_token_usage(
+    usage_by_agent: dict[str, dict[str, int]],
+    agent: str,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    usage = usage_by_agent.setdefault(
+        agent,
+        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    )
+    usage["prompt_tokens"] += prompt_tokens
+    usage["completion_tokens"] += completion_tokens
+    usage["total_tokens"] += prompt_tokens + completion_tokens
+
+
+def _agent_from_event_label(label: str) -> str:
+    return label.split(".", 1)[0] if label else "llm"
+
+
+def _skill_update_summary(update: SkillUpdate) -> dict[str, Any]:
+    """Return skill update metadata without duplicating full skill contents."""
+    return {
+        "skill_id": update.skill_id,
+        "task_id": update.task_id,
+        "iteration": update.iteration,
+        "old_skill_hash": update.old_skill_hash,
+        "new_skill_hash": update.new_skill_hash,
+        "skill_version": update.skill_version,
+        "reasoning": update.reasoning,
+        "provenance": (
+            update.provenance.model_dump(mode="json")
+            if update.provenance is not None
+            else None
+        ),
+    }

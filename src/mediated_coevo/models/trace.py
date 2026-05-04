@@ -47,6 +47,10 @@ class ExecutionTrace(BaseModel):
     error_detail: Any = None
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     duration_sec: float = 0.0
+    run_id: str | None = None
+    harbor_trial_id: str | None = None
+    harbor_paths: dict[str, str] = Field(default_factory=dict)
+    harbor_metadata: dict[str, str] = Field(default_factory=dict)
 
     @property
     def is_usable_feedback_signal(self) -> bool:
