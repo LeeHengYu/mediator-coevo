@@ -1016,6 +1016,21 @@ async def test_advisor_patch_rejected_when_validation_task_regresses(tmp_path):
     assert result["decision"] == "rejected"
     assert result["reason"] == "task_regression"
 
+    rejections = orch.history_store.query_rejected_proposals()
+    assert len(rejections) == 1
+    rejection = rejections[0]
+    assert rejection.batch_id == "coevo-iter-0003"
+    assert rejection.reason == "validation: task_regression"
+    assert rejection.advisor_feedback == "approved"
+    assert rejection.validation is not None
+    assert rejection.validation.decision == "rejected"
+    assert rejection.validation.reason == "task_regression"
+    assert [proposal.task_id for proposal in rejection.proposals] == [
+        "task-A",
+        "task-B",
+    ]
+    assert rejection.base_skill_hash == SkillStore.content_hash("old")
+
 
 @pytest.mark.asyncio
 async def test_advisor_patch_rejected_when_validation_trace_unusable(tmp_path):

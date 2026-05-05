@@ -1,8 +1,10 @@
 """History store — outcome-tagged history for co-evolution.
 
-Stores the history of mediator reports and planner skill edits,
-each tagged with the downstream reward. Used by the reflector
-to build contrastive pairs and reflection prompts.
+Stores the history of mediator reports and planner skill edits, each tagged
+with the downstream reward. Used by the reflector to build contrastive pairs
+and reflection prompts. Rejected executor skill proposal batches are stored in
+a separate sidecar file so they can be inspected later without becoming
+committed skill-update history.
 
 Each ``HistoryEntry`` carries a typed ``payload`` (``MediatorSignal``
 or ``PlannerSignal``) instead of a free-text blob, so the Reflector
@@ -25,6 +27,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from mediated_coevo.models.history_signals import HistorySignal
+from mediated_coevo.models.skill import RejectedProposalBatch
 
 if TYPE_CHECKING:
     from mediated_coevo.models.skill import SkillProposal
@@ -57,11 +60,13 @@ class HistoryStore:
     """File-backed history of outcome-tagged actions for co-evolution."""
 
     _HISTORY_FILE = "history.jsonl"
+    _REJECTED_PROPOSALS_FILE = "rejected_proposals.jsonl"
 
     def __init__(self, history_dir: Path) -> None:
         self._history_dir = history_dir
         self._history_dir.mkdir(parents=True, exist_ok=True)
         self._entries: list[HistoryEntry] = []
+        self._rejected_proposal_batches: list[RejectedProposalBatch] = []
         self._pending_mediator_entry_id_by_task: dict[str, str] = {}
         self._pending_planner_entry_id_by_task: dict[str, str] = {}
         self._load()
@@ -69,14 +74,24 @@ class HistoryStore:
     def _load(self) -> None:
         """Load all history entries from disk."""
         path = self._history_dir / self._HISTORY_FILE
-        if not path.exists():
-            return
-        for line in path.read_text().strip().split("\n"):
-            if line.strip():
-                try:
-                    self._entries.append(HistoryEntry.model_validate_json(line))
-                except Exception as e:
-                    logger.warning("Failed to parse history entry: %s", e)
+        if path.exists():
+            for line in path.read_text().strip().split("\n"):
+                if line.strip():
+                    try:
+                        self._entries.append(HistoryEntry.model_validate_json(line))
+                    except Exception as e:
+                        logger.warning("Failed to parse history entry: %s", e)
+
+        rejected_path = self._history_dir / self._REJECTED_PROPOSALS_FILE
+        if rejected_path.exists():
+            for line in rejected_path.read_text().strip().split("\n"):
+                if line.strip():
+                    try:
+                        self._rejected_proposal_batches.append(
+                            RejectedProposalBatch.model_validate_json(line)
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to parse rejected proposal batch: %s", e)
 
     def _save(self) -> None:
         """Persist all entries to disk."""
@@ -84,10 +99,25 @@ class HistoryStore:
         lines = [entry.model_dump_json() for entry in self._entries]
         path.write_text("\n".join(lines) + "\n")
 
+    def _save_rejected_proposals(self) -> None:
+        """Persist rejected proposal batches to disk."""
+        path = self._history_dir / self._REJECTED_PROPOSALS_FILE
+        lines = [
+            batch.model_dump_json()
+            for batch in self._rejected_proposal_batches
+        ]
+        path.write_text("\n".join(lines) + "\n")
+
     def add(self, entry: HistoryEntry) -> str:
         self._entries.append(entry)
         self._save()
         return entry.entry_id
+
+    def record_rejected_proposals(self, batch: RejectedProposalBatch) -> str:
+        """Persist a reviewed proposal batch that was not committed."""
+        self._rejected_proposal_batches.append(batch)
+        self._save_rejected_proposals()
+        return batch.rejection_id
 
     def record_signal(
         self,
@@ -175,6 +205,18 @@ class HistoryStore:
         if tagged_only:
             entries = [e for e in entries if e.reward is not None]
         return entries[-recent:]
+
+    def query_rejected_proposals(
+        self,
+        *,
+        skill_id: str | None = None,
+        recent: int = 20,
+    ) -> list[RejectedProposalBatch]:
+        """Query rejected proposal batches, oldest-to-newest within the window."""
+        batches = self._rejected_proposal_batches
+        if skill_id:
+            batches = [batch for batch in batches if batch.skill_id == skill_id]
+        return batches[-recent:]
 
     def contrastive_pairs(
         self,

@@ -30,7 +30,7 @@ current skill already captures the proposed changes.
 
 Respond with ONLY a JSON object (no prose, no fences):
   {"approve": true,  "feedback": "<2-4 sentence instruction for the Planner>"}
-  {"approve": false, "feedback": ""}"""
+  {"approve": false, "feedback": "<1-2 sentence rejection reason>"}"""
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,8 @@ class SkillAdvisorPrompt:
             self._current_skill_text(),
             "\n## Buffered Proposals\n",
             *self._proposal_blocks(),
-            '\nRespond with JSON only: {"approve": true/false, "feedback": "..."}',
+            "\nRespond with JSON only. The feedback field is required and "
+            "must be non-empty for both approval and rejection.",
         ])
         if not self.budgets:
             return user_content, None
@@ -121,10 +122,15 @@ class SkillAdvisor:
         self._llm = llm_client
         self._budgets: BudgetsConfig | None = None
         self._condition_name: str | None = None
+        self._last_rejection_reason: str | None = None
 
     @property
     def llm_client(self) -> LLMClient:
         return self._llm
+
+    @property
+    def last_rejection_reason(self) -> str | None:
+        return self._last_rejection_reason
 
     def configure_token_budget(
         self,
@@ -143,6 +149,7 @@ class SkillAdvisor:
         max_tokens: int = 512,
     ) -> str | None:
         """Review buffered proposals. Returns compact feedback or None."""
+        self._last_rejection_reason = None
         if not proposals:
             return None
 
@@ -172,10 +179,17 @@ class SkillAdvisor:
                 condition_name=self._condition_name,
             )
             parsed = parse_json_object(resp["content"])
+            feedback = str(parsed.get("feedback", "")).strip()
             if parsed.get("approve"):
-                fb = str(parsed.get("feedback", "")).strip()
-                return fb or None
+                if feedback:
+                    return feedback
+                self._last_rejection_reason = "advisor_approved_without_feedback"
+                return None
+            self._last_rejection_reason = (
+                feedback or "advisor_rejected_without_reason"
+            )
         except Exception as e:
             logger.error("SkillAdvisor review failed: %s", e)
+            self._last_rejection_reason = f"advisor_error: {e}"
 
         return None

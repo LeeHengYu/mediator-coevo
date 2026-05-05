@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Literal, Union
 from uuid import uuid4
 
@@ -21,7 +22,7 @@ class SkillEdit(BaseModel):
 
 
 class SkillProposal(SkillEdit):
-    """Buffered, unreviewed proposal — never written to HistoryStore."""
+    """Buffered, unreviewed proposal for an executor skill edit."""
 
     proposal_id: str = Field(default_factory=lambda: str(uuid4()))
     iteration: int
@@ -65,6 +66,29 @@ class SkillValidationResult(BaseModel):
     min_mean_delta: float = 0.0
     reward_tolerance: float = 1e-9
     task_results: list[SkillValidationTaskResult] = Field(default_factory=list)
+
+
+class RejectedSkillProposal(SkillProposal):
+    """Durable copy of a proposal that was reviewed but not committed."""
+
+    old_skill_hash: str | None = None
+    new_skill_hash: str | None = None
+
+
+class RejectedProposalBatch(BaseModel):
+    """Rejected executor proposal batch kept for later analysis/reflection."""
+
+    rejection_id: str = Field(default_factory=lambda: str(uuid4()))
+    batch_id: str
+    iteration: int
+    skill_id: str = "executor"
+    task_ids: list[str] = Field(default_factory=list)
+    base_skill_hash: str
+    reason: str = ""
+    advisor_feedback: str | None = None
+    validation: SkillValidationResult | None = None
+    proposals: list[RejectedSkillProposal] = Field(default_factory=list)
+    timestamp: datetime = Field(default_factory=datetime.now)
 
 
 class ContrastivePairRef(BaseModel):

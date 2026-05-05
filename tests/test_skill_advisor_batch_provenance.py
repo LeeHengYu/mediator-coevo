@@ -8,6 +8,7 @@ from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
+from mediated_coevo.stores.skill_store import SkillStore
 
 
 class _LLM:
@@ -40,6 +41,9 @@ class _SkillStore:
 class _NoCallPlanner:
     async def suggest_skill_revision(self, *args, **kwargs):
         raise AssertionError("planner should not patch when advisor rejects")
+
+
+_ADVISOR_REJECTION_REASON = "Proposal rewards conflict with the suggested edit."
 
 
 def _proposal(task_id: str, reward: float) -> SkillProposal:
@@ -81,7 +85,7 @@ def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _Skill
 @pytest.mark.asyncio
 async def test_advisor_rejection_clears_buffer_without_skill_update(tmp_path):
     advisor = SkillAdvisor(
-        _LLM(content='{"approve": false, "feedback": ""}')  # type: ignore[arg-type]
+        _LLM(content=f'{{"approve": false, "feedback": "{_ADVISOR_REJECTION_REASON}"}}')  # type: ignore[arg-type]
     )
     orch, skill_store = _orchestrator(tmp_path, advisor)
     original_rewards = [proposal.reward for proposal in orch._proposal_buffer]
@@ -96,6 +100,55 @@ async def test_advisor_rejection_clears_buffer_without_skill_update(tmp_path):
     assert skill_store.content == "# Executor\n"
     assert skill_store.writes == []
     assert original_rewards == [0.2, 0.8]
+
+    rejections = orch.history_store.query_rejected_proposals()
+    assert len(rejections) == 1
+    rejection = rejections[0]
+    assert rejection.batch_id == "coevo-iter-0003"
+    assert rejection.iteration == 3
+    assert rejection.skill_id == "executor"
+    assert rejection.task_ids == ["task-A", "task-B"]
+    assert rejection.base_skill_hash == SkillStore.content_hash("# Executor\n")
+    assert rejection.reason == _ADVISOR_REJECTION_REASON
+    assert rejection.validation is None
+    assert [proposal.task_id for proposal in rejection.proposals] == [
+        "task-A",
+        "task-B",
+    ]
+    assert [proposal.reward for proposal in rejection.proposals] == [0.2, 0.8]
+    assert rejection.proposals[0].old_content == "# Executor\n"
+    assert rejection.proposals[0].old_skill_hash == SkillStore.content_hash(
+        "# Executor\n"
+    )
+    assert rejection.proposals[0].new_skill_hash == SkillStore.content_hash(
+        "# Executor\n\nHandle task-A.\n"
+    )
+
+    reloaded = HistoryStore(history_dir=tmp_path / "history")
+    assert reloaded.query_rejected_proposals()[0].rejection_id == rejection.rejection_id
+
+
+@pytest.mark.asyncio
+async def test_advisor_rejection_without_reason_is_recorded_as_protocol_violation(
+    tmp_path,
+):
+    advisor = SkillAdvisor(
+        _LLM(content='{"approve": false, "feedback": ""}')  # type: ignore[arg-type]
+    )
+    orch, skill_store = _orchestrator(tmp_path, advisor)
+
+    update = await orch._executor_skill_gate().review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is None
+    assert orch._proposal_buffer == []
+    assert skill_store.content == "# Executor\n"
+    assert skill_store.writes == []
+    rejections = orch.history_store.query_rejected_proposals()
+    assert len(rejections) == 1
+    assert rejections[0].reason == "advisor_rejected_without_reason"
 
 
 @pytest.mark.asyncio
@@ -114,3 +167,6 @@ async def test_advisor_llm_failure_clears_buffer_without_skill_update(tmp_path):
     assert orch._proposal_buffer == []
     assert skill_store.content == "# Executor\n"
     assert skill_store.writes == []
+    rejections = orch.history_store.query_rejected_proposals()
+    assert len(rejections) == 1
+    assert rejections[0].reason == "advisor_error: advisor unavailable"

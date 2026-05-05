@@ -15,6 +15,8 @@ from mediated_coevo.experiment.records import rollback_snapshot
 from mediated_coevo.models.skill import (
     AdvisorBatchProvenance,
     ProposalRef,
+    RejectedProposalBatch,
+    RejectedSkillProposal,
     SkillProposal,
     SkillUpdate,
     SkillValidationDecision,
@@ -65,6 +67,7 @@ class ExecutorSkillGate:
         logger.info("Advisor reviewing %d proposals...", len(proposal_buffer))
         current_skill = self.skill_store.read_skill("executor") or ""
         buffered_proposals = list(proposal_buffer)
+        batch_id = f"coevo-iter-{iteration:04d}"
         advisor_feedback = await self.skill_advisor.review(
             current_skill=current_skill,
             proposals=buffered_proposals,
@@ -73,10 +76,19 @@ class ExecutorSkillGate:
 
         if not advisor_feedback:
             logger.info("Advisor rejected — no skill update.")
+            self._record_rejected_proposals(
+                iteration=iteration,
+                batch_id=batch_id,
+                current_skill=current_skill,
+                proposals=buffered_proposals,
+                reason=(
+                    self.skill_advisor.last_rejection_reason
+                    or "advisor_rejected"
+                ),
+            )
             return None
 
         logger.info("Advisor approved — Planner patching skill...")
-        batch_id = f"coevo-iter-{iteration:04d}"
         contributing_tasks = sorted({p.task_id for p in buffered_proposals if p.task_id})
         contributing_task_ids = ",".join(contributing_tasks)
         edit_history = self.history_store.query(
@@ -106,6 +118,15 @@ class ExecutorSkillGate:
             logger.info(
                 "Empirical validation rejected executor skill candidate: %s",
                 validation.reason,
+            )
+            self._record_rejected_proposals(
+                iteration=iteration,
+                batch_id=batch_id,
+                current_skill=current_skill,
+                proposals=buffered_proposals,
+                reason=f"validation: {validation.reason}",
+                advisor_feedback=advisor_feedback,
+                validation=validation,
             )
             return None
 
@@ -143,6 +164,47 @@ class ExecutorSkillGate:
         self.skill_store.write_skill("executor", skill_update.new_content)
         logger.info("Skill patched and written.")
         return skill_update
+
+    def _record_rejected_proposals(
+        self,
+        *,
+        iteration: int,
+        batch_id: str,
+        current_skill: str,
+        proposals: list[SkillProposal],
+        reason: str,
+        advisor_feedback: str | None = None,
+        validation: SkillValidationResult | None = None,
+    ) -> None:
+        """Persist rejected proposal evidence without writing a skill update."""
+        old_skill_hash = SkillStore.content_hash(current_skill)
+        rejected_batch = RejectedProposalBatch(
+            batch_id=batch_id,
+            iteration=iteration,
+            skill_id="executor",
+            task_ids=sorted(
+                {proposal.task_id for proposal in proposals if proposal.task_id}
+            ),
+            base_skill_hash=old_skill_hash,
+            reason=reason,
+            advisor_feedback=advisor_feedback,
+            validation=validation,
+            proposals=[
+                RejectedSkillProposal(
+                    proposal_id=proposal.proposal_id,
+                    iteration=proposal.iteration,
+                    task_id=proposal.task_id,
+                    reward=proposal.reward,
+                    old_content=proposal.old_content,
+                    new_content=proposal.new_content,
+                    reasoning=proposal.reasoning,
+                    old_skill_hash=SkillStore.content_hash(proposal.old_content),
+                    new_skill_hash=SkillStore.content_hash(proposal.new_content),
+                )
+                for proposal in proposals
+            ],
+        )
+        self.history_store.record_rejected_proposals(rejected_batch)
 
     async def _validate_candidate(
         self,
