@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mediated_coevo.config import BudgetsConfig
+    from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.skill import SkillProposal
 
@@ -43,7 +43,7 @@ class SkillAdvisorPrompt:
     budgets: BudgetsConfig | None = None
 
     def render(self) -> tuple[str, int | None]:
-        from mediated_coevo.token_budget import BudgetSection, pack_sections
+        from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
 
         user_content = "\n".join([
             "## Current Executor Skill\n",
@@ -73,7 +73,7 @@ class SkillAdvisorPrompt:
         )
 
     def _current_skill_text(self) -> str:
-        from mediated_coevo.token_budget import fit_text_to_tokens
+        from mediated_coevo.runtime.token_budget import fit_text_to_tokens
 
         text = self.current_skill or "(empty)"
         if not self.budgets:
@@ -92,7 +92,7 @@ class SkillAdvisorPrompt:
 
     def _proposal_block(self, index: int, proposal: SkillProposal) -> str:
         from mediated_coevo.evolution.compactor import _diff_parts
-        from mediated_coevo.token_budget import fit_text_to_tokens
+        from mediated_coevo.runtime.token_budget import fit_text_to_tokens
 
         reward_str = f"{proposal.reward:.3f}" if proposal.reward is not None else "n/a"
         added, removed, excerpt = _diff_parts(
@@ -146,7 +146,7 @@ class SkillAdvisor:
         if not proposals:
             return None
 
-        from mediated_coevo.utils import parse_json_object
+        from mediated_coevo.core.utils import parse_json_object
 
         user_content, prompt_budget = SkillAdvisorPrompt(
             current_skill=current_skill,

@@ -1,7 +1,7 @@
 import math
 from collections import UserDict
 
-from mediated_coevo.utils import (
+from mediated_coevo.core.utils import (
     as_mapping,
     as_nonempty_string,
     as_optional_float,

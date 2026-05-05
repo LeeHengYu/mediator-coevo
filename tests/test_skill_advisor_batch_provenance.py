@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from mediated_coevo.config import Config
+from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.skill import SkillProposal
-from mediated_coevo.orchestrator import Orchestrator
+from mediated_coevo.experiment.orchestrator import Orchestrator
+from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 
 
@@ -65,6 +66,9 @@ def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _Skill
     orch.config.experiment.advisor_buffer_max = 2
     orch.skill_store = skill_store
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
+    orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    orch.executor = object()
+    orch.benchmark_repo = object()
     orch.skill_advisor = advisor
     orch.planner = _NoCallPlanner()
     orch._proposal_buffer = [
@@ -82,7 +86,10 @@ async def test_advisor_rejection_clears_buffer_without_skill_update(tmp_path):
     orch, skill_store = _orchestrator(tmp_path, advisor)
     original_rewards = [proposal.reward for proposal in orch._proposal_buffer]
 
-    update = await orch._review_proposals_and_patch_skill(iteration=3)
+    update = await orch._executor_skill_gate().review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
 
     assert update is None
     assert orch._proposal_buffer == []
@@ -98,7 +105,10 @@ async def test_advisor_llm_failure_clears_buffer_without_skill_update(tmp_path):
     )
     orch, skill_store = _orchestrator(tmp_path, advisor)
 
-    update = await orch._review_proposals_and_patch_skill(iteration=3)
+    update = await orch._executor_skill_gate().review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
 
     assert update is None
     assert orch._proposal_buffer == []

@@ -31,8 +31,10 @@ class ArtifactStore:
         self._base_dir = base_dir
         self._traces_dir = base_dir / "traces"
         self._reports_dir = base_dir / "reports"
+        self._validation_dir = base_dir / "validation"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
         self._reports_dir.mkdir(parents=True, exist_ok=True)
+        self._validation_dir.mkdir(parents=True, exist_ok=True)
 
     def store_trace(self, trace: ExecutionTrace, *, overwrite: bool = False) -> Path:
         """Persist an execution trace. Returns the file path."""
@@ -52,6 +54,40 @@ class ArtifactStore:
             raise FileExistsError(f"Report already exists: {path}")
         path.write_text(report.model_dump_json(indent=2))
         logger.debug("Stored report: %s", path)
+        return path
+
+    def store_validation_trace(
+        self,
+        validation_id: str,
+        variant: str,
+        trace: ExecutionTrace,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """Persist an empirical validation trace outside normal run traces."""
+        filename = f"{trace.task_id}_iter{trace.iteration:04d}.json"
+        path = self._validation_dir / validation_id / variant / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Validation trace already exists: {path}")
+        path.write_text(trace.model_dump_json(indent=2))
+        logger.debug("Stored validation trace: %s", path)
+        return path
+
+    def store_validation_result(
+        self,
+        validation_id: str,
+        result: BaseModel,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """Persist empirical validation summary evidence."""
+        path = self._validation_dir / validation_id / "result.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Validation result already exists: {path}")
+        path.write_text(result.model_dump_json(indent=2))
+        logger.debug("Stored validation result: %s", path)
         return path
 
     def load_trace(self, task_id: str, iteration: int) -> ExecutionTrace | None:

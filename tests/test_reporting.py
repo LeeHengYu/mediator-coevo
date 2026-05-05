@@ -6,7 +6,7 @@ import pytest
 
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
-from mediated_coevo.reporting import (
+from mediated_coevo.analysis.reporting import (
     COEVOLUTION_TASK_ID,
     build_score_summary,
     write_score_summary,

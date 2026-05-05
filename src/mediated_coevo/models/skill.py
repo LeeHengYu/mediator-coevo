@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 
 SkillUpdateDecision = Literal["approved", "committed", "rejected", "no_change"]
+SkillValidationDecision = Literal["accepted", "rejected"]
 
 
 class SkillEdit(BaseModel):
@@ -35,6 +36,35 @@ class ProposalRef(BaseModel):
     task_id: str
     iteration: int
     reward: float | None = None
+
+
+class SkillValidationTaskResult(BaseModel):
+    """One current-vs-candidate executor validation comparison."""
+
+    task_id: str
+    current_reward: float | None = None
+    candidate_reward: float | None = None
+    current_status: str
+    candidate_status: str
+    current_trace_path: str | None = None
+    candidate_trace_path: str | None = None
+    usable: bool = False
+    regressed: bool = False
+
+
+class SkillValidationResult(BaseModel):
+    """Empirical validation evidence for an executor skill candidate."""
+
+    validation_id: str
+    task_ids: list[str] = Field(default_factory=list)
+    decision: SkillValidationDecision
+    reason: str = ""
+    current_mean_reward: float | None = None
+    candidate_mean_reward: float | None = None
+    mean_delta: float | None = None
+    min_mean_delta: float = 0.0
+    reward_tolerance: float = 1e-9
+    task_results: list[SkillValidationTaskResult] = Field(default_factory=list)
 
 
 class ContrastivePairRef(BaseModel):
@@ -67,6 +97,7 @@ class AdvisorBatchProvenance(SkillUpdateProvenance):
 
     kind: Literal["advisor_batch"] = "advisor_batch"
     proposal_refs: list[ProposalRef] = Field(default_factory=list)
+    validation: SkillValidationResult | None = None
 
 
 class ContrastiveReflectionProvenance(SkillUpdateProvenance):

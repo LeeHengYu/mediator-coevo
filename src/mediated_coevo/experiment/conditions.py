@@ -6,7 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from mediated_coevo.config import BudgetsConfig
+    from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.trace import ExecutionTrace
@@ -37,7 +37,7 @@ async def get_prior_context(
     condition_name: str | None = None,
 ) -> str | None:
     """Return the prior-context string the planner should receive, or None."""
-    from mediated_coevo.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
+    from mediated_coevo.runtime.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
 
     if condition == "no_feedback":
         return None
@@ -88,7 +88,7 @@ async def get_cross_task_prior_context(
     condition_name: str | None = None,
 ) -> str | None:
     """Return explicitly cross-task prior context for opt-in experiments."""
-    from mediated_coevo.token_budget import BudgetSection, pack_sections
+    from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
 
     if condition == "full_traces":
         traces = [

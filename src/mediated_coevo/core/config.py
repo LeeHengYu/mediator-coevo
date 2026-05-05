@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mediated_coevo.conditions import ConditionName
+from mediated_coevo.experiment.conditions import ConditionName
 
 
 class ModelsConfig(BaseModel):
@@ -40,6 +40,15 @@ class SkillUpdateConfig(BaseModel):
     mediator: bool = True
 
 
+class SkillValidationConfig(BaseModel):
+    """Empirical gate settings for executor skill candidates."""
+
+    enabled: bool = True
+    min_mean_delta: float = 0.0
+    reward_tolerance: float = 1e-9
+    require_all_tasks_usable: bool = True
+
+
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
@@ -49,6 +58,9 @@ class ExperimentConfig(BaseModel):
     advisor_buffer_max: int = 10
     condition_name: ConditionName = "learned_mediator"
     skill_updates: SkillUpdateConfig = Field(default_factory=SkillUpdateConfig)
+    skill_validation: SkillValidationConfig = Field(
+        default_factory=SkillValidationConfig
+    )
     baseline_preset: str | None = None
     shared_notes: str | None = None
     allow_cross_task_feedback: bool = False

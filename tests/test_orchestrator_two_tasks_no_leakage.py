@@ -4,13 +4,13 @@ import json
 
 import pytest
 
-from mediated_coevo.config import Config
+from mediated_coevo.core.config import Config
 from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
-from mediated_coevo.orchestrator import Orchestrator
+from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore

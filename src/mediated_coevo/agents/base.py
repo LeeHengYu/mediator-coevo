@@ -56,7 +56,7 @@ class BaseAgent(ABC):
 
     def response_to_dict(self, response_text: str) -> dict[str, Any]:
         """Parse JSON from LLM response, handling markdown fences."""
-        from mediated_coevo.utils import parse_json_object
+        from mediated_coevo.core.utils import parse_json_object
 
         result = parse_json_object(response_text)
         if not result:

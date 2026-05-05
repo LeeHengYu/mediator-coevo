@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from .base import BaseAgent
 
 if TYPE_CHECKING:
-    from mediated_coevo.config import BudgetsConfig
+    from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.skill import SkillProposal
     from mediated_coevo.models.task import TaskSpec
@@ -83,7 +83,7 @@ class PlannerAgent(BaseAgent):
     ) -> None:
         """Append optional skill context, respecting the configured token cap."""
         if self._budgets:
-            from mediated_coevo.token_budget import fit_text_to_tokens
+            from mediated_coevo.runtime.token_budget import fit_text_to_tokens
 
             content = fit_text_to_tokens(
                 self.llm_client.model,
@@ -139,7 +139,7 @@ class PlannerAgent(BaseAgent):
         if not self._budgets:
             return None
 
-        from mediated_coevo.token_budget import count_message_tokens
+        from mediated_coevo.runtime.token_budget import count_message_tokens
 
         system_tokens = count_message_tokens(model, messages)
         return max(1, self._budgets.planner_context_tokens - system_tokens)
@@ -282,7 +282,7 @@ class PlannerAgent(BaseAgent):
         budget: int | None = None,
     ) -> str:
         if budgets and budget:
-            from mediated_coevo.token_budget import BudgetSection, pack_sections
+            from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
 
             sections = [
                 BudgetSection(
@@ -337,7 +337,7 @@ class PlannerAgent(BaseAgent):
         budget: int | None = None,
     ) -> str:
         if budgets and budget:
-            from mediated_coevo.token_budget import BudgetSection, pack_sections
+            from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
 
             sections = [
                 BudgetSection(

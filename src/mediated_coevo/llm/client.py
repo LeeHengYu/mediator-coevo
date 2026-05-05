@@ -14,7 +14,7 @@ from typing import Any, Protocol, TypedDict, cast
 import litellm
 from litellm.types.utils import ModelResponse
 
-from mediated_coevo.token_budget import (
+from mediated_coevo.runtime.token_budget import (
     TokenBudgetEvent,
     validate_messages_fit,
 )

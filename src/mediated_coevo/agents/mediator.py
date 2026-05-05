@@ -21,19 +21,19 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mediated_coevo.conditions import ConditionName, MEDIATOR_CONDITIONS
+from mediated_coevo.experiment.conditions import ConditionName, MEDIATOR_CONDITIONS
 
 from .base import BaseAgent
 
 if TYPE_CHECKING:
-    from mediated_coevo.config import BudgetsConfig
+    from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.history_signals import MediatorSignal
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.models.trace import ExecutionTrace
     from mediated_coevo.stores.artifact_store import ArtifactStore
-    from mediated_coevo.token_budget import BudgetSection
+    from mediated_coevo.runtime.token_budget import BudgetSection
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class MediatorAgent(BaseAgent):
         logger.info("Mediator protocol loaded (%d chars)", len(skill_content))
 
     def construct_messages(self, context: dict[str, Any]) -> list[dict[str, Any]]:
-        from mediated_coevo.token_budget import (
+        from mediated_coevo.runtime.token_budget import (
             BudgetSection,
             count_message_tokens,
             fit_text_to_tokens,
@@ -133,7 +133,7 @@ class MediatorAgent(BaseAgent):
         history: list[str],
         model: str,
     ) -> dict[str, Any]:
-        from mediated_coevo.token_budget import fit_text_to_tokens
+        from mediated_coevo.runtime.token_budget import fit_text_to_tokens
 
         history_lines = "\n".join(f"- {item}" for item in history[:5])
         if self._budgets:
@@ -152,7 +152,7 @@ class MediatorAgent(BaseAgent):
         }
 
     def _trace_section(self, trace: ExecutionTrace) -> BudgetSection:
-        from mediated_coevo.token_budget import BudgetSection
+        from mediated_coevo.runtime.token_budget import BudgetSection
 
         trace_parts = ["## Execution Trace"]
         if trace.stdout:
@@ -293,9 +293,9 @@ class MediatorAgent(BaseAgent):
             first_sentence,
             head_tail_text,
         )
-        from mediated_coevo.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
+        from mediated_coevo.runtime.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
         from mediated_coevo.models.history_signals import MediatorSignal
-        from mediated_coevo.utils import parse_json_object
+        from mediated_coevo.core.utils import parse_json_object
 
         feedback = report.exposed_content or ""
         raw_length = len(feedback)

@@ -8,7 +8,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.utils import as_optional_float
+from mediated_coevo.core.utils import as_optional_float
 
 ENV_FAILURE_STATUSES = {"env_failure", "parse_error", "harbor_failed"}
 COEVOLUTION_TASK_ID = "__coevolution__"

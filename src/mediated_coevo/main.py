@@ -19,7 +19,7 @@ from rich.logging import RichHandler
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
-from mediated_coevo.baselines import (
+from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     get_baseline_preset,
     parse_skill_updates,
@@ -35,12 +35,12 @@ from mediated_coevo.benchmarks.task_sets import (
     TaskSetError,
     resolve_task_selection,
 )
-from mediated_coevo.conditions import ConditionName
-from mediated_coevo.config import Config, SkillUpdateConfig, load_config
+from mediated_coevo.experiment.conditions import ConditionName
+from mediated_coevo.core.config import Config, SkillUpdateConfig, load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.orchestrator import Orchestrator
-from mediated_coevo.reporting import (
+from mediated_coevo.experiment.orchestrator import Orchestrator
+from mediated_coevo.analysis.reporting import (
     BootstrapConfidenceInterval,
     ExperimentScoreSummary,
     TaskScoreSummary,
@@ -56,7 +56,7 @@ skillsbench_app = typer.Typer(help="Manage the local SkillsBench task cache")
 app.add_typer(skillsbench_app, name="skillsbench")
 console = Console()
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 VALID_CONDITION_NAMES = set(get_args(ConditionName))
 DEFAULT_TASKS = "fix-build-google-auto"

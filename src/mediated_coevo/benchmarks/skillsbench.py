@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
-from mediated_coevo.utils import as_mapping, as_nonempty_string
+from mediated_coevo.core.utils import as_mapping, as_nonempty_string
 
 logger = logging.getLogger(__name__)
 

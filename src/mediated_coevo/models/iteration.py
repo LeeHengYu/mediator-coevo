@@ -6,8 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from mediated_coevo.conditions import ConditionName
-from mediated_coevo.token_budget import TokenBudgetEvent
+from mediated_coevo.experiment.conditions import ConditionName
+from mediated_coevo.runtime.token_budget import TokenBudgetEvent
 from .task import TaskSpec
 from .trace import ExecutionTrace
 from .report import MediatorReport

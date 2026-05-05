@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tomllib
 
-from mediated_coevo.config import Config
+from mediated_coevo.core.config import Config
 from mediated_coevo.main import ExperimentFactory
 
 

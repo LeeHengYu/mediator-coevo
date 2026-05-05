@@ -12,10 +12,17 @@ cross-attribution P0 #4 was meant to prevent.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from mediated_coevo.analysis.metrics import metric_row
+from mediated_coevo.experiment.records import (
+    attach_skill_identity,
+    build_coevolution_record,
+    build_iteration_record,
+)
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
@@ -27,12 +34,12 @@ from mediated_coevo.models.skill import (
 )
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
-from mediated_coevo.config import Config
-from mediated_coevo.orchestrator import Orchestrator
+from mediated_coevo.core.config import Config
+from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
-from mediated_coevo.token_budget import TokenBudgetEvent
+from mediated_coevo.runtime.token_budget import TokenBudgetEvent
 
 
 def _bare_orchestrator(tmp_path: Path) -> Orchestrator:
@@ -280,7 +287,7 @@ def test_attach_skill_identity_populates_record_and_skill_update():
         skill_update=update,
     )
 
-    Orchestrator._attach_skill_identity(
+    attach_skill_identity(
         record,
         {"executor": "hash-a", "planner": "hash-b"},
         "iter_0003",
@@ -309,7 +316,7 @@ def test_attach_skill_identity_populates_coevolution_skill_updates():
         skill_updates=[mediator_update, planner_update],
     )
 
-    Orchestrator._attach_skill_identity(
+    attach_skill_identity(
         record,
         {"mediator": "hash-a", "planner": "hash-b"},
         "iter_0003",
@@ -329,7 +336,7 @@ def test_attach_skill_identity_preserves_existing_skill_hashes():
         skill_hashes={"executor": "start-hash"},
     )
 
-    Orchestrator._attach_skill_identity(
+    attach_skill_identity(
         record,
         {"executor": "end-hash", "planner": "planner-hash"},
         "iter_0003",
@@ -357,10 +364,10 @@ def test_build_coevolution_record_captures_reflector_token_events():
     )
     orch.skill_store = _EmptySkillStore()
 
-    record = orch._build_coevolution_record(
+    record = build_coevolution_record(
         iteration=4,
         condition="learned_mediator",
-        start=0.0,
+        duration_sec=0.0,
         llm_token_events=[event],
         skill_updates=[
             SkillUpdate(
@@ -369,6 +376,8 @@ def test_build_coevolution_record_captures_reflector_token_events():
                 new_content="new",
             ),
         ],
+        config=orch.config,
+        skill_hashes=orch.skill_store.skill_hashes(),
     )
 
     assert record.task_id == "__coevolution__"
@@ -424,11 +433,11 @@ def test_build_iteration_record_adds_compact_metric_fields():
         ),
     )
 
-    record = orch._build_iteration_record(
+    record = build_iteration_record(
         task_id="task-A",
         iteration=2,
         condition="learned_mediator",
-        start=0.0,
+        duration_sec=0.0,
         task_spec=TaskSpec(task_id="task-A", instruction="do it", iteration=2),
         trace=ExecutionTrace(
             task_id="task-A",
@@ -449,6 +458,9 @@ def test_build_iteration_record_adds_compact_metric_fields():
             "expected_reward_range": (0.0, 1.0),
             "verifier_type": "pytest",
         },
+        llm_token_events=orch._drain_llm_token_events(),
+        config=orch.config,
+        previous_reward_by_task=orch._previous_reward_by_task,
     )
 
     assert record.run_id == "job-123"
@@ -538,7 +550,7 @@ def test_metric_row_excludes_large_artifacts_and_promotes_required_fields():
         verifier_type="pytest",
     )
 
-    row = Orchestrator._metric_row(record)
+    row = metric_row(record)
 
     assert "task_spec" not in row
     assert "execution_trace" not in row
@@ -588,11 +600,11 @@ def test_zero_reward_harbor_run_is_logged_as_task_failure():
     orch.mediator = _LLMBackedComponent(_DrainClient("mediator.process_trace"))
     orch.skill_advisor = _LLMBackedComponent(_DrainClient("skill_advisor.review"))
 
-    record = orch._build_iteration_record(
+    record = build_iteration_record(
         task_id="task-A",
         iteration=0,
         condition="no_feedback",
-        start=0.0,
+        duration_sec=0.0,
         task_spec=TaskSpec(task_id="task-A", instruction="do it", iteration=0),
         trace=ExecutionTrace(
             task_id="task-A",
@@ -612,6 +624,9 @@ def test_zero_reward_harbor_run_is_logged_as_task_failure():
             "expected_reward_range": (0.0, 1.0),
             "verifier_type": "pytest",
         },
+        llm_token_events=orch._drain_llm_token_events(),
+        config=orch.config,
+        previous_reward_by_task=orch._previous_reward_by_task,
     )
 
     assert record.success is False
@@ -712,6 +727,45 @@ class _ResolvedTask:
 class _AnyTaskRepo:
     def resolve(self, task_id: str):
         return _ResolvedTask()
+
+
+class _ValidationExecutor:
+    def __init__(
+        self,
+        *,
+        current_rewards: dict[str, float | None],
+        candidate_rewards: dict[str, float | None],
+    ) -> None:
+        self.current_rewards = current_rewards
+        self.candidate_rewards = candidate_rewards
+        self.calls: list[tuple[str, str]] = []
+
+    async def execute_task(
+        self,
+        task_spec: TaskSpec,
+        skill_texts: list[str],
+    ) -> ExecutionTrace:
+        skill_text = skill_texts[0] if skill_texts else ""
+        self.calls.append((task_spec.task_id, skill_text))
+        rewards = (
+            self.candidate_rewards
+            if skill_text == "new"
+            else self.current_rewards
+        )
+        reward = rewards[task_spec.task_id]
+        if reward is None:
+            return ExecutionTrace(
+                task_id=task_spec.task_id,
+                iteration=task_spec.iteration,
+                status="env_failure",
+                error_kind="validation_unusable",
+            )
+        return ExecutionTrace(
+            task_id=task_spec.task_id,
+            iteration=task_spec.iteration,
+            status="ok",
+            reward=reward,
+        )
 
 
 class _PlannerLLM:
@@ -834,8 +888,13 @@ class _PatchPlanner:
         )
 
 
-@pytest.mark.asyncio
-async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
+def _advisor_validation_orchestrator(
+    tmp_path: Path,
+    *,
+    current_rewards: dict[str, float | None],
+    candidate_rewards: dict[str, float | None],
+    proposal_task_ids: list[str],
+) -> Orchestrator:
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = Config(
         models={
@@ -844,17 +903,53 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
             "mediator": "test-mediator",
         }
     )
-    orch.config.experiment.advisor_buffer_max = 2
+    orch.config.experiment.advisor_buffer_max = len(proposal_task_ids)
     orch.skill_store = _MemorySkillStore()
+    orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
+    orch.benchmark_repo = _AnyTaskRepo()
+    orch.executor = _ValidationExecutor(
+        current_rewards=current_rewards,
+        candidate_rewards=candidate_rewards,
+    )
     orch.skill_advisor = _ApprovingAdvisor()
     orch.planner = _PatchPlanner()
     orch._proposal_buffer = [
-        SkillProposal(iteration=0, task_id="task-B", old_content="", new_content="b"),
-        SkillProposal(iteration=0, task_id="task-A", old_content="", new_content="a"),
+        SkillProposal(
+            iteration=0,
+            task_id=task_id,
+            old_content="",
+            new_content=task_id,
+        )
+        for task_id in proposal_task_ids
     ]
+    return orch
 
-    update = await orch._review_proposals_and_patch_skill(iteration=3)
+
+def _validation_result_json(tmp_path: Path) -> dict:
+    result_path = (
+        tmp_path
+        / "artifacts"
+        / "validation"
+        / "coevo-iter-0003"
+        / "result.json"
+    )
+    return json.loads(result_path.read_text())
+
+
+@pytest.mark.asyncio
+async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.4, "task-B": 0.7},
+        candidate_rewards={"task-A": 0.4, "task-B": 0.8},
+        proposal_task_ids=["task-B", "task-A"],
+    )
+
+    update = await orch._executor_skill_gate().review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
 
     assert update is not None
     assert update.task_id == "task-A,task-B"
@@ -869,6 +964,10 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
     assert update.provenance.base_skill_hash == SkillStore.content_hash("old")
     assert update.provenance.reason == "approved"
     assert update.provenance.rollback_snapshot == "iter_0002"
+    assert update.provenance.validation is not None
+    assert update.provenance.validation.decision == "accepted"
+    assert update.provenance.validation.current_mean_reward == pytest.approx(0.55)
+    assert update.provenance.validation.candidate_mean_reward == pytest.approx(0.6)
     assert [ref.task_id for ref in update.provenance.proposal_refs] == [
         "task-B",
         "task-A",
@@ -887,3 +986,54 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
     assert len(orch.skill_advisor.seen) == 2
     assert orch._proposal_buffer == []
     assert orch.skill_store.writes == [("executor", "new")]
+    assert orch.executor.calls == [
+        ("task-A", "old"),
+        ("task-A", "new"),
+        ("task-B", "old"),
+        ("task-B", "new"),
+    ]
+    assert _validation_result_json(tmp_path)["decision"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_advisor_patch_rejected_when_validation_task_regresses(tmp_path):
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.8, "task-B": 0.4},
+        candidate_rewards={"task-A": 0.7, "task-B": 0.9},
+        proposal_task_ids=["task-A", "task-B"],
+    )
+
+    update = await orch._executor_skill_gate().review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is None
+    assert orch._proposal_buffer == []
+    assert orch.skill_store.writes == []
+    result = _validation_result_json(tmp_path)
+    assert result["decision"] == "rejected"
+    assert result["reason"] == "task_regression"
+
+
+@pytest.mark.asyncio
+async def test_advisor_patch_rejected_when_validation_trace_unusable(tmp_path):
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.8},
+        candidate_rewards={"task-A": None},
+        proposal_task_ids=["task-A"],
+    )
+
+    update = await orch._executor_skill_gate().review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is None
+    assert orch._proposal_buffer == []
+    assert orch.skill_store.writes == []
+    result = _validation_result_json(tmp_path)
+    assert result["decision"] == "rejected"
+    assert result["reason"] == "unusable_validation_trace"

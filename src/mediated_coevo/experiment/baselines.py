@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mediated_coevo.conditions import ConditionName
-from mediated_coevo.config import Config, SkillUpdateConfig
+from mediated_coevo.experiment.conditions import ConditionName
+from mediated_coevo.core.config import Config, SkillUpdateConfig
 
 
 SKILL_UPDATE_TOKENS = frozenset({"none", "executor", "planner", "mediator", "all"})

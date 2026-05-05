@@ -13,6 +13,8 @@ from .skill import (
     SkillProvenance,
     SkillUpdate,
     SkillUpdateProvenance,
+    SkillValidationResult,
+    SkillValidationTaskResult,
 )
 from .history_signals import HistorySignal, MediatorSignal, PlannerSignal
 from .iteration import IterationRecord
@@ -33,6 +35,8 @@ __all__ = [
     "AdvisorBatchProvenance",
     "ContrastiveReflectionProvenance",
     "SkillProvenance",
+    "SkillValidationResult",
+    "SkillValidationTaskResult",
     "HistorySignal",
     "MediatorSignal",
     "PlannerSignal",

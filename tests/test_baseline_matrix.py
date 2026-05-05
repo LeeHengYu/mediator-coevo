@@ -5,19 +5,21 @@ import tomllib
 
 import pytest
 
-from mediated_coevo.baselines import (
+from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     BASELINE_PRESETS_BY_NAME,
     SkillUpdateParseError,
     parse_skill_updates,
 )
-from mediated_coevo.config import Config, SkillUpdateConfig
+from mediated_coevo.core.config import Config, SkillUpdateConfig
 from mediated_coevo.main import (
     ExperimentFactory,
     _build_matrix_runtimes,
 )
+from mediated_coevo.experiment.records import build_coevolution_record
 from mediated_coevo.models.skill import SkillProposal
-from mediated_coevo.orchestrator import Orchestrator
+from mediated_coevo.experiment.orchestrator import Orchestrator
+from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 
 
@@ -167,6 +169,10 @@ async def test_disabled_executor_updates_skip_proposal_and_advisor(tmp_path):
     orch.planner = _NoCallPlanner()
     orch.skill_advisor = _NoCallAdvisor()
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
+    orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    orch.skill_store = object()
+    orch.executor = object()
+    orch.benchmark_repo = object()
     orch._proposal_buffer = []
 
     await orch._ask_planner_for_skill_proposal(
@@ -186,7 +192,10 @@ async def test_disabled_executor_updates_skip_proposal_and_advisor(tmp_path):
             new_content="# New Executor\n",
         )
     ]
-    update = await orch._review_proposals_and_patch_skill(iteration=1)
+    update = await orch._executor_skill_gate().review_and_patch(
+        iteration=1,
+        proposal_buffer=orch._proposal_buffer,
+    )
 
     assert update is None
     assert orch._proposal_buffer == []
@@ -272,11 +281,14 @@ def test_metrics_rows_include_baseline_and_skill_update_policy():
     )
     orch.skill_store = _SkillStore()
 
-    record = orch._build_coevolution_record(
+    record = build_coevolution_record(
         iteration=4,
         condition="learned_mediator",
-        start=0.0,
+        duration_sec=0.0,
         llm_token_events=[],
+        skill_updates=None,
+        config=orch.config,
+        skill_hashes=orch.skill_store.skill_hashes(),
     )
     dumped = json.loads(record.model_dump_json())
 

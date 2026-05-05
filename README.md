@@ -210,8 +210,16 @@ When buffer hits advisor_buffer_max (default 10):
   SkillAdvisor reviews the full batch → approve / reject
   Buffer is cleared regardless of outcome
   If approved: Planner drafts a new SkillUpdate (based on Advisor's aggregated feedback)
-             → written to skills/executor/SKILL.md with AdvisorBatchProvenance
+             → candidate is validated against the current skill on buffered tasks
+             → written to skills/executor/SKILL.md with AdvisorBatchProvenance only if empirical validation accepts it
 ```
+
+Executor validation is validate-before-apply: the candidate skill is injected
+into controlled executor-only SkillsBench runs and compared against the current
+executor skill on the same buffered task IDs. The candidate is adopted only when
+its mean reward is not worse and no validation task regresses; rejected
+candidates are dropped and validation evidence is written under
+`artifacts/validation/`.
 
 **Flow 2 — Agent meta-skill co-evolution (iteration-triggered)**
 

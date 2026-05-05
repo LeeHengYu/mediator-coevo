@@ -30,7 +30,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
-from mediated_coevo.token_budget import count_text_tokens, fit_text_to_tokens
+from mediated_coevo.runtime.token_budget import count_text_tokens, fit_text_to_tokens
 
 if TYPE_CHECKING:
     from mediated_coevo.llm.client import LLMClient
@@ -103,7 +103,7 @@ async def compact_text_for_context(
         return head_tail_text(raw, TARGET_EVIDENCE_CHARS)
 
     try:
-        from mediated_coevo.utils import parse_json_object
+        from mediated_coevo.core.utils import parse_json_object
 
         prompt_raw = raw
         prompt_budget = None

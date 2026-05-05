@@ -3,13 +3,13 @@ from __future__ import annotations
 import pytest
 
 from mediated_coevo.agents.planner import PlannerAgent
-from mediated_coevo.conditions import get_prior_context
-from mediated_coevo.config import Config
+from mediated_coevo.experiment.conditions import get_prior_context
+from mediated_coevo.core.config import Config
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 from mediated_coevo.stores.artifact_store import ArtifactStore
-from mediated_coevo.token_budget import (
+from mediated_coevo.runtime.token_budget import (
     BudgetSection,
     TokenBudgetEvent,
     TokenBudgetExceeded,
