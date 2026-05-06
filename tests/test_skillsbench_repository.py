@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -163,6 +164,72 @@ def test_resolve_remote_fetch_failure_names_task_archive_and_local_paths(tmp_pat
     assert SKILLSBENCH_ARCHIVE_URL in msg
     assert str(tmp_path / "tasks" / "missing") in msg
     assert "network unavailable" in msg
+
+
+def test_remote_fetch_uses_configured_archive_url(tmp_path):
+    archive = _zip_task(
+        tmp_path / "skillsbench.zip",
+        bucket="tasks",
+        task_id="remote-task",
+    )
+    requested_urls: list[str] = []
+    repo = SkillsBenchRepository(
+        root_dir=tmp_path / "bench",
+        task_dirs=["tasks"],
+        remote=SkillsBenchRemoteConfig(
+            enabled=True,
+            archive_url="file:///custom/skillsbench.zip",
+        ),
+    )
+
+    def download_fixture(archive_url: str) -> bytes:
+        requested_urls.append(archive_url)
+        return archive.read_bytes()
+
+    repo._download_archive = download_fixture  # type: ignore[method-assign]
+
+    assert repo.list_remote_task_ids() == ["remote-task"]
+    assert requested_urls == ["file:///custom/skillsbench.zip"]
+
+
+def test_archive_sha256_match_allows_remote_download(tmp_path):
+    archive = _zip_task(
+        tmp_path / "skillsbench.zip",
+        bucket="tasks",
+        task_id="remote-task",
+    )
+    expected_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+    repo = SkillsBenchRepository(
+        root_dir=tmp_path / "bench",
+        task_dirs=["tasks"],
+        remote=SkillsBenchRemoteConfig(
+            enabled=True,
+            archive_url=str(archive),
+            archive_sha256=expected_hash,
+        ),
+    )
+
+    assert repo.list_remote_task_ids() == ["remote-task"]
+
+
+def test_archive_sha256_mismatch_fails_clearly(tmp_path):
+    archive = _zip_task(
+        tmp_path / "skillsbench.zip",
+        bucket="tasks",
+        task_id="remote-task",
+    )
+    repo = SkillsBenchRepository(
+        root_dir=tmp_path / "bench",
+        task_dirs=["tasks"],
+        remote=SkillsBenchRemoteConfig(
+            enabled=True,
+            archive_url=str(archive),
+            archive_sha256="0" * 64,
+        ),
+    )
+
+    with pytest.raises(SkillsBenchFetchError, match="sha256"):
+        repo.list_remote_task_ids()
 
 
 def test_resolve_fetches_and_caches_missing_remote_task(tmp_path):

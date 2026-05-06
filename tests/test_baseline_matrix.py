@@ -4,12 +4,18 @@ import json
 import tomllib
 
 import pytest
+import typer
 
+from mediated_coevo import main as main_module
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     BASELINE_PRESETS_BY_NAME,
     SkillUpdateParseError,
     parse_skill_updates,
+)
+from mediated_coevo.experiment.conditions import (
+    ExperimentDesignError,
+    validate_experiment_design,
 )
 from mediated_coevo.core.config import Config, SkillUpdateConfig
 from mediated_coevo.main import (
@@ -68,10 +74,6 @@ def test_baseline_preset_mapping_matches_matrix_plan():
             "static_mediator",
             {"executor": False, "planner": False, "mediator": False},
         ),
-        "learned_mediator_same_task": (
-            "learned_mediator",
-            {"executor": False, "planner": False, "mediator": True},
-        ),
         "planner_only_skill_evolution": (
             "learned_mediator",
             {"executor": False, "planner": True, "mediator": False},
@@ -87,16 +89,123 @@ def test_baseline_preset_mapping_matches_matrix_plan():
     }
 
     assert list(BASELINE_PRESETS_BY_NAME) == BASELINE_PRESET_NAMES
+    assert len(BASELINE_PRESET_NAMES) == 6
+    assert "learned_mediator_same_task" not in BASELINE_PRESETS_BY_NAME
     for preset_name, (condition, skill_updates) in expected.items():
         preset = BASELINE_PRESETS_BY_NAME[preset_name]
         assert preset.condition_name == condition
         assert preset.skill_updates.model_dump() == skill_updates
 
 
+def test_baseline_presets_have_unique_condition_and_update_semantics():
+    semantics = [
+        (
+            preset.condition_name,
+            tuple(
+                role
+                for role, enabled in preset.skill_updates.model_dump().items()
+                if enabled
+            ),
+        )
+        for preset in BASELINE_PRESETS_BY_NAME.values()
+    ]
+
+    assert len(semantics) == len(set(semantics))
+
+
+def test_readme_documents_six_row_matrix_without_removed_duplicate():
+    readme = main_module.PROJECT_ROOT.joinpath("README.md").read_text()
+    matrix_section = readme.split("### Baseline Matrix", maxsplit=1)[1]
+
+    assert "seven baseline rows" not in matrix_section
+    assert "learned_mediator_same_task" not in matrix_section
+    assert "mediator_only_protocol_evolution" in matrix_section
+    assert "six baseline rows" in matrix_section
+
+
+def test_all_baseline_presets_validate():
+    for preset in BASELINE_PRESETS_BY_NAME.values():
+        validate_experiment_design(
+            condition=preset.condition_name,
+            skill_updates=preset.skill_updates,
+            baseline_preset=preset.name,
+        )
+
+
+@pytest.mark.parametrize(
+    ("condition", "skill_updates", "match"),
+    [
+        ("no_feedback", SkillUpdateConfig(planner=True), "no_feedback"),
+        ("full_traces", SkillUpdateConfig(mediator=True), "mediator"),
+        ("shared_notes", SkillUpdateConfig(executor=True, planner=False, mediator=False), "shared_notes"),
+        ("static_mediator", SkillUpdateConfig(mediator=True), "static_mediator"),
+    ],
+)
+def test_invalid_condition_update_designs_fail_before_runtime(
+    condition,
+    skill_updates,
+    match,
+):
+    with pytest.raises(ExperimentDesignError, match=match):
+        validate_experiment_design(condition=condition, skill_updates=skill_updates)
+
+
 def _write_skill(root, skill_name: str, content: str) -> None:
     skill_dir = root / "skills" / skill_name
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(content)
+
+
+def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "default.toml").write_text(
+        """
+        [models]
+        planner = "test-planner"
+        executor = "test-executor"
+        mediator = "test-mediator"
+        """
+    )
+
+    def fail_if_called(config):
+        raise AssertionError("harbor check should happen after design validation")
+
+    monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_if_called)
+
+    with pytest.raises(typer.BadParameter, match="no_feedback"):
+        main_module.run(
+            tasks="task-A",
+            iterations=1,
+            seed=42,
+            condition="no_feedback",
+            skill_updates="executor",
+            config_dir=config_dir,
+        )
+
+
+def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path):
+    for skill_name in ("executor", "planner", "mediator"):
+        _write_skill(tmp_path, skill_name, f"# {skill_name}\n")
+    config = _config()
+    config.paths.skills_dir = "skills"
+    config.experiment.condition_name = "no_feedback"
+    config.experiment.skill_updates = SkillUpdateConfig(
+        executor=True,
+        planner=False,
+        mediator=False,
+    )
+    experiment_dir = tmp_path / "experiment"
+
+    with pytest.raises(ExperimentDesignError, match="no_feedback"):
+        ExperimentFactory(tmp_path).build(
+            config=config,
+            seed=42,
+            condition_name="no_feedback",
+            experiment_dir=experiment_dir,
+        )
+
+    assert not experiment_dir.exists()
 
 
 def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):

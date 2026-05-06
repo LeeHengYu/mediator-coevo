@@ -9,6 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mediated_coevo.experiment.conditions import ConditionName
 
+DEFAULT_SKILLSBENCH_ARCHIVE_URL = (
+    "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
+)
+
 
 class ModelsConfig(BaseModel):
     planner: str
@@ -79,6 +83,8 @@ class ExecutorRuntimeConfig(BaseModel):
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     injected_skill_name: str = "executor-evolved"
     remote_fetch: bool = True
+    archive_url: str = Field(default=DEFAULT_SKILLSBENCH_ARCHIVE_URL, min_length=1)
+    archive_sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
     # Hard wall-clock cap on a single Harbor subprocess (seconds). Prevents
     # a hung run from blocking the orchestrator indefinitely.
     harbor_timeout_sec: float = 1800.0
