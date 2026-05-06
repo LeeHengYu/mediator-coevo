@@ -170,7 +170,7 @@ Metrics persist `baseline_preset` when present and `skill_update_policy` for eve
 
 ## Testing
 
-This project uses `uv` as the single test entrypoint. `uv` manages and reuses the local `.venv`, so tests should be run through `uv` instead of mixing direct `.venv/bin/python` and `uv run` commands.
+This project uses `uv` as the single supported test and run entrypoint. Use `uv run ...` commands rather than invoking Python from an environment path directly.
 
 Install/sync dependencies:
 
@@ -251,7 +251,8 @@ Every coevo_interval iterations (default 5):
 ## Progress
 
 P0, Week 1 scope + a bit of Week 2
-Configure experiment option/baselines, wire with Skillsbench, item 11 complete and in review
+Configure experiment option/baselines, wire with Skillsbench.
+Logging enriched, now item 13 complete.
 
 ## Further Direction
 

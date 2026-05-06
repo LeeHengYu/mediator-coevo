@@ -9,8 +9,8 @@ Run explicitly:
 
     uv run pytest tests/test_skillsbench_integration.py -m integration -v -s
 
-Use ``uv`` as the test entrypoint; it manages and reuses the local
-``.venv`` for this project.
+Use ``uv`` as the test entrypoint; invoke tests with ``uv run`` rather than
+calling Python from an environment path directly.
 
 Set ``MEDIATED_COEVO_INTEGRATION_AGENT`` (default: opencode) or
 ``MEDIATED_COEVO_INTEGRATION_MODEL`` (default:
