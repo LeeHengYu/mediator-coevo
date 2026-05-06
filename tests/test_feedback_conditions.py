@@ -8,6 +8,7 @@ import typer
 from pydantic import ValidationError
 
 from mediated_coevo.core.config import Config
+from mediated_coevo.experiment.conditions import get_executor_proposal_feedback
 from mediated_coevo.main import _validate_condition_name
 from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.report import MediatorReport
@@ -31,6 +32,8 @@ class _TaskRepo:
 
 class _SkillStore:
     def read_skill(self, skill_name: str) -> str | None:
+        if skill_name == "executor":
+            return "# Executor\n"
         return None
 
     def skill_hashes(self) -> dict[str, str]:
@@ -47,6 +50,7 @@ class _PlannerLLM:
 class _Planner:
     def __init__(self) -> None:
         self.prior_contexts: dict[str, str | None] = {}
+        self.proposal_feedback: list[str] = []
         self.llm_client = _PlannerLLM()
 
     def set_skill_context(
@@ -66,6 +70,18 @@ class _Planner:
     ) -> TaskSpec:
         self.prior_contexts[task_id] = prior_context
         return TaskSpec(task_id=task_id, instruction=base_instruction, iteration=iteration)
+
+    async def suggest_skill_revision(
+        self,
+        *,
+        current_skill_content: str,
+        feedback: str,
+        edit_history: list,
+        task_id: str,
+        iteration: int,
+    ):
+        self.proposal_feedback.append(feedback)
+        return None
 
 
 class _Executor:
@@ -251,6 +267,119 @@ def _orchestrator(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["no_feedback", "shared_notes"])
+async def test_non_proposal_conditions_return_no_executor_proposal_feedback(
+    tmp_path,
+    condition,
+):
+    store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    store.store_trace(ExecutionTrace(task_id="task-A", iteration=1, reward=0.5, status="ok"))
+    report = MediatorReport(task_id="task-A", iteration=1, content="mediator report")
+
+    feedback = await get_executor_proposal_feedback(
+        condition=condition,
+        task_id="task-A",
+        artifact_store=store,
+        mediator_report=report,
+        model="test-model",
+    )
+
+    assert feedback is None
+
+
+@pytest.mark.asyncio
+async def test_full_traces_returns_current_usable_trace_summary_for_proposal(
+    tmp_path,
+):
+    store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    store.store_trace(ExecutionTrace(task_id="task-A", iteration=2, reward=0.2, status="ok"))
+    store.store_trace(ExecutionTrace(task_id="task-A", iteration=3, reward=0.5, status="ok"))
+
+    feedback = await get_executor_proposal_feedback(
+        condition="full_traces",
+        task_id="task-A",
+        artifact_store=store,
+        mediator_report=None,
+        model="test-model",
+    )
+
+    assert feedback is not None
+    assert "task-A" in feedback
+    assert "iter=3" in feedback
+    assert "reward=0.50" in feedback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trace",
+    [
+        ExecutionTrace(task_id="task-A", iteration=3, reward=None, status="env_failure"),
+        ExecutionTrace(task_id="task-A", iteration=3, reward=None, status="ok"),
+        ExecutionTrace(task_id="task-A", iteration=3, reward=0.4, status="harbor_failed"),
+    ],
+)
+async def test_full_traces_returns_no_proposal_feedback_for_unusable_trace(
+    tmp_path,
+    trace,
+):
+    store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    store.store_trace(trace)
+
+    feedback = await get_executor_proposal_feedback(
+        condition="full_traces",
+        task_id="task-A",
+        artifact_store=store,
+        mediator_report=None,
+        model="test-model",
+    )
+
+    assert feedback is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["static_mediator", "learned_mediator"])
+async def test_mediator_conditions_return_exposed_report_content_for_proposal(
+    tmp_path,
+    condition,
+):
+    store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    report = MediatorReport(task_id="task-A", iteration=1, content="use this insight")
+
+    feedback = await get_executor_proposal_feedback(
+        condition=condition,
+        task_id="task-A",
+        artifact_store=store,
+        mediator_report=report,
+        model="test-model",
+    )
+
+    assert feedback == "use this insight"
+
+
+@pytest.mark.asyncio
+async def test_mediator_conditions_return_no_proposal_feedback_for_withheld_report(
+    tmp_path,
+):
+    store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    report = MediatorReport(
+        task_id="task-A",
+        iteration=1,
+        content="hidden insight",
+        withheld=True,
+    )
+
+    feedback = await get_executor_proposal_feedback(
+        condition="learned_mediator",
+        task_id="task-A",
+        artifact_store=store,
+        mediator_report=report,
+        model="test-model",
+    )
+
+    assert feedback is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("condition", "expected_context", "expected_mediator_calls"),
     [
@@ -292,6 +421,41 @@ async def test_feedback_conditions_control_planner_context_and_mediator_calls(
     assert record.cross_task_feedback_enabled is False
     assert record.execution_trace is not None
     assert record.execution_trace.iteration == 1
+
+
+@pytest.mark.asyncio
+async def test_run_iteration_full_traces_feeds_executor_proposal_from_current_trace(
+    tmp_path,
+):
+    orch, planner, _ = _orchestrator(tmp_path, "full_traces")
+    orch.config.experiment.skill_updates.executor = True
+
+    await orch._run_iteration("task-A", 1)
+
+    assert len(planner.proposal_feedback) == 1
+    assert "task-A" in planner.proposal_feedback[0]
+    assert "iter=1" in planner.proposal_feedback[0]
+    assert "reward=0.50" in planner.proposal_feedback[0]
+
+
+@pytest.mark.asyncio
+async def test_executor_proposal_skip_log_uses_proposal_feedback_wording(
+    tmp_path,
+    caplog,
+):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.skill_updates.executor = True
+    caplog.set_level("INFO")
+
+    await orch._ask_planner_for_skill_proposal(
+        task_id="task-A",
+        iteration=0,
+        executor_skill="# Executor\n",
+        feedback=None,
+    )
+
+    assert "no proposal feedback" in caplog.text
+    assert "no mediator feedback" not in caplog.text
 
 
 @pytest.mark.asyncio

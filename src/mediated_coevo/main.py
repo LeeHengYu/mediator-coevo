@@ -35,7 +35,11 @@ from mediated_coevo.benchmarks.task_sets import (
     TaskSetError,
     resolve_task_selection,
 )
-from mediated_coevo.experiment.conditions import ConditionName
+from mediated_coevo.experiment.conditions import (
+    ConditionName,
+    ExperimentDesignError,
+    validate_experiment_design,
+)
 from mediated_coevo.core.config import Config, SkillUpdateConfig, load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
@@ -97,6 +101,11 @@ class ExperimentFactory:
     ) -> ExperimentRuntime:
         from mediated_coevo.llm.client import LLMClient
 
+        validate_experiment_design(
+            condition=condition_name,
+            skill_updates=config.experiment.skill_updates,
+            baseline_preset=config.experiment.baseline_preset,
+        )
         if experiment_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             suffix = config.experiment.baseline_preset or condition_name
@@ -216,6 +225,9 @@ def _build_benchmark_repo(project_root: Path, config: Config) -> SkillsBenchRepo
         task_dirs=config.executor_runtime.task_dirs,
         remote=SkillsBenchRemoteConfig(
             enabled=config.executor_runtime.remote_fetch,
+            archive_url=config.executor_runtime.archive_url,
+            archive_sha256=config.executor_runtime.archive_sha256,
+            local_archive_base_dir=project_root,
         ),
     )
 
@@ -304,6 +316,17 @@ def _apply_experiment_settings(
         config.experiment.skill_updates = skill_updates
     config.experiment.baseline_preset = baseline_preset
     return config
+
+
+def _validate_or_raise_bad_parameter(config: Config) -> None:
+    try:
+        validate_experiment_design(
+            condition=config.experiment.condition_name,
+            skill_updates=config.experiment.skill_updates,
+            baseline_preset=config.experiment.baseline_preset,
+        )
+    except ExperimentDesignError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _build_matrix_runtimes(
@@ -478,6 +501,7 @@ def run(
         skill_updates=skill_update_config,
     )
 
+    _validate_or_raise_bad_parameter(config)
     _ensure_harbor_available(config)
 
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
@@ -531,7 +555,7 @@ def matrix(
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run the seven-row baseline matrix with isolated per-row skills."""
+    """Run the six-row baseline matrix with isolated per-row skills."""
     _setup_logging(verbose)
 
     config = _apply_experiment_settings(
@@ -539,6 +563,13 @@ def matrix(
         iterations=iterations,
         seed=seed,
     )
+    for preset_name in BASELINE_PRESET_NAMES:
+        preset = get_baseline_preset(preset_name)
+        validate_experiment_design(
+            condition=preset.condition_name,
+            skill_updates=preset.skill_updates,
+            baseline_preset=preset.name,
+        )
     _ensure_harbor_available(config)
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
     task_ids = _task_ids_from_cli_with_repo(tasks, task_set, benchmark_repo)

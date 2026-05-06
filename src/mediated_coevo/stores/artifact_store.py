@@ -106,16 +106,24 @@ class ArtifactStore:
     ) -> list[_T]:
         """Generic query: load JSON artifacts, optionally filtered by task_id."""
         results: list[_T] = []
-        for path in sorted(directory.glob("*.json"), reverse=True):
-            if task_id and not path.name.startswith(task_id):
-                continue
+        for path in directory.glob("*.json"):
             try:
-                results.append(model_cls.model_validate_json(path.read_text()))
+                artifact = model_cls.model_validate_json(path.read_text())
             except Exception as e:
                 logger.warning("Failed to load %s %s: %s", model_cls.__name__, path, e)
-            if len(results) >= recent:
-                break
-        return results
+                continue
+            if task_id is not None and getattr(artifact, "task_id", None) != task_id:
+                continue
+            results.append(artifact)
+
+        results.sort(
+            key=lambda artifact: (
+                getattr(artifact, "iteration", -1),
+                getattr(artifact, "timestamp", None),
+            ),
+            reverse=True,
+        )
+        return results[:recent]
 
     def query_traces(
         self,

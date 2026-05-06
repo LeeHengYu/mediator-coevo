@@ -18,6 +18,7 @@ from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.experiment.conditions import (
     ConditionName,
+    get_executor_proposal_feedback,
     get_cross_task_prior_context,
     get_prior_context,
 )
@@ -190,11 +191,22 @@ class Orchestrator:
         finally:
             self.artifact_store.store_trace(trace)
 
+        proposal_feedback = await get_executor_proposal_feedback(
+            condition=condition,
+            task_id=task_id,
+            artifact_store=self.artifact_store,
+            mediator_report=report,
+            llm_client=self.mediator.llm_client if condition == "full_traces" else None,
+            model=self.planner.llm_client.model,
+            budgets=self.config.budgets,
+            condition_name=condition,
+        )
+
         await self._ask_planner_for_skill_proposal(
             task_id=task_id,
             iteration=iteration,
             executor_skill=executor_skill_text,
-            feedback=report.exposed_content if report else None,
+            feedback=proposal_feedback,
         )
 
         # 5. TAG previous entries with this iteration's reward + backfill buffer.
@@ -304,7 +316,7 @@ class Orchestrator:
             logger.info("Step 4: Skipped (executor skill updates disabled).")
             return
         if not feedback or not executor_skill:
-            logger.info("Step 4: Skipped (no mediator feedback).")
+            logger.info("Step 4: Skipped (no proposal feedback).")
             return
 
         logger.info("Step 4: Planner proposing skill update...")

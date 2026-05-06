@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +28,10 @@ def as_mapping(value: object) -> Mapping[str, Any]:
 
 def as_optional_float(value: object) -> float | None:
     """Return a float conversion, or None for invalid and NaN values."""
+    if not isinstance(value, str | bytes | bytearray | int | float):
+        return None
     try:
-        number = float(value)
+        number = float(cast(Any, value))
     except (TypeError, ValueError):
         return None
     if math.isnan(number):

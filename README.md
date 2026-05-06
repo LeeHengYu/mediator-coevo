@@ -55,10 +55,10 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 - Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
 - Executor runs a vendored local SkillsBench-style Harbor task and parses the Harbor job reward, optional CTRF diagnostics, and agent logs into `ExecutionTrace`.
 - The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
-- Missing SkillsBench tasks are fetched on demand from the provided SkillsBench archive by default; fetched tasks are cached under `benchmarks/skillsbench/tasks/`.
+- Missing SkillsBench tasks are fetched on demand from the configured SkillsBench archive by default; fetched tasks are cached under `benchmarks/skillsbench/tasks/`.
 - A curated `skillsbench-10` task set is available via `--task-set skillsbench-10` for broad early experiments across build, control, networking, logistics, documents, science, visualization, and parsing tasks. `--task-set skillsbench-all` dynamically discovers local and remote task IDs, then fetches each missing task lazily as it runs.
 - Experiment conditions selectable via `--condition` (`no_feedback` | `full_traces` | `shared_notes` | `static_mediator` | `learned_mediator`).
-- Skill update permissions are independently selectable via `--skill-updates` (`none` | `executor` | `planner` | `mediator` | `all`, comma-separated except for `none` and `all`).
+- Skill update permissions are independently selectable via `--skill-updates` (`none` | `executor` | `planner` | `mediator` | `all`, comma-separated except for `none` and `all`). Invalid condition/update combinations fail before Harbor, LLM, directory, artifact, or benchmark side effects.
 - Previous-report state is task-keyed; cross-task feedback is opt-in via `experiment.allow_cross_task_feedback` (default `false`).
 - Skill directories require a canonical `SKILL.md` entrypoint, validated at startup by `SkillStore.validate()`.
 - History outcome tagging uses stable entry IDs so multi-task runs cannot attribute a reward to the wrong task's planner/mediator entry.
@@ -107,6 +107,14 @@ To disable on-demand fetching, override `remote_fetch` in `config/default.toml`:
 remote_fetch = false
 ```
 
+The SkillsBench archive source is configured by `executor_runtime.archive_url`.
+For reproducible experiment evidence, pin `archive_url` to an immutable commit
+or tag archive and set `executor_runtime.archive_sha256` to the archive's
+64-character SHA-256 digest. The default `refs/heads/main.zip` archive is a
+moving development convenience only; it is not a reproducibility pin. Local
+filesystem archive paths are supported, and relative paths in CLI config resolve
+from the project root.
+
 ### Run Command
 
 `run` executes one configured experiment condition:
@@ -132,7 +140,7 @@ uv run medcoevo run --task-set skillsbench-10 --condition learned_mediator --ski
 
 ### Matrix Command
 
-`matrix` runs all seven baseline rows with the same tasks, seed, model config, budgets, and isolated per-row skill copies:
+`matrix` runs all six baseline rows with the same tasks, seed, model config, budgets, and isolated per-row skill copies:
 
 ```
 uv run medcoevo matrix --task-set skillsbench-10 --iterations 30 --seed 42
@@ -142,7 +150,7 @@ uv run medcoevo matrix --task-set skillsbench-10 --iterations 30 --seed 42
 
 ### Baseline Matrix
 
-The baseline matrix separates two axes:
+The six baseline rows separate two axes:
 
 1. Feedback routing, controlled by `--condition` and responsible for Planner prior context plus Mediator calls.
 2. Skill-update permission, controlled by `--skill-updates` or by a matrix preset and responsible only for whether committed skill edits are allowed.
@@ -154,17 +162,32 @@ Matrix rows:
 | `no_feedback`                      | `no_feedback`      | `none`                      |
 | `full_trace_same_task`             | `full_traces`      | `none`                      |
 | `static_mediator_same_task`        | `static_mediator`  | `none`                      |
-| `learned_mediator_same_task`       | `learned_mediator` | `mediator`                  |
 | `planner_only_skill_evolution`     | `learned_mediator` | `planner`                   |
 | `mediator_only_protocol_evolution` | `learned_mediator` | `mediator`                  |
 | `full_coevolution`                 | `learned_mediator` | `executor,planner,mediator` |
 
 Assumptions encoded in the presets:
 
-- `learned_mediator_same_task` uses learned Mediator reports and allows the Mediator skill to evolve; Planner and Executor updates stay disabled.
+- `static_mediator_same_task` uses Mediator reports without allowing skill evolution.
 - `planner_only_skill_evolution` uses learned Mediator reports, but only the Planner meta-skill evolves.
 - `mediator_only_protocol_evolution` disables Executor skill updates and allows only Mediator protocol evolution.
 - `full_coevolution` is the only baseline row that permits Executor, Planner, and Mediator skill commits together.
+
+Proposal feedback for Executor skill edits is also condition-driven:
+
+- `no_feedback` and `shared_notes` produce no Executor proposal feedback.
+- `full_traces` can use the current usable same-task trace summary.
+- `static_mediator` and `learned_mediator` can use exposed Mediator report content.
+- Withheld Mediator reports and unusable traces produce no proposal feedback.
+
+Validation rejects contradictory designs before runtime side effects. In
+particular, `no_feedback` cannot enable any skill updates, Mediator skill
+updates require `learned_mediator`, `shared_notes` cannot enable Executor
+updates, and `static_mediator` cannot evolve the Mediator protocol.
+
+Diffusion/network experiments are gated on the baseline-stability smoke record
+in `docs/smoke-baseline-stability.md`. That smoke table is operational smoke
+validation only, not scientific evidence of superiority.
 
 Metrics persist `baseline_preset` when present and `skill_update_policy` for every row. The existing `skill_updates` metrics field remains the list of committed co-evolution skill updates.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -18,14 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from mediated_coevo.core.config import DEFAULT_SKILLSBENCH_ARCHIVE_URL
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
 from mediated_coevo.core.utils import as_mapping, as_nonempty_string
 
 logger = logging.getLogger(__name__)
 
-SKILLSBENCH_ARCHIVE_URL = (
-    "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
-)
+SKILLSBENCH_ARCHIVE_URL = DEFAULT_SKILLSBENCH_ARCHIVE_URL
 
 
 class HarborNotFoundError(RuntimeError):
@@ -46,6 +46,9 @@ class SkillsBenchRemoteConfig:
 
     enabled: bool = False
     timeout_sec: float = 60.0
+    archive_url: str = SKILLSBENCH_ARCHIVE_URL
+    archive_sha256: str | None = None
+    local_archive_base_dir: Path | None = None
 
 
 @dataclass(slots=True)
@@ -82,7 +85,7 @@ class SkillsBenchRepository:
         self.root_dir = root_dir
         self.task_dirs = task_dirs
         self.remote = remote or SkillsBenchRemoteConfig()
-        self._archive_cache: dict[str, bytes] = {}
+        self._archive_cache: dict[tuple[str, str | None], bytes] = {}
 
     def default_local_cache_dir(self) -> Path:
         """Return the local directory where task folders are cached."""
@@ -121,7 +124,7 @@ class SkillsBenchRepository:
                 "executor_runtime.remote_fetch = true to use skillsbench-all."
             )
 
-        archive_url = SKILLSBENCH_ARCHIVE_URL
+        archive_url = self.remote.archive_url
         archive_bytes = self._archive_bytes(archive_url)
         with self._open_archive(archive_bytes, archive_url) as archive:
             return self._task_ids_from_archive(
@@ -143,7 +146,7 @@ class SkillsBenchRepository:
 
     def _fetch_task(self, task_id: str) -> Path:
         self._validate_task_id(task_id)
-        archive_url = SKILLSBENCH_ARCHIVE_URL
+        archive_url = self.remote.archive_url
         try:
             archive_bytes = self._archive_bytes(archive_url)
         except SkillsBenchFetchError as exc:
@@ -178,7 +181,13 @@ class SkillsBenchRepository:
         parsed = urllib.parse.urlparse(archive_url)
         try:
             if parsed.scheme == "":
-                return Path(archive_url).read_bytes()
+                archive_path = Path(archive_url).expanduser()
+                if (
+                    not archive_path.is_absolute()
+                    and self.remote.local_archive_base_dir is not None
+                ):
+                    archive_path = self.remote.local_archive_base_dir / archive_path
+                return archive_path.read_bytes()
             with urllib.request.urlopen(archive_url, timeout=self.remote.timeout_sec) as response:
                 return response.read()
         except (OSError, urllib.error.URLError) as exc:
@@ -187,12 +196,26 @@ class SkillsBenchRepository:
             ) from exc
 
     def _archive_bytes(self, archive_url: str) -> bytes:
-        cached = self._archive_cache.get(archive_url)
+        cache_key = (archive_url, self.remote.archive_sha256)
+        cached = self._archive_cache.get(cache_key)
         if cached is not None:
             return cached
         archive_bytes = self._download_archive(archive_url)
-        self._archive_cache[archive_url] = archive_bytes
+        self._verify_archive_sha256(archive_bytes, archive_url)
+        self._archive_cache[cache_key] = archive_bytes
         return archive_bytes
+
+    def _verify_archive_sha256(self, archive_bytes: bytes, archive_url: str) -> None:
+        expected = self.remote.archive_sha256
+        if expected is None:
+            return
+
+        actual = hashlib.sha256(archive_bytes).hexdigest()
+        if actual.lower() != expected.lower():
+            raise SkillsBenchFetchError(
+                f"sha256 mismatch for SkillsBench archive {archive_url!r}: "
+                f"expected {expected.lower()}, got {actual}"
+            )
 
     @staticmethod
     def _open_archive(archive_bytes: bytes, archive_url: str) -> zipfile.ZipFile:

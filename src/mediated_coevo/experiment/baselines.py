@@ -52,11 +52,6 @@ BASELINE_PRESETS: tuple[BaselinePreset, ...] = (
         skill_updates_config(),
     ),
     BaselinePreset(
-        "learned_mediator_same_task",
-        "learned_mediator",
-        skill_updates_config("mediator"),
-    ),
-    BaselinePreset(
         "planner_only_skill_evolution",
         "learned_mediator",
         skill_updates_config("planner"),
