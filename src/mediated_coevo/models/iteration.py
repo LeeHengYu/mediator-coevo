@@ -53,6 +53,7 @@ class IterationRecord(BaseModel):
     token_totals_by_agent: dict[str, int] = Field(default_factory=dict)
     advisor_decision: str | None = None
     advisor_reason: str | None = None
+    advisor_rejection_id: str | None = None
 
     task_category: str | None = None
     task_difficulty: str | None = None

@@ -17,6 +17,7 @@ from mediated_coevo.main import (
     _build_matrix_runtimes,
 )
 from mediated_coevo.experiment.records import build_coevolution_record
+from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
@@ -173,6 +174,16 @@ async def test_disabled_executor_updates_skip_proposal_and_advisor(tmp_path):
     orch.skill_store = object()
     orch.executor = object()
     orch.benchmark_repo = object()
+    orch.executor_skill_gate = ExecutorSkillGate(
+        config=orch.config,
+        skill_store=orch.skill_store,
+        history_store=orch.history_store,
+        planner=orch.planner,
+        skill_advisor=orch.skill_advisor,
+        executor=orch.executor,
+        benchmark_repo=orch.benchmark_repo,
+        artifact_store=orch.artifact_store,
+    )
     orch._proposal_buffer = []
 
     await orch._ask_planner_for_skill_proposal(
@@ -192,7 +203,7 @@ async def test_disabled_executor_updates_skip_proposal_and_advisor(tmp_path):
             new_content="# New Executor\n",
         )
     ]
-    update = await orch._executor_skill_gate().review_and_patch(
+    update = await orch.executor_skill_gate.review_and_patch(
         iteration=1,
         proposal_buffer=orch._proposal_buffer,
     )
@@ -240,9 +251,9 @@ async def test_planner_and_mediator_reflection_are_independently_gated(monkeypat
             calls.append(agent_role)
             return None
 
-    import mediated_coevo.evolution.reflector as reflector_module
+    import mediated_coevo.experiment.orchestrator as orchestrator_module
 
-    monkeypatch.setattr(reflector_module, "Reflector", _RecordingReflector)
+    monkeypatch.setattr(orchestrator_module, "Reflector", _RecordingReflector)
 
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = _config()

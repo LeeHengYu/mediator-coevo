@@ -87,6 +87,7 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "trace_artifact_path": trace_artifact_path,
         "advisor_decision": record.advisor_decision,
         "advisor_reason": record.advisor_reason,
+        "advisor_rejection_id": record.advisor_rejection_id,
         "task_category": record.task_category,
         "task_difficulty": record.task_difficulty,
         "expected_reward_range": (

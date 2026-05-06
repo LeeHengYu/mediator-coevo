@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from mediated_coevo.agents.executor import ExecutorAgent
@@ -44,6 +44,10 @@ class ExecutorSkillGate:
     executor: ExecutorAgent
     benchmark_repo: SkillsBenchRepository
     artifact_store: ArtifactStore
+    last_advisor_decision: str | None = None
+    last_advisor_reason: str | None = None
+    last_proposal_ids: list[str] = field(default_factory=list)
+    last_rejection_id: str | None = None
 
     async def review_and_patch(
         self,
@@ -52,6 +56,11 @@ class ExecutorSkillGate:
         proposal_buffer: list[SkillProposal],
     ) -> SkillUpdate | None:
         """Review buffered proposals and write only empirically accepted patches."""
+        self.last_advisor_decision = None
+        self.last_advisor_reason = None
+        self.last_proposal_ids = []
+        self.last_rejection_id = None
+
         if not self.config.experiment.skill_updates.executor:
             if proposal_buffer:
                 logger.info(
@@ -67,6 +76,10 @@ class ExecutorSkillGate:
         logger.info("Advisor reviewing %d proposals...", len(proposal_buffer))
         current_skill = self.skill_store.read_skill("executor") or ""
         buffered_proposals = list(proposal_buffer)
+        self.last_proposal_ids = [
+            proposal.proposal_id
+            for proposal in buffered_proposals
+        ]
         batch_id = f"coevo-iter-{iteration:04d}"
         advisor_feedback = await self.skill_advisor.review(
             current_skill=current_skill,
@@ -76,19 +89,24 @@ class ExecutorSkillGate:
 
         if not advisor_feedback:
             logger.info("Advisor rejected — no skill update.")
-            self._record_rejected_proposals(
+            rejection_reason = (
+                self.skill_advisor.last_rejection_reason
+                or "advisor_rejected"
+            )
+            self.last_advisor_decision = "rejected"
+            self.last_advisor_reason = rejection_reason
+            self.last_rejection_id = self._record_rejected_proposals(
                 iteration=iteration,
                 batch_id=batch_id,
                 current_skill=current_skill,
                 proposals=buffered_proposals,
-                reason=(
-                    self.skill_advisor.last_rejection_reason
-                    or "advisor_rejected"
-                ),
+                reason=rejection_reason,
             )
             return None
 
         logger.info("Advisor approved — Planner patching skill...")
+        self.last_advisor_decision = "approved"
+        self.last_advisor_reason = advisor_feedback
         contributing_tasks = sorted({p.task_id for p in buffered_proposals if p.task_id})
         contributing_task_ids = ",".join(contributing_tasks)
         edit_history = self.history_store.query(
@@ -119,7 +137,7 @@ class ExecutorSkillGate:
                 "Empirical validation rejected executor skill candidate: %s",
                 validation.reason,
             )
-            self._record_rejected_proposals(
+            self.last_rejection_id = self._record_rejected_proposals(
                 iteration=iteration,
                 batch_id=batch_id,
                 current_skill=current_skill,
@@ -175,16 +193,14 @@ class ExecutorSkillGate:
         reason: str,
         advisor_feedback: str | None = None,
         validation: SkillValidationResult | None = None,
-    ) -> None:
+    ) -> str:
         """Persist rejected proposal evidence without writing a skill update."""
         old_skill_hash = SkillStore.content_hash(current_skill)
         rejected_batch = RejectedProposalBatch(
             batch_id=batch_id,
             iteration=iteration,
             skill_id="executor",
-            task_ids=sorted(
-                {proposal.task_id for proposal in proposals if proposal.task_id}
-            ),
+            task_ids=sorted(proposal.task_id for proposal in proposals if proposal.task_id),
             base_skill_hash=old_skill_hash,
             reason=reason,
             advisor_feedback=advisor_feedback,
@@ -204,7 +220,7 @@ class ExecutorSkillGate:
                 for proposal in proposals
             ],
         )
-        self.history_store.record_rejected_proposals(rejected_batch)
+        return self.history_store.record_rejected_proposals(rejected_batch)
 
     async def _validate_candidate(
         self,

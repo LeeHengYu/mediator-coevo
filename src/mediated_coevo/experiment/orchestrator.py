@@ -24,6 +24,7 @@ from mediated_coevo.experiment.conditions import (
 from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
+from mediated_coevo.evolution.reflector import Reflector
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.records import (
     attach_skill_identity,
@@ -203,7 +204,7 @@ class Orchestrator:
             proposals=self._proposal_buffer,
         )
 
-        skill_update = await self._executor_skill_gate().review_and_patch(
+        skill_update = await self.executor_skill_gate.review_and_patch(
             iteration=iteration,
             proposal_buffer=self._proposal_buffer,
         )
@@ -217,8 +218,6 @@ class Orchestrator:
 
         duration = time.time() - start
         llm_token_events = self._drain_llm_token_events()
-        if not hasattr(self, "_previous_reward_by_task"):
-            self._previous_reward_by_task = {}
         record = build_iteration_record(
             task_id=task_id,
             iteration=iteration,
@@ -236,6 +235,11 @@ class Orchestrator:
             config=self.config,
             previous_reward_by_task=self._previous_reward_by_task,
         )
+        if self.executor_skill_gate.last_advisor_decision:
+            record.advisor_decision = self.executor_skill_gate.last_advisor_decision
+            record.advisor_reason = self.executor_skill_gate.last_advisor_reason
+            record.advisor_rejection_id = self.executor_skill_gate.last_rejection_id
+            record.proposal_ids = list(self.executor_skill_gate.last_proposal_ids)
         reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
         logger.info(
             "Iteration %d complete: condition=%s status=%s reward=%s tokens=%d duration=%.1fs",
@@ -406,23 +410,6 @@ class Orchestrator:
             return f"{prior_context}\n\n{header}\n\n{cross_context}"
         return f"{header}\n\n{cross_context}"
 
-    def _executor_skill_gate(self) -> ExecutorSkillGate:
-        """Return a gate wired to the current orchestrator dependencies."""
-        gate = getattr(self, "executor_skill_gate", None)
-        if gate is None:
-            gate = ExecutorSkillGate(
-                config=self.config,
-                skill_store=self.skill_store,
-                history_store=self.history_store,
-                planner=self.planner,
-                skill_advisor=self.skill_advisor,
-                executor=self.executor,
-                benchmark_repo=self.benchmark_repo,
-                artifact_store=self.artifact_store,
-            )
-            self.executor_skill_gate = gate
-        return gate
-
     async def _coevolve(
         self,
         iteration: int,
@@ -435,7 +422,6 @@ class Orchestrator:
             iteration, condition,
         )
 
-        from mediated_coevo.evolution.reflector import Reflector
         reflector = Reflector(
             self.history_store,
             self.skill_store,

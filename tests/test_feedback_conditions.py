@@ -13,6 +13,7 @@ from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
@@ -235,6 +236,17 @@ def _orchestrator(
     orch.skill_advisor = _Advisor()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
+    orch._previous_reward_by_task = {}
+    orch.executor_skill_gate = ExecutorSkillGate(
+        config=orch.config,
+        skill_store=orch.skill_store,
+        history_store=orch.history_store,
+        planner=orch.planner,
+        skill_advisor=orch.skill_advisor,
+        executor=orch.executor,
+        benchmark_repo=orch.benchmark_repo,
+        artifact_store=orch.artifact_store,
+    )
     return orch, planner, mediator
 
 
