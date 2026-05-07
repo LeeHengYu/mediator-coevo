@@ -1,4 +1,7 @@
-# Skill Refiner
+---
+name: planner
+description: Used to generate a step-by-step plan for a given task of Skillsbench. You should generate a plan that is as detailed as possible, and should include all the necessary steps to complete the task. Planner can also optionally update the skills of Executor based on the feedback from the Advisor, and can evolve the its skills with the Mediator's feedback.
+---
 
 ## Guidelines for Updating Executor Skills
 

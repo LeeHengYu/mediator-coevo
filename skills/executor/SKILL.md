@@ -1,4 +1,7 @@
-# Executor Skill
+---
+name: executor
+description: Used on general task execution within Harbor or Skillsbench environment. It provides a structured workflow for executing tasks, handling errors, and result reporting.
+---
 
 ## Task Execution Guidelines
 
