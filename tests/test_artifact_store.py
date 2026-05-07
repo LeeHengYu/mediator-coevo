@@ -86,6 +86,17 @@ def test_query_traces_applies_recent_after_exact_filtering(tmp_path):
     assert [trace.iteration for trace in traces] == [2, 1]
 
 
+def test_query_traces_applies_iteration_cutoff_before_recent(tmp_path):
+    store = ArtifactStore(base_dir=tmp_path)
+    store.store_trace(ExecutionTrace(task_id="task", iteration=0, reward=0.1))
+    store.store_trace(ExecutionTrace(task_id="task", iteration=1, reward=0.2))
+    store.store_trace(ExecutionTrace(task_id="task", iteration=2, reward=0.3))
+
+    traces = store.query_traces(task_id="task", recent=2, before_iteration=2)
+
+    assert [trace.iteration for trace in traces] == [1, 0]
+
+
 def test_query_traces_skips_malformed_json_after_filtering(tmp_path, caplog):
     store = ArtifactStore(base_dir=tmp_path)
     store.store_trace(ExecutionTrace(task_id="task", iteration=0, reward=0.1))

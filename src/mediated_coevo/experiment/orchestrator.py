@@ -170,7 +170,11 @@ class Orchestrator:
         )
 
         skill_texts = [executor_skill_text] if executor_skill_text else []
-        prior_context = await self._build_prior_context(condition, task_id)
+        prior_context = await self._build_prior_context(
+            condition,
+            task_id,
+            current_iteration=iteration,
+        )
         logger.info("Step 1: Planner planning task (condition=%s)...", condition)
         task_spec = await self.planner.plan_task(
             task_id=task_id,
@@ -376,7 +380,13 @@ class Orchestrator:
             self._previous_report_by_task[task_id] = report
         return mediator_entry_id, planner_entry_id
 
-    async def _build_prior_context(self, condition: ConditionName, task_id: str) -> str | None:
+    async def _build_prior_context(
+        self,
+        condition: ConditionName,
+        task_id: str,
+        *,
+        current_iteration: int | None = None,
+    ) -> str | None:
         """Build same-task prior context, with explicit opt-in cross-task context."""
         llm_client = self.mediator.llm_client if condition == "full_traces" else None
         prior_context = await get_prior_context(
@@ -389,6 +399,7 @@ class Orchestrator:
             model=self.planner.llm_client.model,
             budgets=self.config.budgets,
             condition_name=condition,
+            current_iteration=current_iteration,
         )
         if not self.config.experiment.allow_cross_task_feedback:
             return prior_context
@@ -402,6 +413,7 @@ class Orchestrator:
             model=self.planner.llm_client.model,
             budgets=self.config.budgets,
             condition_name=condition,
+            current_iteration=current_iteration,
         )
         if not cross_context:
             return prior_context

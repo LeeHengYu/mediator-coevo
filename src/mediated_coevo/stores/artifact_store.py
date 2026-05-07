@@ -103,8 +103,9 @@ class ArtifactStore:
         model_cls: type[_T],
         task_id: str | None = None,
         recent: int = 10,
+        before_iteration: int | None = None,
     ) -> list[_T]:
-        """Generic query: load JSON artifacts, optionally filtered by task_id."""
+        """Generic query: load JSON artifacts, filtered before recent slicing."""
         results: list[_T] = []
         for path in directory.glob("*.json"):
             try:
@@ -113,6 +114,11 @@ class ArtifactStore:
                 logger.warning("Failed to load %s %s: %s", model_cls.__name__, path, e)
                 continue
             if task_id is not None and getattr(artifact, "task_id", None) != task_id:
+                continue
+            if (
+                before_iteration is not None
+                and getattr(artifact, "iteration", -1) >= before_iteration
+            ):
                 continue
             results.append(artifact)
 
@@ -129,9 +135,16 @@ class ArtifactStore:
         self,
         task_id: str | None = None,
         recent: int = 10,
+        before_iteration: int | None = None,
     ) -> list[ExecutionTrace]:
-        """Query traces, optionally filtered by task_id, most recent first."""
-        return self._query_artifacts(self._traces_dir, ExecutionTrace, task_id, recent)
+        """Query traces, optionally filtered by task_id and iteration cutoff."""
+        return self._query_artifacts(
+            self._traces_dir,
+            ExecutionTrace,
+            task_id,
+            recent,
+            before_iteration=before_iteration,
+        )
 
     def query_reports(
         self,

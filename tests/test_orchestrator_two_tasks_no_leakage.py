@@ -260,3 +260,49 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
         ("task-A", "category-task-A", "medium", [0.0, 1.0], "custom_pytest"),
         ("task-B", "category-task-B", "medium", [0.0, 1.0], "custom_pytest"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_full_traces_cross_task_feedback_is_round_causal(tmp_path):
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+        }
+    )
+    config.experiment.condition_name = "full_traces"
+    config.experiment.allow_cross_task_feedback = True
+    config.experiment.coevo_interval = 99
+    config.experiment.advisor_buffer_max = 99
+    planner = _Planner()
+    artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    orchestrator = Orchestrator(
+        planner=planner,  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        mediator=_Mediator(),  # type: ignore[arg-type]
+        skill_store=_SkillStore(),  # type: ignore[arg-type]
+        artifact_store=artifact_store,
+        history_store=HistoryStore(history_dir=tmp_path / "history"),
+        benchmark_repo=_TaskRepo(),  # type: ignore[arg-type]
+        config=config,
+        experiment_dir=tmp_path,
+        skill_advisor=_Advisor(),  # type: ignore[arg-type]
+    )
+
+    await orchestrator.run_experiment(["task-A", "task-B"], num_iterations=2)
+
+    contexts = {
+        (task_id, iteration): prior_context
+        for task_id, iteration, prior_context in planner.prior_contexts
+    }
+    task_a_iter_1 = contexts[("task-A", 1)]
+    task_b_iter_1 = contexts[("task-B", 1)]
+
+    assert task_a_iter_1 is not None
+    assert "source_task=task-B iter=0" in task_a_iter_1
+    assert "source_task=task-B iter=1" not in task_a_iter_1
+
+    assert task_b_iter_1 is not None
+    assert "source_task=task-A iter=0" in task_b_iter_1
+    assert "source_task=task-A iter=1" not in task_b_iter_1

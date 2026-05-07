@@ -512,10 +512,21 @@ async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
         content="cross-task report",
     )
 
-    assert await orch._build_prior_context("learned_mediator", "task-A") is None
+    assert (
+        await orch._build_prior_context(
+            "learned_mediator",
+            "task-A",
+            current_iteration=3,
+        )
+        is None
+    )
 
     orch.config.experiment.allow_cross_task_feedback = True
-    context = await orch._build_prior_context("learned_mediator", "task-A")
+    context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=3,
+    )
 
     assert context is not None
     assert "Explicit Cross-Task Feedback" in context
@@ -535,12 +546,70 @@ async def test_cross_task_full_traces_exclude_target_task(tmp_path):
         ExecutionTrace(task_id="task-B", iteration=0, reward=0.9, status="ok")
     )
 
-    context = await orch._build_prior_context("full_traces", "task-A")
+    context = await orch._build_prior_context(
+        "full_traces",
+        "task-A",
+        current_iteration=1,
+    )
 
     assert context is not None
     assert "source_task=task-B" in context
     assert "reward=0.90" in context
     assert "source_task=task-A" not in context
+
+
+@pytest.mark.asyncio
+async def test_full_traces_prior_context_excludes_current_and_future_iterations(
+    tmp_path,
+):
+    orch, _, _ = _orchestrator(tmp_path, "full_traces")
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-A", iteration=0, reward=0.1, status="ok")
+    )
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-A", iteration=2, reward=0.9, status="ok")
+    )
+
+    context = await orch._build_prior_context(
+        "full_traces",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context is not None
+    assert "iter=0" in context
+    assert "reward=0.10" in context
+    assert "iter=2" not in context
+    assert "reward=0.90" not in context
+
+
+@pytest.mark.asyncio
+async def test_cross_task_full_traces_respect_round_causality(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "full_traces")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-B", iteration=0, reward=0.8, status="ok")
+    )
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-B", iteration=1, reward=0.95, status="ok")
+    )
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-B", iteration=2, reward=0.99, status="ok")
+    )
+
+    context = await orch._build_prior_context(
+        "full_traces",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context is not None
+    assert "source_task=task-B iter=0" in context
+    assert "reward=0.80" in context
+    assert "source_task=task-B iter=1" not in context
+    assert "reward=0.95" not in context
+    assert "source_task=task-B iter=2" not in context
+    assert "reward=0.99" not in context
 
 
 @pytest.mark.asyncio
@@ -559,7 +628,11 @@ async def test_long_trace_stderr_uses_llm_compactor(tmp_path):
         )
     )
 
-    context = await orch._build_prior_context("full_traces", "task-A")
+    context = await orch._build_prior_context(
+        "full_traces",
+        "task-A",
+        current_iteration=1,
+    )
 
     assert context is not None
     assert "Build failed." in context
@@ -581,7 +654,11 @@ async def test_short_trace_stderr_does_not_call_llm_compactor(tmp_path):
         )
     )
 
-    context = await orch._build_prior_context("full_traces", "task-A")
+    context = await orch._build_prior_context(
+        "full_traces",
+        "task-A",
+        current_iteration=1,
+    )
 
     assert context is not None
     assert "short stderr" in context
@@ -602,7 +679,11 @@ async def test_long_trace_stderr_falls_back_when_llm_compactor_fails(tmp_path):
         )
     )
 
-    context = await orch._build_prior_context("full_traces", "task-A")
+    context = await orch._build_prior_context(
+        "full_traces",
+        "task-A",
+        current_iteration=1,
+    )
 
     assert context is not None
     assert "START-" in context

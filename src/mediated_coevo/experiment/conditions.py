@@ -114,6 +114,7 @@ async def get_prior_context(
     llm_client: LLMClient | None = None,
     budgets: BudgetsConfig | None = None,
     condition_name: str | None = None,
+    current_iteration: int | None = None,
 ) -> str | None:
     """Return the prior-context string the planner should receive, or None."""
     from mediated_coevo.runtime.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
@@ -122,7 +123,11 @@ async def get_prior_context(
         return None
     elif condition == "full_traces":
         summaries = await build_trace_summaries(
-            artifact_store.query_traces(task_id=task_id, recent=3),
+            artifact_store.query_traces(
+                task_id=task_id,
+                recent=3,
+                before_iteration=current_iteration,
+            ),
             llm_client=llm_client,
             model=model,
             budgets=budgets,
@@ -165,6 +170,7 @@ async def get_cross_task_prior_context(
     llm_client: LLMClient | None = None,
     budgets: BudgetsConfig | None = None,
     condition_name: str | None = None,
+    current_iteration: int | None = None,
 ) -> str | None:
     """Return explicitly cross-task prior context for opt-in experiments."""
     from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
@@ -172,7 +178,11 @@ async def get_cross_task_prior_context(
     if condition == "full_traces":
         traces = [
             trace
-            for trace in artifact_store.query_traces(task_id=None, recent=recent * 4)
+            for trace in artifact_store.query_traces(
+                task_id=None,
+                recent=recent * 4,
+                before_iteration=current_iteration,
+            )
             if trace.task_id != task_id
         ][:recent]
         if not traces:
