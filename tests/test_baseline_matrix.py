@@ -232,6 +232,36 @@ def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path)
     assert not experiment_dir.exists()
 
 
+def test_factory_build_uses_experiment_local_skill_store_by_default(tmp_path):
+    _write_skill(tmp_path, "executor", "# Executor\n")
+    _write_skill(tmp_path, "planner", "# Planner\n")
+    _write_skill(tmp_path, "mediator", "# Mediator\n")
+    config = _config()
+    config.paths.skills_dir = "skills"
+    experiment_dir = tmp_path / "experiment"
+
+    runtime = ExperimentFactory(tmp_path).build(
+        config=config,
+        seed=42,
+        condition_name=config.experiment.condition_name,
+        experiment_dir=experiment_dir,
+    )
+
+    runtime_skill_dir = runtime.orchestrator.skill_store._skills_dir
+    assert runtime_skill_dir == experiment_dir / "skills"
+    assert runtime_skill_dir != tmp_path / "skills"
+    assert (runtime_skill_dir / "executor" / "SKILL.md").read_text() == "# Executor\n"
+
+    runtime.orchestrator.skill_store.write_skill("executor", "# Runtime Executor\n")
+
+    assert (runtime_skill_dir / "executor" / "SKILL.md").read_text() == (
+        "# Runtime Executor\n"
+    )
+    assert (tmp_path / "skills" / "executor" / "SKILL.md").read_text() == (
+        "# Executor\n"
+    )
+
+
 def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
     _write_skill(tmp_path, "executor", "# Executor\n")
     _write_skill(tmp_path, "planner", "# Planner\n")

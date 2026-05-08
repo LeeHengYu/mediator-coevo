@@ -97,7 +97,6 @@ class ExperimentFactory:
         seed: int,
         condition_name: ConditionName,
         experiment_dir: Path | None = None,
-        isolate_skills: bool = False,
         benchmark_repo: SkillsBenchRepository | None = None,
     ) -> ExperimentRuntime:
         from mediated_coevo.llm.client import LLMClient
@@ -119,12 +118,10 @@ class ExperimentFactory:
         experiment_dir.mkdir(parents=True, exist_ok=True)
 
         source_skills_dir = self._project_root / config.paths.skills_dir
-        runtime_skills_dir = source_skills_dir
-        if isolate_skills:
-            runtime_skills_dir = shutil.copytree(
-                source_skills_dir,
-                experiment_dir / "skills",
-            )
+        runtime_skills_dir = shutil.copytree(
+            source_skills_dir,
+            experiment_dir / "skills",
+        )
 
         with open(experiment_dir / "config.toml", "wb") as f:
             tomli_w.dump(config.model_dump(exclude_none=True), f)
@@ -358,7 +355,6 @@ def _build_matrix_runtimes(
             seed=seed,
             condition_name=preset.condition_name,
             experiment_dir=matrix_dir / preset_name,
-            isolate_skills=True,
             benchmark_repo=benchmark_repo,
         )
         rows.append(MatrixRuntime(preset_name=preset_name, runtime=runtime))
