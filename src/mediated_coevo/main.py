@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import cast, get_args
+from typing import Any, cast, get_args
 
 import tomli_w
 import typer
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.table import Table
 
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
@@ -428,6 +430,168 @@ def _write_and_print_result_summary(
     )
 
 
+def _experiments_root(config: Config) -> Path:
+    return PROJECT_ROOT / config.paths.data_dir / "experiments"
+
+
+def _latest_experiment_dir(experiments_root: Path) -> Path:
+    if not experiments_root.exists():
+        raise typer.BadParameter(f"experiment directory not found: {experiments_root}")
+    candidates = [
+        path
+        for path in experiments_root.iterdir()
+        if path.is_dir()
+    ]
+    if not candidates:
+        raise typer.BadParameter(f"no experiment outputs found under {experiments_root}")
+    return sorted(candidates, key=lambda path: path.name)[-1]
+
+
+def _load_score_summary(summary_path: Path) -> ExperimentScoreSummary:
+    return ExperimentScoreSummary.model_validate_json(summary_path.read_text())
+
+
+def _artifact_dirs(experiment_dir: Path) -> list[str]:
+    artifacts_dir = experiment_dir / "artifacts"
+    if not artifacts_dir.exists():
+        return []
+    return [
+        str(path)
+        for path in sorted(artifacts_dir.iterdir(), key=lambda item: item.name)
+        if path.is_dir()
+    ]
+
+
+def _single_inspection_payload(experiment_dir: Path) -> dict[str, Any]:
+    summary_path = experiment_dir / "summary.json"
+    metrics_path = experiment_dir / "metrics.jsonl"
+    if summary_path.exists():
+        return {
+            "kind": "single",
+            "experiment_dir": str(experiment_dir),
+            "summary_path": str(summary_path),
+            "metrics_path": str(metrics_path) if metrics_path.exists() else None,
+            "artifact_dirs": _artifact_dirs(experiment_dir),
+            "summary": _load_score_summary(summary_path).model_dump(mode="json"),
+        }
+    if metrics_path.exists():
+        return {
+            "kind": "single",
+            "experiment_dir": str(experiment_dir),
+            "summary_path": None,
+            "metrics_path": str(metrics_path),
+            "artifact_dirs": _artifact_dirs(experiment_dir),
+            "warning": "summary.json is missing; inspect metrics.jsonl directly.",
+        }
+    raise typer.BadParameter(
+        f"no summary.json or metrics.jsonl found under {experiment_dir}"
+    )
+
+
+def _matrix_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None:
+    rows = []
+    for row_dir in sorted(experiment_dir.iterdir(), key=lambda item: item.name):
+        if not row_dir.is_dir():
+            continue
+        summary_path = row_dir / "summary.json"
+        metrics_path = row_dir / "metrics.jsonl"
+        if not summary_path.exists() and not metrics_path.exists():
+            continue
+        row: dict[str, Any] = {
+            "row": row_dir.name,
+            "experiment_dir": str(row_dir),
+            "summary_path": str(summary_path) if summary_path.exists() else None,
+            "metrics_path": str(metrics_path) if metrics_path.exists() else None,
+        }
+        if summary_path.exists():
+            row["summary"] = _load_score_summary(summary_path).model_dump(mode="json")
+        else:
+            row["warning"] = "summary.json is missing; inspect metrics.jsonl directly."
+        rows.append(row)
+
+    if not rows:
+        return None
+    return {
+        "kind": "matrix",
+        "experiment_dir": str(experiment_dir),
+        "rows": rows,
+    }
+
+
+def _inspection_payload(experiment_dir: Path) -> dict[str, Any]:
+    if not experiment_dir.exists() or not experiment_dir.is_dir():
+        raise typer.BadParameter(f"experiment directory not found: {experiment_dir}")
+    if matrix_payload := _matrix_inspection_payload(experiment_dir):
+        return matrix_payload
+    return _single_inspection_payload(experiment_dir)
+
+
+def _print_single_inspection(payload: dict[str, Any]) -> None:
+    summary_data = payload.get("summary")
+    if summary_data is not None:
+        summary = ExperimentScoreSummary.model_validate(summary_data)
+        _print_result_summary(
+            summary=summary,
+            data_dir=Path(payload["experiment_dir"]),
+            summary_path=Path(payload["summary_path"]),
+            header="Inspection",
+        )
+    else:
+        console.print("\n[bold]Inspection:[/]")
+        console.print(f"  Data: {payload['experiment_dir']}")
+        console.print(f"  [yellow]Warning:[/] {payload['warning']}")
+    console.print(f"  Metrics: {payload.get('metrics_path') or 'n/a'}")
+    artifact_dirs = payload.get("artifact_dirs") or []
+    if artifact_dirs:
+        console.print("  Artifact dirs:")
+        for artifact_dir in artifact_dirs:
+            console.print(f"    {artifact_dir}")
+
+
+def _print_matrix_inspection(payload: dict[str, Any]) -> None:
+    console.print("\n[bold]Matrix inspection:[/]")
+    console.print(f"  Data: {payload['experiment_dir']}")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Row")
+    table.add_column("Runs", justify="right")
+    table.add_column("Scored", justify="right")
+    table.add_column("Env failures", justify="right")
+    table.add_column("Mean")
+    table.add_column("Macro mean")
+    table.add_column("Metrics")
+    for row in payload["rows"]:
+        summary_data = row.get("summary")
+        if summary_data is None:
+            table.add_row(
+                row["row"],
+                "n/a",
+                "n/a",
+                "n/a",
+                "n/a",
+                "n/a",
+                row.get("metrics_path") or "n/a",
+            )
+            continue
+        summary = ExperimentScoreSummary.model_validate(summary_data)
+        table.add_row(
+            row["row"],
+            str(summary.total_runs),
+            str(summary.scored_count),
+            str(summary.env_failure_count),
+            _format_score(summary.mean_reward),
+            _format_score(summary.macro_mean_reward),
+            row.get("metrics_path") or "n/a",
+        )
+    console.print(table)
+
+
+def _print_inspection_payload(payload: dict[str, Any]) -> None:
+    if payload["kind"] == "matrix":
+        _print_matrix_inspection(payload)
+    else:
+        _print_single_inspection(payload)
+
+
 def _format_score(value: float | None) -> str:
     if value is None:
         return "n/a"
@@ -628,6 +792,30 @@ def matrix(
         )
 
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
+
+
+@app.command("inspect")
+def inspect_experiment(
+    experiment_dir: Path | None = typer.Argument(
+        None,
+        help="Experiment directory to inspect. Defaults to newest data/experiments run.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit machine-readable JSON.",
+    ),
+    config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
+) -> None:
+    """Inspect an experiment output directory."""
+    target_dir = experiment_dir
+    if target_dir is None:
+        target_dir = _latest_experiment_dir(_experiments_root(load_config(config_dir)))
+    payload = _inspection_payload(target_dir)
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    _print_inspection_payload(payload)
 
 
 @skillsbench_app.command("sync")

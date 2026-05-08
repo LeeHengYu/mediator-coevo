@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 
 import pytest
+import typer
+from typer.testing import CliRunner
 
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
@@ -10,6 +12,11 @@ from mediated_coevo.analysis.reporting import (
     COEVOLUTION_TASK_ID,
     build_score_summary,
     write_score_summary,
+)
+from mediated_coevo.main import (
+    app,
+    _inspection_payload,
+    _latest_experiment_dir,
 )
 
 
@@ -152,3 +159,93 @@ def test_all_unscored_summary_has_no_dominant_task():
     assert summary.bootstrap_ci.lower is None
     assert summary.dominant_task_id is None
     assert summary.dominance_warning is False
+
+
+def test_latest_experiment_dir_uses_newest_named_child(tmp_path):
+    experiments_root = tmp_path / "experiments"
+    older = experiments_root / "20260501-000000-42-no_feedback"
+    newer = experiments_root / "20260502-000000-42-no_feedback"
+    older.mkdir(parents=True)
+    newer.mkdir()
+
+    assert _latest_experiment_dir(experiments_root) == newer
+
+
+def test_latest_experiment_dir_rejects_empty_root(tmp_path):
+    experiments_root = tmp_path / "experiments"
+    experiments_root.mkdir()
+
+    with pytest.raises(typer.BadParameter, match="no experiment outputs"):
+        _latest_experiment_dir(experiments_root)
+
+
+def test_single_run_inspection_payload_reports_summary_and_paths(tmp_path):
+    run_dir = tmp_path / "20260502-000000-42-learned_mediator"
+    artifact_dir = run_dir / "artifacts" / "traces"
+    artifact_dir.mkdir(parents=True)
+    records = [_record("task-a", 1.0)]
+    summary_path = run_dir / "summary.json"
+    metrics_path = run_dir / "metrics.jsonl"
+    write_score_summary(build_score_summary(records, bootstrap_samples=50), summary_path)
+    metrics_path.write_text('{"task_id": "task-a"}\n')
+
+    payload = _inspection_payload(run_dir)
+
+    assert payload["kind"] == "single"
+    assert payload["summary_path"] == str(summary_path)
+    assert payload["metrics_path"] == str(metrics_path)
+    assert payload["artifact_dirs"] == [str(artifact_dir)]
+    assert payload["summary"]["total_runs"] == 1
+    assert payload["summary"]["scored_count"] == 1
+
+
+def test_single_run_inspection_payload_warns_when_summary_missing(tmp_path):
+    run_dir = tmp_path / "20260502-000000-42-learned_mediator"
+    run_dir.mkdir()
+    metrics_path = run_dir / "metrics.jsonl"
+    metrics_path.write_text('{"task_id": "task-a"}\n')
+
+    payload = _inspection_payload(run_dir)
+
+    assert payload["kind"] == "single"
+    assert payload["summary_path"] is None
+    assert payload["metrics_path"] == str(metrics_path)
+    assert "summary.json is missing" in payload["warning"]
+
+
+def test_matrix_inspection_payload_reports_row_summaries(tmp_path):
+    matrix_dir = tmp_path / "20260502-000000-42-baseline-matrix"
+    row_a = matrix_dir / "no_feedback"
+    row_b = matrix_dir / "full_coevolution"
+    for row_dir, reward in ((row_a, 0.0), (row_b, 1.0)):
+        row_dir.mkdir(parents=True)
+        write_score_summary(
+            build_score_summary([_record("task-a", reward)], bootstrap_samples=50),
+            row_dir / "summary.json",
+        )
+        (row_dir / "metrics.jsonl").write_text('{"task_id": "task-a"}\n')
+
+    payload = _inspection_payload(matrix_dir)
+
+    assert payload["kind"] == "matrix"
+    rows = {row["row"]: row for row in payload["rows"]}
+    assert set(rows) == {"full_coevolution", "no_feedback"}
+    assert rows["full_coevolution"]["summary"]["mean_reward"] == pytest.approx(1.0)
+    assert rows["no_feedback"]["summary"]["mean_reward"] == pytest.approx(0.0)
+
+
+def test_inspect_command_emits_json_for_single_run(tmp_path):
+    run_dir = tmp_path / "20260502-000000-42-learned_mediator"
+    run_dir.mkdir()
+    write_score_summary(
+        build_score_summary([_record("task-a", 1.0)], bootstrap_samples=50),
+        run_dir / "summary.json",
+    )
+    (run_dir / "metrics.jsonl").write_text('{"task_id": "task-a"}\n')
+
+    result = CliRunner().invoke(app, ["inspect", str(run_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "single"
+    assert payload["summary"]["total_runs"] == 1

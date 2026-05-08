@@ -70,6 +70,7 @@ Use `uv run medcoevo --help` to see the top-level commands:
 ```
 uv run medcoevo run
 uv run medcoevo matrix
+uv run medcoevo inspect
 uv run medcoevo skillsbench sync
 ```
 
@@ -114,6 +115,14 @@ Run the six-row baseline matrix on the curated multi-task set:
 
 ```
 uv run medcoevo matrix --task-set skillsbench-10 --iterations 1 --seed 42
+```
+
+Inspect experiment outputs:
+
+```
+uv run medcoevo inspect
+uv run medcoevo inspect data/experiments/<run-dir>
+uv run medcoevo inspect --json
 ```
 
 Typical single-run outputs have this shape:
