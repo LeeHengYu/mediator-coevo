@@ -156,8 +156,7 @@ def _write_skill(root, skill_name: str, content: str) -> None:
     (skill_dir / "SKILL.md").write_text(content)
 
 
-def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
-    config_dir = tmp_path / "config"
+def _write_minimal_config(config_dir) -> None:
     config_dir.mkdir()
     (config_dir / "default.toml").write_text(
         """
@@ -168,6 +167,10 @@ def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
         """
     )
 
+
+def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
     def fail_if_called(config):
         raise AssertionError("harbor check should happen after design validation")
 
@@ -180,6 +183,27 @@ def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
             seed=42,
             condition="no_feedback",
             skill_updates="executor",
+            config_dir=config_dir,
+        )
+
+
+def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+
+    def fail_if_called(config):
+        raise AssertionError("harbor check should happen after task validation")
+
+    monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_if_called)
+
+    with pytest.raises(typer.BadParameter, match="provide --tasks or --task-set"):
+        main_module.run(
+            tasks=None,
+            task_set=None,
+            iterations=1,
+            seed=42,
+            condition="learned_mediator",
+            skill_updates="all",
             config_dir=config_dir,
         )
 

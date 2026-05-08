@@ -54,7 +54,7 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 
 - Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
 - Executor runs a vendored local SkillsBench-style Harbor task and parses the Harbor job reward, optional CTRF diagnostics, and agent logs into `ExecutionTrace`.
-- The local benchmark task tree lives under `benchmarks/skillsbench/`. The initial migrated task is `benchmarks/skillsbench/tasks/fix-build-google-auto/`.
+- The local benchmark task tree lives under `benchmarks/skillsbench/`. Selected tasks, including the curated `skillsbench-10` tasks, are cached under `benchmarks/skillsbench/tasks/`.
 - Missing SkillsBench tasks are fetched on demand from the configured SkillsBench archive by default; fetched tasks are cached under `benchmarks/skillsbench/tasks/`.
 - A curated `skillsbench-10` task set is available via `--task-set skillsbench-10` for broad early experiments across build, control, networking, logistics, documents, science, visualization, and parsing tasks. `--task-set skillsbench-all` dynamically discovers local and remote task IDs, then fetches each missing task lazily as it runs.
 - Experiment conditions selectable via `--condition` (`no_feedback` | `full_traces` | `shared_notes` | `static_mediator` | `learned_mediator`).
@@ -80,16 +80,79 @@ uv run medcoevo --install-completion
 uv run medcoevo --show-completion
 ```
 
+## Reproducible Run
+
+Install the Python dependencies:
+
+```
+uv sync --dev
+```
+
+Install Harbor and check the local container runtime:
+
+```
+uv tool install harbor
+harbor --version
+docker --version
+docker compose version
+```
+
+The default config uses OpenRouter model IDs for Planner, Executor, and
+Mediator, so export an OpenRouter key before normal experiments:
+
+```
+export OPENROUTER_API_KEY=...
+```
+
+Run one selected task for one smoke iteration:
+
+```
+uv run medcoevo run --tasks fix-build-google-auto --iterations 1 --seed 42
+```
+
+Run the six-row baseline matrix on the curated multi-task set:
+
+```
+uv run medcoevo matrix --task-set skillsbench-10 --iterations 1 --seed 42
+```
+
+Typical single-run outputs have this shape:
+
+```text
+data/experiments/<timestamp>-42-learned_mediator/
+|-- config.toml
+|-- metrics.jsonl
+|-- artifacts/
+|   |-- reports/
+|   |-- traces/
+|   `-- validation/
+|-- history/
+|   |-- history.jsonl
+|   `-- rejected_proposals.jsonl
+|-- jobs/
+`-- skills_snapshots/
+```
+
+Matrix outputs use one directory per row under
+`data/experiments/<timestamp>-42-baseline-matrix/`.
+
+Potential Troubleshooting Procedures:
+
+- `harbor CLI not found on PATH`: run `uv tool install harbor`, then confirm `harbor --version`. For CI-only orchestrator checks that intentionally do not call Harbor, set `executor_runtime.harbor_required = false` in `config/default.toml`.
+- Docker or Compose errors: start Docker Desktop or Colima, then confirm `docker --version` and `docker compose version`.
+- Model credential errors: export `OPENROUTER_API_KEY` for the default `openrouter/...` models, or change `config/default.toml` and export the key required by the configured provider.
+- Missing benchmark task: pre-cache selected tasks with `uv run medcoevo skillsbench sync --tasks <task-id>` or `uv run medcoevo skillsbench sync --task-set skillsbench-10`. If `executor_runtime.remote_fetch = false`, the task must already exist under `benchmarks/skillsbench/tasks/`.
+
 ### Task Selection
 
 `run` and `matrix` share the same task-selection behavior:
 
-- No task option: runs the legacy default task, `fix-build-google-auto`.
+- Must provide `--tasks` or `--task-set`.
 - `--tasks task-a,task-b`: runs explicit comma-separated task IDs.
 - `--task-set skillsbench-10`: runs the curated 10-task subset.
 - `--task-set skillsbench-all`: dynamically discovers all local and remote SkillsBench task IDs, then fetches missing task contents lazily as each task runs.
 
-`--tasks` always overrides `--task-set` when both are provided. Missing local tasks are fetched on demand from the provided SkillsBench archive by default. If the local copy is missing and the network/archive fetch fails, the command fails explicitly instead of silently skipping the task.
+Note: `--tasks` always overrides `--task-set` when both are provided. Missing local tasks are fetched on demand from the provided SkillsBench archive by default. If the local copy is missing and the network/archive fetch fails, the command fails explicitly instead of silently skipping the task.
 
 Pre-cache selected tasks before running:
 
@@ -271,11 +334,22 @@ Every coevo_interval iterations (default 5):
 
 `SkillProposal` and `SkillUpdate` share a `SkillEdit` base (`old_content`, `new_content`, `reasoning`). Rejected proposal batches are written to `HistoryStore`'s `rejected_proposals.jsonl` sidecar; committed updates are serialized in `metrics.jsonl`. Executor updates use `IterationRecord.skill_update`; co-evolution checkpoints can record mediator/planner updates in `IterationRecord.skill_updates`. Provenance is intentionally concise and points back to proposal IDs, `HistoryStore` entry IDs, rewards, hashes, and skill snapshots instead of duplicating full evidence.
 
-## Progress
+## Status
 
-P0, Week 1 scope + a bit of Week 2
-Configure experiment option/baselines, wire with Skillsbench.
-Logging enriched, now item 13 complete.
+Current status: P0 correctness and baseline-experiment plumbing are implemented
+through the current CLI. The repo has task-keyed feedback/history state,
+entry-ID outcome tagging, canonical skill store validation, configurable
+feedback conditions, a six-row baseline matrix, Harbor/SkillsBench failure-mode
+coverage, and validate-before-apply Executor skill updates.
+
+Smoke evidence: `docs/smoke-baseline-stability.md` records a completed one-task,
+one-iteration six-row matrix with scored traces and zero environment failures.
+That record is operational smoke evidence only, not scientific performance
+evidence.
+
+Open work: network diffusion remains intentionally gated. Keep the reproducible
+setup/run instructions and smoke evidence current as defaults or environment
+requirements change.
 
 ## Further Direction
 

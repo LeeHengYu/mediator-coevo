@@ -36,8 +36,9 @@ def test_explicit_tasks_override_named_task_set():
     ]
 
 
-def test_no_task_selection_preserves_legacy_single_task_default():
-    assert _task_ids_from_cli(None, None) == ["fix-build-google-auto"]
+def test_no_task_selection_requires_explicit_tasks_or_task_set():
+    with pytest.raises(typer.BadParameter, match="provide --tasks or --task-set"):
+        _task_ids_from_cli(None, None)
 
 
 def test_unknown_task_set_raises_bad_parameter():

@@ -115,7 +115,6 @@ def resolve_task_selection(
     *,
     tasks: str | None,
     task_set: str | None,
-    default_tasks: str,
 ) -> list[str]:
     """Resolve CLI task selection, with explicit tasks overriding task sets."""
     if tasks is not None:
@@ -130,4 +129,4 @@ def resolve_task_selection(
                 f"unknown task set {name!r}; expected one of: {allowed}"
             )
         return list(TASK_SETS[name])
-    return parse_task_ids(default_tasks)
+    raise TaskSetError("provide --tasks or --task-set")

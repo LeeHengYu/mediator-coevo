@@ -63,7 +63,6 @@ console = Console()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 VALID_CONDITION_NAMES = set(get_args(ConditionName))
-DEFAULT_TASKS = "fix-build-google-auto"
 SKILLSBENCH_ALL_TASK_SET = "skillsbench-all"
 
 
@@ -213,7 +212,6 @@ def _task_ids_from_cli(tasks: str | None, task_set: str | None) -> list[str]:
         return resolve_task_selection(
             tasks=tasks,
             task_set=task_set,
-            default_tasks=DEFAULT_TASKS,
         )
     except TaskSetError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -272,6 +270,17 @@ def _task_ids_from_cli_with_repo(
         return _task_ids_from_cli(tasks, task_set)
     if task_set_name == SKILLSBENCH_ALL_TASK_SET:
         return _skillsbench_all_task_ids(benchmark_repo)
+    return _task_ids_from_cli(tasks, task_set)
+
+
+def _preflight_task_ids_from_cli(
+    tasks: str | None,
+    task_set: str | None,
+) -> list[str] | None:
+    """Validate task selection before Harbor checks when no repo is needed."""
+    task_set_name = task_set.strip() if task_set is not None else None
+    if tasks is None and task_set_name == SKILLSBENCH_ALL_TASK_SET:
+        return None
     return _task_ids_from_cli(tasks, task_set)
 
 
@@ -502,10 +511,15 @@ def run(
     )
 
     _validate_or_raise_bad_parameter(config)
+    preflight_task_ids = _preflight_task_ids_from_cli(tasks, task_set)
     _ensure_harbor_available(config)
 
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
-    task_ids = _task_ids_from_cli_with_repo(tasks, task_set, benchmark_repo)
+    task_ids = preflight_task_ids or _task_ids_from_cli_with_repo(
+        tasks,
+        task_set,
+        benchmark_repo,
+    )
 
     _print_task_selection(task_ids=task_ids, tasks=tasks, task_set=task_set)
     console.print(f"[bold]Iterations:[/] {iterations}")
@@ -570,9 +584,14 @@ def matrix(
             skill_updates=preset.skill_updates,
             baseline_preset=preset.name,
         )
+    preflight_task_ids = _preflight_task_ids_from_cli(tasks, task_set)
     _ensure_harbor_available(config)
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
-    task_ids = _task_ids_from_cli_with_repo(tasks, task_set, benchmark_repo)
+    task_ids = preflight_task_ids or _task_ids_from_cli_with_repo(
+        tasks,
+        task_set,
+        benchmark_repo,
+    )
 
     factory = ExperimentFactory(PROJECT_ROOT)
     matrix_dir = factory.create_matrix_dir(seed=seed, data_dir=config.paths.data_dir)
