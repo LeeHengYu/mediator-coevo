@@ -394,14 +394,14 @@ def test_prepare_run_workspace_writes_instruction_and_skill(tmp_path):
         destination_root=dest,
         planner_instruction="planner-rewrite",
         injected_skill_text="# learned\nuse the force",
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
     assert run_dir.exists()
     assert run_dir.parent == dest / "t1"
     assert (run_dir / "instruction.md").read_text() == "planner-rewrite"
     skill_path = (
-        run_dir / "environment" / "skills" / "executor-evolved" / "SKILL.md"
+        run_dir / "environment" / "skills" / "executor" / "SKILL.md"
     )
     assert skill_path.exists()
     assert "use the force" in skill_path.read_text()
@@ -419,7 +419,7 @@ def test_prepare_run_workspace_without_skill_does_not_create_skill_dir(tmp_path)
         destination_root=tmp_path / "ws",
         planner_instruction="hi",
         injected_skill_text=None,
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
-    assert not (run_dir / "environment" / "skills" / "executor-evolved").exists()
+    assert not (run_dir / "environment" / "skills" / "executor").exists()

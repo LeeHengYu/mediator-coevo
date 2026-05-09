@@ -59,7 +59,7 @@ async def test_harbor_not_found_synthesizes_env_failure(repo, tmp_path):
         benchmark_repo=repo,
         harbor_runner=harbor,  # type: ignore[arg-type]
         workspace_root=tmp_path / "ws",
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
     trace = await executor.execute_task(
@@ -82,7 +82,7 @@ async def test_harbor_timeout_synthesizes_env_failure(repo, tmp_path):
         benchmark_repo=repo,
         harbor_runner=harbor,  # type: ignore[arg-type]
         workspace_root=tmp_path / "ws",
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
     trace = await executor.execute_task(
@@ -103,7 +103,7 @@ async def test_missing_task_synthesizes_env_failure(repo, tmp_path):
         benchmark_repo=repo,
         harbor_runner=harbor,  # type: ignore[arg-type]
         workspace_root=tmp_path / "ws",
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
     trace = await executor.execute_task(
@@ -131,7 +131,7 @@ async def test_run_result_with_no_trial_dir_yields_env_failure(repo, tmp_path):
         benchmark_repo=repo,
         harbor_runner=harbor,  # type: ignore[arg-type]
         workspace_root=tmp_path / "ws",
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
     trace = await executor.execute_task(
@@ -152,7 +152,7 @@ async def test_subprocess_oserror_is_caught(repo, tmp_path):
         benchmark_repo=repo,
         harbor_runner=harbor,  # type: ignore[arg-type]
         workspace_root=tmp_path / "ws",
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
     trace = await executor.execute_task(

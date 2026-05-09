@@ -73,7 +73,7 @@ async def test_harbor_run_produces_classified_trace(tmp_path, capsys):
         destination_root=tmp_path / "ws",
         planner_instruction=task.instruction,
         injected_skill_text=None,
-        injected_skill_name="executor-evolved",
+        injected_skill_name="executor",
     )
 
     runner = HarborRunner(

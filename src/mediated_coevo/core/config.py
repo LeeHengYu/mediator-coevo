@@ -81,7 +81,7 @@ class ExecutorRuntimeConfig(BaseModel):
     agent_name: str = "opencode"
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
-    injected_skill_name: str = "executor-evolved"
+    injected_skill_name: str = "executor"
     remote_fetch: bool = True
     archive_url: str = Field(default=DEFAULT_SKILLSBENCH_ARCHIVE_URL, min_length=1)
     archive_sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
