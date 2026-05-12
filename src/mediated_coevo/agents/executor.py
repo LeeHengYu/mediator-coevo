@@ -14,7 +14,9 @@ from mediated_coevo.benchmarks import (
     SkillsBenchRepository,
     parse_execution_trace,
 )
-from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.benchmarks import swebench as swebench_helpers
+from mediated_coevo.agents.swebench_patch_generator import SWEbenchPatchGenerator
+from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 
 if TYPE_CHECKING:
     from mediated_coevo.models.task import TaskSpec
@@ -102,7 +104,10 @@ class ExecutorAgent:
     ) -> ExecutionTrace:
         logger.warning(
             "ExecutorAgent: %s for task=%s iter=%d: %s",
-            error_kind, task_spec.task_id, task_spec.iteration, exc,
+            error_kind,
+            task_spec.task_id,
+            task_spec.iteration,
+            exc,
         )
         return ExecutionTrace(
             task_id=task_spec.task_id,
@@ -113,3 +118,288 @@ class ExecutorAgent:
             error_kind=error_kind,
             error_detail=str(exc),
         )
+
+
+class SWEbenchExecutorAgent:
+    """Generate and evaluate SWE-bench patches through the official harness."""
+
+    def __init__(
+        self,
+        model: str,
+        benchmark_repo: swebench_helpers.SWEbenchRepository,
+        patch_generator: SWEbenchPatchGenerator,
+        artifact_root: Path,
+        injected_skill_name: str,
+        project_root: Path,
+        timeout: int,
+        max_workers: int,
+        run_id_prefix: str,
+    ) -> None:
+        self._model = model
+        self._benchmark_repo = benchmark_repo
+        self._patch_generator = patch_generator
+        self._artifact_root = artifact_root
+        self._workspace_root = artifact_root / "workspaces"
+        self._injected_skill_name = injected_skill_name
+        self._project_root = project_root
+        self._timeout = timeout
+        self._max_workers = max_workers
+        self._run_id_prefix = run_id_prefix
+
+    async def execute_task(
+        self,
+        task_spec: TaskSpec,
+        skills: list[str],
+    ) -> ExecutionTrace:
+        start = time.time()
+
+        try:
+            task = self._benchmark_repo.resolve(task_spec.task_id)
+        except FileNotFoundError as e:
+            return self._env_failure(task_spec, start, "task_not_found", e)
+
+        skill_text = skills[0] if skills else None
+        try:
+            task_run_dir = self._benchmark_repo.prepare_patch_generation_workspace(
+                task=task,
+                destination_root=self._workspace_root,
+                planner_instruction=task_spec.instruction,
+                injected_skill_text=skill_text,
+                injected_skill_name=self._injected_skill_name,
+            )
+        except (OSError, RuntimeError) as e:
+            return self._env_failure(
+                task_spec,
+                start,
+                "workspace_prepare_failed",
+                e,
+            )
+
+        paths: dict[str, str] = {"generation_workspace": str(task_run_dir)}
+        try:
+            generation = await self._patch_generator.generate_patch(
+                task=task,
+                workspace=task_run_dir,
+                planner_instruction=task_spec.instruction,
+                executor_skill_text=skill_text,
+                injected_skill_name=self._injected_skill_name,
+            )
+        except Exception as e:
+            paths.update(self._store_generation_failure_logs(task_spec, e))
+            return self._env_failure(
+                task_spec,
+                start,
+                "patch_generation_failed",
+                e,
+                stderr=str(e),
+                harbor_paths=paths,
+            )
+
+        try:
+            paths.update(
+                self._store_generation_logs(
+                    task_spec,
+                    stdout=generation.raw_response,
+                    stderr=generation.normalization_notes,
+                )
+            )
+            patch_path = self._write_patch(task_spec, generation.model_patch)
+            prediction_path = self._write_prediction(task_spec, generation.model_patch)
+        except (OSError, RuntimeError) as e:
+            return self._env_failure(
+                task_spec,
+                start,
+                "patch_capture_failed",
+                e,
+                stdout=generation.raw_response,
+                stderr=generation.normalization_notes,
+                harbor_paths=paths,
+            )
+
+        paths["patch_diff"] = str(patch_path)
+        paths["prediction_jsonl"] = str(prediction_path)
+        harness_run_id = self._harness_run_id(task_spec)
+        harness_output_root = self._harness_output_root(harness_run_id)
+        harness_output_root.mkdir(parents=True, exist_ok=True)
+        paths["swebench_raw_output"] = str(harness_output_root)
+        command = swebench_helpers.build_swebench_harness_command(
+            dataset_name=self._benchmark_repo.dataset_name,
+            split=self._benchmark_repo.split,
+            instance_ids=[task_spec.task_id],
+            predictions_path=str(prediction_path),
+            run_id=harness_run_id,
+            timeout=self._timeout,
+            max_workers=self._max_workers,
+            report_dir=".",
+        )
+
+        try:
+            harness_run = swebench_helpers.run_swebench_harness(
+                command=command,
+                cwd=harness_output_root,
+                stream_output=False,
+            )
+        except OSError as e:
+            return self._env_failure(
+                task_spec,
+                start,
+                "harness_subprocess_error",
+                e,
+                stdout=generation.raw_response,
+                stderr=generation.normalization_notes,
+                harbor_paths=paths,
+            )
+
+        paths.update(self._store_harness_logs(task_spec, harness_run))
+        trace = swebench_helpers.build_swebench_traces(
+            instance_ids=[task_spec.task_id],
+            run_id=harness_run_id,
+            project_root=self._project_root,
+            harness_run=harness_run,
+            raw_output_root=harness_output_root,
+        )[0]
+        trace.iteration = task_spec.iteration
+        trace.duration_sec = time.time() - start
+        trace.token_usage = TokenUsage(
+            input_tokens=generation.input_tokens,
+            output_tokens=generation.output_tokens,
+        )
+        trace.harbor_paths = {**paths, **generation.artifacts, **trace.harbor_paths}
+        trace.harbor_metadata = {
+            **trace.harbor_metadata,
+            "verifier_type": swebench_helpers.SWEBENCH_VERIFIER_TYPE,
+            "patch_generator": "llm",
+        }
+        return trace
+
+    def _write_patch(self, task_spec: TaskSpec, model_patch: str) -> Path:
+        path = (
+            self._artifact_root
+            / "patches"
+            / f"{_artifact_name(task_spec.task_id)}_iter{task_spec.iteration:04d}.patch"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(model_patch)
+        return path
+
+    def _write_prediction(self, task_spec: TaskSpec, model_patch: str) -> Path:
+        path = (
+            self._artifact_root
+            / "predictions"
+            / f"{_artifact_name(task_spec.task_id)}_iter{task_spec.iteration:04d}.jsonl"
+        )
+        return swebench_helpers.write_prediction_jsonl(
+            prediction=swebench_helpers.SWEbenchPrediction(
+                instance_id=task_spec.task_id,
+                model_patch=model_patch,
+                model_name_or_path=self._model,
+            ),
+            path=path,
+        )
+
+    def _store_generation_logs(
+        self,
+        task_spec: TaskSpec,
+        *,
+        stdout: str,
+        stderr: str,
+    ) -> dict[str, str]:
+        base = (
+            self._artifact_root
+            / "generation-logs"
+            / f"{_artifact_name(task_spec.task_id)}_iter{task_spec.iteration:04d}"
+        )
+        return {
+            "generation_stdout": str(_write_text(base / "stdout.txt", stdout)),
+            "generation_stderr": str(_write_text(base / "stderr.txt", stderr)),
+        }
+
+    def _store_generation_failure_logs(
+        self,
+        task_spec: TaskSpec,
+        exc: Exception,
+    ) -> dict[str, str]:
+        try:
+            return self._store_generation_logs(
+                task_spec,
+                stdout="",
+                stderr=f"patch generation failed: {exc}",
+            )
+        except OSError as log_exc:
+            logger.warning(
+                "SWEbenchExecutorAgent: failed to write generation failure logs "
+                "for task=%s iter=%d: %s",
+                task_spec.task_id,
+                task_spec.iteration,
+                log_exc,
+            )
+            return {}
+
+    def _store_harness_logs(
+        self,
+        task_spec: TaskSpec,
+        harness_run: swebench_helpers.SWEbenchHarnessRun,
+    ) -> dict[str, str]:
+        base = (
+            self._artifact_root
+            / "harness-logs"
+            / f"{_artifact_name(task_spec.task_id)}_iter{task_spec.iteration:04d}"
+        )
+        return {
+            "harness_stdout": str(_write_text(base / "stdout.txt", harness_run.stdout)),
+            "harness_stderr": str(_write_text(base / "stderr.txt", harness_run.stderr)),
+        }
+
+    def _harness_run_id(self, task_spec: TaskSpec) -> str:
+        return (
+            f"{self._run_id_prefix}-{_artifact_name(task_spec.task_id)}-"
+            f"iter{task_spec.iteration:04d}"
+        )
+
+    def _harness_output_root(self, harness_run_id: str) -> Path:
+        return self._artifact_root / "swebench-harness" / harness_run_id
+
+    def _env_failure(
+        self,
+        task_spec: TaskSpec,
+        start: float,
+        error_kind: str,
+        exc: BaseException,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int = -1,
+        harbor_paths: dict[str, str] | None = None,
+    ) -> ExecutionTrace:
+        logger.warning(
+            "SWEbenchExecutorAgent: %s for task=%s iter=%d: %s",
+            error_kind,
+            task_spec.task_id,
+            task_spec.iteration,
+            exc,
+        )
+        return ExecutionTrace(
+            task_id=task_spec.task_id,
+            iteration=task_spec.iteration,
+            stdout=stdout,
+            stderr=stderr,
+            duration_sec=time.time() - start,
+            exit_code=exit_code,
+            status="env_failure",
+            error_kind=error_kind,
+            error_detail=str(exc),
+            harbor_paths=harbor_paths or {},
+            harbor_metadata={
+                "verifier_type": swebench_helpers.SWEBENCH_VERIFIER_TYPE,
+            },
+        )
+
+
+def _artifact_name(task_id: str) -> str:
+    return task_id.replace("/", "_").replace("\\", "_")
+
+
+def _write_text(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path

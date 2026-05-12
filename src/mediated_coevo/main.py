@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import random
+import shlex
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,9 +19,10 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from mediated_coevo.agents.executor import ExecutorAgent
+from mediated_coevo.agents.executor import ExecutorAgent, SWEbenchExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.agents.swebench_patch_generator import LLMSWEbenchPatchGenerator
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     get_baseline_preset,
@@ -32,6 +34,7 @@ from mediated_coevo.benchmarks import (
     SkillsBenchRemoteConfig,
     SkillsBenchRepository,
 )
+from mediated_coevo.benchmarks import swebench as swebench_helpers
 from mediated_coevo.benchmarks.task_sets import (
     TASK_SETS,
     TaskSetError,
@@ -45,6 +48,8 @@ from mediated_coevo.experiment.conditions import (
 from mediated_coevo.core.config import Config, SkillUpdateConfig, load_config
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.iteration import IterationRecord
+from mediated_coevo.models.task import TaskSpec
+from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.analysis.reporting import (
     BootstrapConfidenceInterval,
@@ -59,7 +64,9 @@ from mediated_coevo.stores.skill_store import SkillStore
 
 app = typer.Typer(name="medcoevo", help="Mediated Co-Evolution Experiment Runner")
 skillsbench_app = typer.Typer(help="Manage the local SkillsBench task cache")
+swebench_app = typer.Typer(help="Explore and smoke-test SWE-bench tasks")
 app.add_typer(skillsbench_app, name="skillsbench")
+app.add_typer(swebench_app, name="swebench")
 console = Console()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -160,9 +167,7 @@ class ExperimentFactory:
         protocol = skill_store.read_skill("mediator")
         if protocol:
             mediator.load_protocol(protocol)
-        skill_advisor = SkillAdvisor(
-            llm_client=LLMClient(model=config.models.planner)
-        )
+        skill_advisor = SkillAdvisor(llm_client=LLMClient(model=config.models.planner))
         skill_advisor.configure_token_budget(
             config.budgets,
             condition_name=config.experiment.condition_name,
@@ -433,13 +438,11 @@ def _experiments_root(config: Config) -> Path:
 def _latest_experiment_dir(experiments_root: Path) -> Path:
     if not experiments_root.exists():
         raise typer.BadParameter(f"experiment directory not found: {experiments_root}")
-    candidates = [
-        path
-        for path in experiments_root.iterdir()
-        if path.is_dir()
-    ]
+    candidates = [path for path in experiments_root.iterdir() if path.is_dir()]
     if not candidates:
-        raise typer.BadParameter(f"no experiment outputs found under {experiments_root}")
+        raise typer.BadParameter(
+            f"no experiment outputs found under {experiments_root}"
+        )
     return sorted(candidates, key=lambda path: path.name)[-1]
 
 
@@ -621,6 +624,512 @@ def _print_task_selection(
     console.print(f"[bold]Tasks:[/] {task_ids}")
     if tasks is None and task_set is not None:
         console.print(f"[bold]Task set:[/] {task_set}")
+
+
+def _resolve_output_dir(output_dir: Path) -> Path:
+    if output_dir.is_absolute():
+        return output_dir
+    return PROJECT_ROOT / output_dir
+
+
+def _print_swebench_instances(
+    instances: list[swebench_helpers.SWEbenchInstanceInfo],
+) -> None:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Instance ID")
+    table.add_column("Repo")
+    table.add_column("Version")
+    table.add_column("Created")
+    for instance in instances:
+        table.add_row(
+            instance.instance_id,
+            instance.repo or "n/a",
+            instance.version or "n/a",
+            instance.created_at or "n/a",
+        )
+    console.print(table)
+
+
+def _print_swebench_eval_result(
+    *,
+    traces_path: Path,
+    summary_path: Path,
+    raw_output_root: Path,
+    traces_count: int,
+) -> None:
+    console.print("\n[bold]SWE-bench eval outputs:[/]")
+    console.print(f"  Raw outputs: {raw_output_root}")
+    console.print(f"  Traces: {traces_path}")
+    console.print(f"  Summary: {summary_path}")
+    console.print(f"  Instances: {traces_count}")
+
+
+def _run_swebench_eval(
+    *,
+    instance_ids: list[str] | None,
+    dataset_name: str,
+    split: str,
+    predictions_path: str,
+    run_id: str | None,
+    timeout: int,
+    max_workers: int,
+    output_dir: Path,
+    limit: int | None = None,
+    repo_filter: str | None = None,
+    run_id_suffix: str = "swebench-run",
+) -> None:
+    try:
+        selected_instance_ids = swebench_helpers.resolve_swebench_instance_ids(
+            dataset_name=dataset_name,
+            split=split,
+            raw_instance_ids=instance_ids,
+            limit=limit,
+            repo_filter=repo_filter,
+        )
+        swebench_helpers.validate_modal_credentials()
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    resolved_run_id = run_id or datetime.now().strftime(
+        f"%Y%m%d-%H%M%S-{run_id_suffix}"
+    )
+    resolved_output_dir = _resolve_output_dir(output_dir)
+    raw_output_root = resolved_output_dir / resolved_run_id / "raw"
+    raw_output_root.mkdir(parents=True, exist_ok=True)
+
+    harness_dataset_name = dataset_name
+    dataset_path = Path(dataset_name)
+    if not dataset_path.is_absolute():
+        project_dataset_path = PROJECT_ROOT / dataset_path
+        if project_dataset_path.exists():
+            harness_dataset_name = str(project_dataset_path)
+
+    harness_predictions_path = predictions_path
+    if predictions_path != "gold":
+        predictions_file = Path(predictions_path)
+        if not predictions_file.is_absolute():
+            predictions_file = PROJECT_ROOT / predictions_file
+        harness_predictions_path = str(predictions_file)
+
+    command = swebench_helpers.build_swebench_harness_command(
+        dataset_name=harness_dataset_name,
+        split=split,
+        instance_ids=selected_instance_ids,
+        predictions_path=harness_predictions_path,
+        run_id=resolved_run_id,
+        timeout=timeout,
+        max_workers=max_workers,
+        report_dir=".",
+    )
+
+    console.print(f"[bold]SWE-bench instances:[/] {selected_instance_ids}")
+    console.print(f"[bold]Dataset:[/] {dataset_name} ({split})")
+    console.print(f"[bold]Run ID:[/] {resolved_run_id}")
+    console.print(f"[bold]Harness command:[/] {shlex.join(command)}")
+
+    harness_run = swebench_helpers.run_swebench_harness(
+        command=command,
+        cwd=raw_output_root,
+        stream_output=True,
+    )
+    traces = swebench_helpers.build_swebench_traces(
+        instance_ids=selected_instance_ids,
+        run_id=resolved_run_id,
+        project_root=PROJECT_ROOT,
+        harness_run=harness_run,
+        raw_output_root=raw_output_root,
+    )
+    traces_path, summary_path = swebench_helpers.write_swebench_eval_outputs(
+        traces=traces,
+        output_dir=resolved_output_dir,
+        run_id=resolved_run_id,
+    )
+    _print_swebench_eval_result(
+        traces_path=traces_path,
+        summary_path=summary_path,
+        raw_output_root=raw_output_root,
+        traces_count=len(traces),
+    )
+
+    if harness_run.returncode != 0:
+        console.print(
+            "[bold red]ERROR:[/] SWE-bench harness exited with "
+            f"code {harness_run.returncode}."
+        )
+        raise typer.Exit(code=harness_run.returncode)
+
+
+def _resolve_required_swebench_selection(
+    *,
+    label: str,
+    raw_instance_ids: list[str] | None,
+    limit: int | None,
+    dataset_name: str,
+    split: str,
+) -> list[str]:
+    """Resolve a required SWE-bench evolve/eval selection."""
+    if not raw_instance_ids and limit is None:
+        raise typer.BadParameter(f"provide --{label}-instance-id or --{label}-limit")
+    try:
+        return swebench_helpers.resolve_swebench_instance_ids(
+            dataset_name=dataset_name,
+            split=split,
+            raw_instance_ids=raw_instance_ids,
+            limit=limit,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _ensure_disjoint_swebench_sets(
+    *,
+    evolve_instance_ids: list[str],
+    eval_instance_ids: list[str],
+) -> None:
+    overlap = sorted(set(evolve_instance_ids) & set(eval_instance_ids))
+    if overlap:
+        raise typer.BadParameter(
+            "evolution and eval SWE-bench instances must be disjoint; "
+            f"overlap: {overlap}"
+        )
+
+
+def _force_swebench_runtime(config: Config) -> Config:
+    config.executor_runtime.backend = "swebench"
+    return config
+
+
+def _prepare_swebench_experiment_root(
+    *,
+    config: Config,
+    seed: int,
+    run_id: str | None,
+) -> tuple[Path, Path]:
+    resolved_run_id = run_id or datetime.now().strftime(
+        f"%Y%m%d-%H%M%S-{seed}-swebench"
+    )
+    experiment_dir = (
+        PROJECT_ROOT / config.paths.data_dir / "experiments" / resolved_run_id
+    )
+    experiment_dir.mkdir(parents=True, exist_ok=False)
+
+    runtime_skills_dir = shutil.copytree(
+        PROJECT_ROOT / config.paths.skills_dir,
+        experiment_dir / "skills",
+    )
+    with open(experiment_dir / "config.toml", "wb") as f:
+        tomli_w.dump(config.model_dump(exclude_none=True), f)
+    return experiment_dir, runtime_skills_dir
+
+
+def _build_swebench_orchestrator(
+    *,
+    config: Config,
+    condition_name: ConditionName,
+    benchmark_repo: swebench_helpers.SWEbenchRepository,
+    runtime_skills_dir: Path,
+    phase_dir: Path,
+    timeout: int,
+    max_workers: int,
+    run_id_prefix: str,
+) -> Orchestrator:
+    """Build an orchestrator over SWE-bench instead of SkillsBench."""
+    from mediated_coevo.llm.client import LLMClient
+
+    validate_experiment_design(
+        condition=condition_name,
+        skill_updates=config.experiment.skill_updates,
+        baseline_preset=config.experiment.baseline_preset,
+    )
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    skill_store = SkillStore(runtime_skills_dir)
+    skill_store.validate()
+    artifact_store = ArtifactStore(base_dir=phase_dir / "artifacts")
+    history_store = HistoryStore(history_dir=phase_dir / "history")
+
+    planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
+    planner.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
+    executor = _build_swebench_executor(
+        config=config,
+        benchmark_repo=benchmark_repo,
+        phase_dir=phase_dir,
+        timeout=timeout,
+        max_workers=max_workers,
+        run_id_prefix=run_id_prefix,
+    )
+    mediator = MediatorAgent(
+        llm_client=LLMClient(model=config.models.mediator),
+        artifact_store=artifact_store,
+    )
+    mediator.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
+    protocol = skill_store.read_skill("mediator")
+    if protocol:
+        mediator.load_protocol(protocol)
+    skill_advisor = SkillAdvisor(llm_client=LLMClient(model=config.models.planner))
+    skill_advisor.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
+
+    return Orchestrator(
+        planner=planner,
+        executor=executor,  # type: ignore[arg-type]
+        mediator=mediator,
+        skill_store=skill_store,
+        artifact_store=artifact_store,
+        history_store=history_store,
+        benchmark_repo=benchmark_repo,  # type: ignore[arg-type]
+        config=config,
+        experiment_dir=phase_dir,
+        skill_advisor=skill_advisor,
+    )
+
+
+def _build_swebench_executor(
+    *,
+    config: Config,
+    benchmark_repo: swebench_helpers.SWEbenchRepository,
+    phase_dir: Path,
+    timeout: int,
+    max_workers: int,
+    run_id_prefix: str,
+) -> SWEbenchExecutorAgent:
+    from mediated_coevo.llm.client import LLMClient
+
+    artifact_root = phase_dir / "artifacts"
+    patch_generator = LLMSWEbenchPatchGenerator(LLMClient(model=config.models.executor))
+    return SWEbenchExecutorAgent(
+        model=config.models.executor,
+        benchmark_repo=benchmark_repo,
+        patch_generator=patch_generator,
+        artifact_root=artifact_root,
+        injected_skill_name=config.executor_runtime.injected_skill_name,
+        project_root=PROJECT_ROOT,
+        timeout=timeout,
+        max_workers=max_workers,
+        run_id_prefix=run_id_prefix,
+    )
+
+
+async def _run_swebench_frozen_eval(
+    *,
+    config: Config,
+    benchmark_repo: swebench_helpers.SWEbenchRepository,
+    runtime_skills_dir: Path,
+    eval_dir: Path,
+    instance_ids: list[str],
+    timeout: int,
+    max_workers: int,
+    run_id_prefix: str,
+) -> list[ExecutionTrace]:
+    skill_store = SkillStore(runtime_skills_dir)
+    skill_store.validate()
+    executor = _build_swebench_executor(
+        config=config,
+        benchmark_repo=benchmark_repo,
+        phase_dir=eval_dir,
+        timeout=timeout,
+        max_workers=max_workers,
+        run_id_prefix=run_id_prefix,
+    )
+    executor_skill_text = skill_store.read_skill("executor") or ""
+    traces: list[ExecutionTrace] = []
+    for iteration, instance_id in enumerate(instance_ids):
+        task = benchmark_repo.resolve(instance_id)
+        trace = await executor.execute_task(
+            TaskSpec(
+                task_id=instance_id,
+                instruction=task.instruction,
+                iteration=iteration,
+            ),
+            [executor_skill_text] if executor_skill_text else [],
+        )
+        traces.append(trace)
+    return traces
+
+
+def _records_from_swebench_traces(
+    *,
+    traces: list[ExecutionTrace],
+    config: Config,
+) -> list[IterationRecord]:
+    return [
+        IterationRecord(
+            iteration=trace.iteration,
+            task_id=trace.task_id,
+            execution_trace=trace,
+            reward=trace.reward,
+            duration_sec=trace.duration_sec,
+            run_id=trace.run_id,
+            condition_name=config.experiment.condition_name,
+            seed=config.experiment.seed,
+            models=config.models.model_dump(),
+            executor_agent=config.executor_runtime.agent_name,
+            skill_update_policy=config.experiment.skill_updates.model_dump(),
+            expected_reward_range=(0.0, 1.0),
+            verifier_type=swebench_helpers.SWEBENCH_VERIFIER_TYPE,
+            success=trace.is_usable_feedback_signal,
+            verifier_status=trace.status,
+            token_totals_by_agent={
+                "executor": (
+                    trace.token_usage.input_tokens + trace.token_usage.output_tokens
+                )
+            },
+        )
+        for trace in traces
+    ]
+
+
+def _write_swebench_phase_outputs(
+    *,
+    traces: list[ExecutionTrace],
+    phase_dir: Path,
+    config: Config,
+) -> tuple[Path, Path, Path, ExperimentScoreSummary]:
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    traces_path = phase_dir / "traces.jsonl"
+    with open(traces_path, "w") as f:
+        for trace in traces:
+            f.write(trace.model_dump_json())
+            f.write("\n")
+
+    predictions_path = phase_dir / "predictions.jsonl"
+    with open(predictions_path, "w") as f:
+        for trace in traces:
+            prediction_path = trace.harbor_paths.get("prediction_jsonl")
+            if not prediction_path:
+                continue
+            path = Path(prediction_path)
+            if not path.exists():
+                continue
+            text = path.read_text().strip()
+            if text:
+                f.write(text)
+                f.write("\n")
+
+    records = _records_from_swebench_traces(traces=traces, config=config)
+    summary = build_score_summary(records)
+    summary_path = phase_dir / "summary.json"
+    write_score_summary(summary, summary_path)
+    return traces_path, predictions_path, summary_path, summary
+
+
+def _run_swebench_experiment(
+    *,
+    evolve_instance_ids: list[str],
+    eval_instance_ids: list[str],
+    dataset_name: str,
+    split: str,
+    iterations: int,
+    seed: int,
+    condition_name: ConditionName,
+    skill_updates: SkillUpdateConfig,
+    config_dir: Path,
+    timeout: int,
+    max_workers: int,
+    run_id: str | None,
+) -> None:
+    random.seed(seed)
+    config = _force_swebench_runtime(
+        _apply_experiment_settings(
+            load_config(config_dir),
+            iterations=iterations,
+            seed=seed,
+            condition_name=condition_name,
+            skill_updates=skill_updates,
+        )
+    )
+    _validate_or_raise_bad_parameter(config)
+    try:
+        swebench_helpers.validate_modal_credentials()
+    except RuntimeError as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    experiment_dir, runtime_skills_dir = _prepare_swebench_experiment_root(
+        config=config,
+        seed=seed,
+        run_id=run_id,
+    )
+    benchmark_repo = swebench_helpers.SWEbenchRepository(
+        dataset_name=dataset_name,
+        split=split,
+    )
+
+    console.print(f"[bold]SWE-bench evolve instances:[/] {evolve_instance_ids}")
+    console.print(f"[bold]SWE-bench eval instances:[/] {eval_instance_ids}")
+    console.print(f"[bold]Dataset:[/] {dataset_name} ({split})")
+    console.print(f"[bold]Iterations:[/] {iterations}")
+    console.print(f"[bold]Condition:[/] {condition_name}")
+    console.print(f"[bold]Skill updates:[/] {skill_updates.model_dump()}")
+    console.print(f"[bold]Experiment:[/] {experiment_dir}")
+
+    evolve_dir = experiment_dir / "evolve"
+    evolve_orchestrator = _build_swebench_orchestrator(
+        config=config,
+        condition_name=condition_name,
+        benchmark_repo=benchmark_repo,
+        runtime_skills_dir=runtime_skills_dir,
+        phase_dir=evolve_dir,
+        timeout=timeout,
+        max_workers=max_workers,
+        run_id_prefix=f"{experiment_dir.name}-evolve",
+    )
+    console.print("\n[bold green]Starting SWE-bench evolution phase[/]\n")
+    evolve_records = asyncio.run(
+        evolve_orchestrator.run_experiment(evolve_instance_ids, iterations)
+    )
+    _write_and_print_result_summary(
+        records=evolve_records,
+        data_dir=evolve_dir,
+        header="Evolution diagnostics",
+    )
+
+    eval_config = config.model_copy(deep=True)
+    eval_config.experiment.skill_updates = SkillUpdateConfig(
+        executor=False,
+        planner=False,
+        mediator=False,
+    )
+    eval_dir = experiment_dir / "eval"
+    console.print("\n[bold green]Starting frozen SWE-bench eval phase[/]\n")
+    eval_traces = asyncio.run(
+        _run_swebench_frozen_eval(
+            config=eval_config,
+            benchmark_repo=benchmark_repo,
+            runtime_skills_dir=runtime_skills_dir,
+            eval_dir=eval_dir,
+            instance_ids=eval_instance_ids,
+            timeout=timeout,
+            max_workers=max_workers,
+            run_id_prefix=f"{experiment_dir.name}-eval",
+        )
+    )
+    traces_path, predictions_path, summary_path, eval_summary = (
+        _write_swebench_phase_outputs(
+            traces=eval_traces,
+            phase_dir=eval_dir,
+            config=eval_config,
+        )
+    )
+    top_summary_path = experiment_dir / "summary.json"
+    write_score_summary(eval_summary, top_summary_path)
+    _print_result_summary(
+        summary=eval_summary,
+        data_dir=eval_dir,
+        summary_path=summary_path,
+        header="Frozen eval results",
+    )
+    console.print(f"  Predictions: {predictions_path}")
+    console.print(f"  Traces: {traces_path}")
+    console.print(f"  Top-level summary: {top_summary_path}")
 
 
 @app.command()
@@ -812,6 +1321,226 @@ def inspect_experiment(
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     _print_inspection_payload(payload)
+
+
+@swebench_app.command("list-instances")
+def list_swebench_instances(
+    dataset_name: str = typer.Option(
+        swebench_helpers.DEFAULT_SWEBENCH_DATASET,
+        "--dataset-name",
+        help="SWE-bench dataset name or local dataset path.",
+    ),
+    split: str = typer.Option(
+        swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
+        "--split",
+        help="Dataset split to inspect.",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        min=1,
+        help="Maximum number of valid instance IDs to print.",
+    ),
+    repo_filter: str | None = typer.Option(
+        None,
+        "--repo-filter",
+        help="Optional case-insensitive substring filter for the repo field.",
+    ),
+) -> None:
+    """List valid instance IDs from a SWE-bench dataset split."""
+    try:
+        instances = swebench_helpers.list_swebench_instances(
+            dataset_name=dataset_name,
+            split=split,
+            limit=limit,
+            repo_filter=repo_filter,
+        )
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if not instances:
+        console.print("[yellow]No SWE-bench instances matched the filters.[/]")
+        return
+    _print_swebench_instances(instances)
+
+
+@swebench_app.command("run")
+def run_swebench(
+    evolve_instance_ids: list[str] | None = typer.Option(
+        None,
+        "--evolve-instance-id",
+        help=(
+            "SWE-bench instance ID to use for evolution. Repeat the option "
+            "or provide comma-separated IDs. Required unless --evolve-limit "
+            "is provided."
+        ),
+    ),
+    evolve_limit: int | None = typer.Option(
+        None,
+        "--evolve-limit",
+        min=1,
+        help="Use the first N instances from the selected split for evolution.",
+    ),
+    eval_instance_ids: list[str] | None = typer.Option(
+        None,
+        "--eval-instance-id",
+        help=(
+            "SWE-bench instance ID to use for frozen eval. Repeat the option "
+            "or provide comma-separated IDs. Required unless --eval-limit "
+            "is provided."
+        ),
+    ),
+    eval_limit: int | None = typer.Option(
+        None,
+        "--eval-limit",
+        min=1,
+        help="Use the first N instances from the selected split for frozen eval.",
+    ),
+    dataset_name: str = typer.Option(
+        swebench_helpers.DEFAULT_SWEBENCH_DATASET,
+        "--dataset-name",
+        help="SWE-bench dataset name or local dataset path.",
+    ),
+    split: str = typer.Option(
+        swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
+        "--split",
+        help="Dataset split to use.",
+    ),
+    iterations: int = typer.Option(30, help="Number of evolution iterations"),
+    seed: int = typer.Option(42, help="Random seed"),
+    condition: str = typer.Option(
+        "learned_mediator",
+        help="Experiment condition: no_feedback | full_traces | shared_notes | static_mediator | learned_mediator",
+    ),
+    skill_updates: str = typer.Option(
+        "all",
+        "--skill-updates",
+        help="Comma-separated skill updates allowed during evolution: none | executor | planner | mediator | all",
+    ),
+    run_id: str | None = typer.Option(
+        None,
+        "--run-id",
+        help="Experiment directory name. Defaults to a timestamped SWE-bench run ID.",
+    ),
+    timeout: int = typer.Option(
+        1800,
+        "--timeout",
+        min=1,
+        help="Per-instance test timeout in seconds.",
+    ),
+    max_workers: int = typer.Option(
+        1,
+        "--max-workers",
+        min=1,
+        help="Modal harness worker count.",
+    ),
+    config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run the full medcoevo SWE-bench evolution plus frozen eval experiment."""
+    _setup_logging(verbose)
+    condition_name = _validate_condition_name(condition)
+    try:
+        skill_update_config = parse_skill_updates(skill_updates)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    selected_evolve_ids = _resolve_required_swebench_selection(
+        label="evolve",
+        raw_instance_ids=evolve_instance_ids,
+        limit=evolve_limit,
+        dataset_name=dataset_name,
+        split=split,
+    )
+    selected_eval_ids = _resolve_required_swebench_selection(
+        label="eval",
+        raw_instance_ids=eval_instance_ids,
+        limit=eval_limit,
+        dataset_name=dataset_name,
+        split=split,
+    )
+    _ensure_disjoint_swebench_sets(
+        evolve_instance_ids=selected_evolve_ids,
+        eval_instance_ids=selected_eval_ids,
+    )
+
+    _run_swebench_experiment(
+        evolve_instance_ids=selected_evolve_ids,
+        eval_instance_ids=selected_eval_ids,
+        dataset_name=dataset_name,
+        split=split,
+        iterations=iterations,
+        seed=seed,
+        condition_name=condition_name,
+        skill_updates=skill_update_config,
+        config_dir=config_dir,
+        timeout=timeout,
+        max_workers=max_workers,
+        run_id=run_id,
+    )
+
+
+@swebench_app.command("smoke")
+def smoke_swebench(
+    instance_ids: list[str] | None = typer.Option(
+        None,
+        "--instance-id",
+        help=(
+            "SWE-bench instance ID to run. Repeat the option or provide "
+            "comma-separated IDs. Defaults to a tiny Lite smoke instance."
+        ),
+    ),
+    dataset_name: str = typer.Option(
+        swebench_helpers.DEFAULT_SWEBENCH_DATASET,
+        "--dataset-name",
+        help="SWE-bench dataset name or local dataset path.",
+    ),
+    split: str = typer.Option(
+        swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
+        "--split",
+        help="Dataset split to evaluate.",
+    ),
+    predictions_path: str = typer.Option(
+        "gold",
+        "--predictions-path",
+        help="SWE-bench predictions JSON/JSONL path, or 'gold'.",
+    ),
+    run_id: str | None = typer.Option(
+        None,
+        "--run-id",
+        help="Run identifier. Defaults to a timestamped SWE-bench smoke ID.",
+    ),
+    timeout: int = typer.Option(
+        1800,
+        "--timeout",
+        min=1,
+        help="Per-instance test timeout in seconds.",
+    ),
+    max_workers: int = typer.Option(
+        1,
+        "--max-workers",
+        min=1,
+        help="Modal harness worker count. Kept at 1 for small smoke runs.",
+    ),
+    output_dir: Path = typer.Option(
+        swebench_helpers.DEFAULT_SWEBENCH_OUTPUT_DIR,
+        "--output-dir",
+        help="Directory for normalized medcoevo smoke outputs.",
+    ),
+) -> None:
+    """Run a tiny standalone SWE-bench evaluation and normalize its reports."""
+    _run_swebench_eval(
+        instance_ids=instance_ids,
+        dataset_name=dataset_name,
+        split=split,
+        predictions_path=predictions_path,
+        run_id=run_id,
+        timeout=timeout,
+        max_workers=max_workers,
+        output_dir=output_dir,
+        run_id_suffix="swebench-smoke",
+    )
 
 
 @skillsbench_app.command("sync")

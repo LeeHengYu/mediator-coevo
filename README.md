@@ -125,6 +125,40 @@ uv run medcoevo inspect data/experiments/<run-dir>
 uv run medcoevo inspect --json
 ```
 
+### SWE-bench Eval CLI
+
+SWE-bench instance IDs are selected from a dataset split; they are not
+user-created task names. List a few valid IDs before running an evaluation:
+
+```
+uv run medcoevo swebench list-instances --limit 20
+```
+
+Run selected evolution and frozen-eval instances through the official SWE-bench
+Modal harness:
+
+```
+uv run medcoevo swebench run --evolve-instance-id django__django-11910 --eval-instance-id django__django-11099 --run-id swebench-django
+```
+
+Run a small discovered evolution slice with an explicit held-out eval instance:
+
+```
+uv run medcoevo swebench run --evolve-limit 5 --eval-instance-id django__django-11099 --run-id swebench-lite-5
+```
+
+`swebench smoke` remains available as a one-instance convenience command using
+the SWE-bench Lite test split, gold patches, and the `sympy__sympy-20590`
+default instance. SWE-bench commands always run via Modal, so configure Modal
+credentials with `modal token new` before running them.
+
+The raw SWE-bench harness logs and aggregate report are kept under
+`data/swebench-evals/<run-id>/raw/`. The command also writes normalized
+project-facing outputs under
+`data/swebench-evals/<run-id>/summary.json` and
+`data/swebench-evals/<run-id>/traces.jsonl`, mapping SWE-bench `resolved`
+to reward `1.0` and unresolved reports to reward `0.0`.
+
 Typical single-run outputs have this shape:
 
 ```text
@@ -148,7 +182,7 @@ Matrix outputs use one directory per row under
 Potential Troubleshooting Procedures:
 
 - `harbor CLI not found on PATH`: run `uv tool install harbor`, then confirm `harbor --version`. For CI-only orchestrator checks that intentionally do not call Harbor, set `executor_runtime.harbor_required = false` in `config/default.toml`.
-- Docker or Compose errors: start Docker Desktop or Colima, then confirm `docker --version` and `docker compose version`.
+- Docker or Compose errors in SkillsBench/Harbor runs: start Docker Desktop or Colima, then confirm `docker --version` and `docker compose version`. SWE-bench runs use Modal instead of local Docker.
 - Model credential errors: export `OPENROUTER_API_KEY` for the default `openrouter/...` models, or change `config/default.toml` and export the key required by the configured provider.
 - Missing benchmark task: pre-cache selected tasks with `uv run medcoevo skillsbench sync --tasks <task-id>` or `uv run medcoevo skillsbench sync --task-set skillsbench-10`. If `executor_runtime.remote_fetch = false`, the task must already exist under `benchmarks/skillsbench/tasks/`.
 
