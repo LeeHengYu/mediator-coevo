@@ -7,12 +7,12 @@ from typing import Any, TypedDict
 import pandas as pd
 from pydantic import BaseModel, Field
 
-from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.core.utils import as_optional_float
+from mediated_coevo.models.iteration import IterationRecord
 
 ENV_FAILURE_STATUSES = {"env_failure", "parse_error", "harbor_failed"}
 COEVOLUTION_TASK_ID = "__coevolution__"
-DEFAULT_BOOTSTRAP_SAMPLES = 10 ** 4
+DEFAULT_BOOTSTRAP_SAMPLES = 10**4
 DEFAULT_BOOTSTRAP_SEED = 0
 DEFAULT_CONFIDENCE_LEVEL = 0.95
 DEFAULT_DOMINANCE_THRESHOLD = 0.50
@@ -113,10 +113,7 @@ def build_score_summary(
         confidence_level=confidence_level,
     )
     task_means = pd.Series(
-        [
-            task.mean_reward for task in per_task
-            if task.mean_reward is not None
-        ],
+        [task.mean_reward for task in per_task if task.mean_reward is not None],
         dtype="float64",
     )
     dominant_task = None
@@ -170,10 +167,14 @@ def _build_task_summaries(
         total_runs=("task_id", "size"),
         env_failure_count=("is_env_failure", "sum"),
     )
-    reward_stats = frame[frame["is_scored"]].groupby("task_id")["scored_reward"].agg(
-        scored_count="count",
-        mean_reward="mean",
-        median_reward="median",
+    reward_stats = (
+        frame[frame["is_scored"]]
+        .groupby("task_id")["scored_reward"]
+        .agg(
+            scored_count="count",
+            mean_reward="mean",
+            median_reward="median",
+        )
     )
     task_stats = base_stats.join(reward_stats, how="left")
     task_stats["scored_count"] = task_stats["scored_count"].fillna(0).astype(int)
@@ -240,7 +241,9 @@ def _records_frame(records: list[IterationRecord]) -> pd.DataFrame:
 
     frame = pd.DataFrame(rows, columns=RECORD_COLUMNS)
     frame["scored_reward"] = pd.to_numeric(frame["scored_reward"], errors="coerce")
-    frame["total_tokens"] = pd.to_numeric(frame["total_tokens"], errors="coerce").fillna(0)
+    frame["total_tokens"] = pd.to_numeric(
+        frame["total_tokens"], errors="coerce"
+    ).fillna(0)
     return frame
 
 
@@ -268,6 +271,7 @@ def _series_median(values: pd.Series) -> float | None:
     if values.empty:
         return None
     return float(values.median())
+
 
 def _bootstrap_mean_ci(
     values: pd.Series,

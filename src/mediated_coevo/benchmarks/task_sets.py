@@ -125,8 +125,6 @@ def resolve_task_selection(
             raise TaskSetError("task set name cannot be empty")
         if name not in TASK_SETS:
             allowed = ", ".join(sorted(TASK_SETS))
-            raise TaskSetError(
-                f"unknown task set {name!r}; expected one of: {allowed}"
-            )
+            raise TaskSetError(f"unknown task set {name!r}; expected one of: {allowed}")
         return list(TASK_SETS[name])
     raise TaskSetError("provide --tasks or --task-set")

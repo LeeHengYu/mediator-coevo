@@ -252,7 +252,13 @@ uv run medcoevo run --task-set skillsbench-10 --condition learned_mediator --ski
 uv run medcoevo matrix --task-set skillsbench-10 --iterations 30 --seed 42
 ```
 
-`matrix` supports the same `--tasks`, `--task-set`, `--iterations`, `--seed`, `--config-dir`, and `--verbose` options as `run`, except that `--iterations` applies to each row. The command copies the configured `skills/` tree into each row's experiment directory before that row starts, so rows cannot write to repo-level skills or contaminate one another.
+`matrix` supports the same `--tasks`, `--task-set`, `--iterations`, `--seed`,
+`--coevo-interval`, `--advisor-buffer-max`,
+`--skill-validation` / `--no-skill-validation`, `--config-dir`, and
+`--verbose` options as `run`, except that `--iterations` applies to each row.
+The command copies the configured `skills/` tree into each row's experiment
+directory before that row starts, so rows cannot write to repo-level skills or
+contaminate one another.
 
 ### Baseline Matrix
 

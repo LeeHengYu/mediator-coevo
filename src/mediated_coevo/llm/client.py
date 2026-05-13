@@ -98,9 +98,7 @@ class LLMClient:
                 merged[-1] = {
                     "role": "system",
                     "content": (
-                        merged[-1].get("content", "")
-                        + "\n\n"
-                        + msg.get("content", "")
+                        merged[-1].get("content", "") + "\n\n" + msg.get("content", "")
                     ),
                 }
             else:
@@ -124,29 +122,35 @@ class LLMClient:
                     litellm.acompletion(**kwargs),
                     timeout=self.timeout,
                 )
-            except asyncio.TimeoutError:
-                last_exc = TimeoutError(
-                    f"LLM call timed out after {self.timeout}s"
-                )
-                logger.warning(
-                    "Timeout (attempt %d/%d)", attempt + 1, self.max_retries
-                )
+            except TimeoutError:
+                last_exc = TimeoutError(f"LLM call timed out after {self.timeout}s")
+                logger.warning("Timeout (attempt %d/%d)", attempt + 1, self.max_retries)
             except Exception as e:
                 last_exc = e
                 error_str = str(e).lower()
                 retryable = any(
                     kw in error_str
                     for kw in [
-                        "rate limit", "429", "overloaded", "500", "502",
-                        "503", "504", "connection", "timeout",
+                        "rate limit",
+                        "429",
+                        "overloaded",
+                        "500",
+                        "502",
+                        "503",
+                        "504",
+                        "connection",
+                        "timeout",
                     ]
                 )
                 if not retryable or attempt >= self.max_retries - 1:
                     raise
-                backoff = self.retry_delay * (2 ** attempt)
+                backoff = self.retry_delay * (2**attempt)
                 logger.warning(
                     "Retryable error (attempt %d/%d), waiting %.1fs: %s",
-                    attempt + 1, self.max_retries, backoff, e,
+                    attempt + 1,
+                    self.max_retries,
+                    backoff,
+                    e,
                 )
                 await asyncio.sleep(backoff)
 

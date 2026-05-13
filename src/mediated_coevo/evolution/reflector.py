@@ -85,7 +85,9 @@ class Reflector:
             logger.info("No contrastive pairs for %s; skipping reflection.", agent_role)
             return None
 
-        logger.info("Reflector found %d contrastive pairs for %s.", len(pairs), agent_role)
+        logger.info(
+            "Reflector found %d contrastive pairs for %s.", len(pairs), agent_role
+        )
 
         current_skill = self._skill_store.read_skill(agent_role) or ""
         base_skill_hash = SkillStore.content_hash(current_skill)
@@ -112,7 +114,11 @@ class Reflector:
                 return None
 
             self._skill_store.write_skill(agent_role, new_content)
-            logger.info("%s skill updated via reflection (%d chars).", agent_role, len(new_content))
+            logger.info(
+                "%s skill updated via reflection (%d chars).",
+                agent_role,
+                len(new_content),
+            )
             provenance = self._build_reflection_provenance(
                 agent_role=agent_role,
                 base_skill_hash=base_skill_hash,
@@ -135,7 +141,7 @@ class Reflector:
         self,
         agent_role: str,
         current_skill: str,
-        pairs: list[tuple["HistoryEntry", "HistoryEntry"]],
+        pairs: list[tuple[HistoryEntry, HistoryEntry]],
         *,
         model: str = "",
     ) -> list[dict[str, Any]]:
@@ -186,7 +192,9 @@ class Reflector:
         raw_content: str,
     ) -> str | None:
         if raw_content == _NO_CHANGE_SENTINEL:
-            logger.info("%s reflection: LLM explicitly signalled no change.", agent_role)
+            logger.info(
+                "%s reflection: LLM explicitly signalled no change.", agent_role
+            )
             return None
 
         new_content = _parse_skill_content(raw_content)
@@ -211,7 +219,7 @@ class Reflector:
         *,
         agent_role: str,
         base_skill_hash: str,
-        pairs: list[tuple["HistoryEntry", "HistoryEntry"]],
+        pairs: list[tuple[HistoryEntry, HistoryEntry]],
         iteration: int,
         max_pairs: int,
         selection_seed: int | None,
@@ -280,8 +288,7 @@ class Reflector:
                     BudgetSection(
                         "contrastive_evidence",
                         "## Contrastive Evidence\n\n"
-                        f"{evidence_intro}\n\n"
-                        + "\n\n".join(contrastive_parts),
+                        f"{evidence_intro}\n\n" + "\n\n".join(contrastive_parts),
                         required=True,
                         max_tokens=budgets.historical_summary_tokens,
                     ),
@@ -389,7 +396,7 @@ class Reflector:
 
 
 def _contrastive_pair_refs(
-    pairs: list[tuple["HistoryEntry", "HistoryEntry"]],
+    pairs: list[tuple[HistoryEntry, HistoryEntry]],
 ) -> list[ContrastivePairRef]:
     """Convert selected history pairs into compact persisted references."""
     refs: list[ContrastivePairRef] = []
@@ -397,18 +404,18 @@ def _contrastive_pair_refs(
         worse_reward = 0.0 if worse.reward is None else worse.reward
         better_reward = 0.0 if better.reward is None else better.reward
         task_id = str(
-            worse.metadata.get("task_id")
-            or better.metadata.get("task_id")
-            or ""
+            worse.metadata.get("task_id") or better.metadata.get("task_id") or ""
         )
-        refs.append(ContrastivePairRef(
-            worse_entry_id=worse.entry_id,
-            better_entry_id=better.entry_id,
-            task_id=task_id,
-            worse_reward=worse_reward,
-            better_reward=better_reward,
-            reward_gap=better_reward - worse_reward,
-        ))
+        refs.append(
+            ContrastivePairRef(
+                worse_entry_id=worse.entry_id,
+                better_entry_id=better.entry_id,
+                task_id=task_id,
+                worse_reward=worse_reward,
+                better_reward=better_reward,
+                reward_gap=better_reward - worse_reward,
+            )
+        )
     return refs
 
 
@@ -426,7 +433,7 @@ def _is_semantically_similar(old: str, new: str, threshold: float) -> bool:
     return ratio >= threshold
 
 
-def _format_mediator_entry(entry: "HistoryEntry") -> str:
+def _format_mediator_entry(entry: HistoryEntry) -> str:
     """Render a mediator HistoryEntry as typed-slot bullets for the prompt."""
     p = entry.payload
     if not isinstance(p, MediatorSignal):
@@ -441,7 +448,9 @@ def _format_mediator_entry(entry: "HistoryEntry") -> str:
         lines.append(f"- Headline: {p.headline}")
     if p.evidence:
         sample_note = (
-            "" if p.raw_length <= len(p.evidence) else f" (sampled from {p.raw_length} chars)"
+            ""
+            if p.raw_length <= len(p.evidence)
+            else f" (sampled from {p.raw_length} chars)"
         )
         lines.append(f"- Evidence{sample_note}:")
         lines.append(textwrap.indent(p.evidence.rstrip(), "    "))
@@ -450,7 +459,7 @@ def _format_mediator_entry(entry: "HistoryEntry") -> str:
     return "\n".join(lines) if lines else "- (empty mediator signal)"
 
 
-def _format_planner_entry(entry: "HistoryEntry") -> str:
+def _format_planner_entry(entry: HistoryEntry) -> str:
     """Render a planner HistoryEntry as typed-slot bullets for the prompt."""
     p = entry.payload
     if not isinstance(p, PlannerSignal):

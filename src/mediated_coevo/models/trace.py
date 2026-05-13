@@ -18,7 +18,9 @@ from pydantic import BaseModel, Field
 #   parse_error   — A reward source was present but its content was malformed.
 #   harbor_failed — Harbor subprocess returned non-zero. Reward may or may not
 #                   be present; treat as env_failure for co-evolution signal.
-TraceStatus = Literal["ok", "task_failed", "env_failure", "parse_error", "harbor_failed"]
+TraceStatus = Literal[
+    "ok", "task_failed", "env_failure", "parse_error", "harbor_failed"
+]
 
 
 class TokenUsage(BaseModel):

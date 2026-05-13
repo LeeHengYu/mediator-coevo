@@ -20,8 +20,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediated_coevo.core.config import DEFAULT_SKILLSBENCH_ARCHIVE_URL
-from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
 from mediated_coevo.core.utils import as_mapping, as_nonempty_string
+from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +188,9 @@ class SkillsBenchRepository:
                 ):
                     archive_path = self.remote.local_archive_base_dir / archive_path
                 return archive_path.read_bytes()
-            with urllib.request.urlopen(archive_url, timeout=self.remote.timeout_sec) as response:
+            with urllib.request.urlopen(
+                archive_url, timeout=self.remote.timeout_sec
+            ) as response:
                 return response.read()
         except (OSError, urllib.error.URLError) as exc:
             raise SkillsBenchFetchError(
@@ -366,9 +368,13 @@ class SkillsBenchRepository:
         instruction_path = task_dir / "instruction.md"
         task_toml_path = task_dir / "task.toml"
         if not instruction_path.exists():
-            raise FileNotFoundError(f"Missing instruction.md for task '{task_id}' at {task_dir}")
+            raise FileNotFoundError(
+                f"Missing instruction.md for task '{task_id}' at {task_dir}"
+            )
         if not task_toml_path.exists():
-            raise FileNotFoundError(f"Missing task.toml for task '{task_id}' at {task_dir}")
+            raise FileNotFoundError(
+                f"Missing task.toml for task '{task_id}' at {task_dir}"
+            )
 
         with open(task_toml_path, "rb") as f:
             task_config = tomllib.load(f)
@@ -440,7 +446,7 @@ class HarborRunner:
                 proc.communicate(),
                 timeout=self.timeout_sec,
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             with suppress(ProcessLookupError):
                 proc.kill()
             with suppress(Exception):
@@ -897,7 +903,8 @@ def _find_trial_dir(job_dir: Path | None) -> Path | None:
     if job_dir is None:
         return None
     candidates = [
-        path for path in job_dir.iterdir()
+        path
+        for path in job_dir.iterdir()
         if path.is_dir() and (path / "result.json").exists()
     ]
     return _latest_path(candidates)

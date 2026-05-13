@@ -10,6 +10,7 @@ import pytest
 from mediated_coevo.agents.executor import SWEbenchExecutorAgent
 from mediated_coevo.agents.swebench_patch_generator import (
     SWEbenchPatchGeneration,
+    _generation_messages,
     capture_swebench_sandbox_diff,
     normalize_swebench_model_patch,
     prepare_local_swebench_sandbox,
@@ -98,6 +99,110 @@ class _FakePatchGenerator:
             raise self.exc
         assert self.generation is not None
         return self.generation
+
+
+def test_swebench_generation_prompt_omits_base_commit_metadata(tmp_path):
+    task = _FakeSWEbenchRepo().resolve("sympy__sympy-20590")
+
+    messages = _generation_messages(
+        task=task,
+        workspace=tmp_path / "workspace",
+        planner_instruction="fix it",
+        executor_skill_text="# executor skill",
+        injected_skill_name="executor",
+    )
+    prompt_text = "\n\n".join(message["content"] for message in messages)
+
+    assert task.base_commit not in prompt_text
+    assert "Base commit:" not in prompt_text
+    assert "The response must start with `diff --git `" in prompt_text
+    assert "metadata, or any text outside" in prompt_text
+
+
+def test_normalize_swebench_model_patch_recomputes_bad_hunk_counts():
+    raw_response = r"""```diff
+--- a/django/contrib/auth/validators.py
++++ b/django/contrib/auth/validators.py
+@@ -5,10 +5,10 @@
+ 
+ @deconstructible
+ class ASCIIUsernameValidator(RegexValidator):
+-    regex = r'^[\w.@+-]+$'
++    regex = r'^\w[\w.@+-]+\Z'
+     message = _(
+         'Enter a valid username. This value may contain only English letters, '
+-        'numbers, and @/./+/-/_ characters.'
++        'numbers, and @/./+/-/_ characters. It must start with a letter, '
++        'number, or underscore.'
+     )
+     flags = 0
+ 
+@@ -16,8 +16,9 @@
+ @deconstructible
+ class UnicodeUsernameValidator(RegexValidator):
+     regex = r'^[\w.@+-]+$'
++    regex = r'^\w[\w.@+-]+\Z'
+     message = _(
+         'Enter a valid username. This value may contain only letters, '
+-        'numbers, and @/./+/-/_ characters.'
++        'numbers, and @/./+/-/_ characters. It must start with a letter, '
++        'number, or underscore.'
+     )
+     flags = 0
+```"""
+
+    model_patch, notes = normalize_swebench_model_patch(raw_response)
+
+    assert model_patch.startswith(
+        "diff --git a/django/contrib/auth/validators.py "
+        "b/django/contrib/auth/validators.py\n"
+    )
+    assert "@@ -5,10 +5,11 @@" in model_patch
+    assert "@@ -16,8 +16,10 @@" in model_patch
+    assert "Recomputed line counts for 2 hunk(s)." in notes
+    assert "Inserted git diff headers for 1 file(s)." in notes
+    assert not model_patch.startswith("```")
+    assert not model_patch.rstrip().endswith("```")
+
+
+def test_normalize_swebench_model_patch_converts_bare_headers_to_git_style():
+    raw_response = """--- django/contrib/auth/validators.py
++++ django/contrib/auth/validators.py
+@@ -1,2 +1,2 @@
+-old
++new
+"""
+
+    model_patch, notes = normalize_swebench_model_patch(raw_response)
+
+    assert model_patch == (
+        "diff --git a/django/contrib/auth/validators.py "
+        "b/django/contrib/auth/validators.py\n"
+        "--- a/django/contrib/auth/validators.py\n"
+        "+++ b/django/contrib/auth/validators.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    assert "Normalized file headers to a/ and b/ prefixes for 1 file(s)." in notes
+
+
+def test_normalize_swebench_model_patch_preserves_existing_git_header():
+    raw_response = """diff --git a/demo.py b/demo.py
+index 1111111..2222222 100644
+--- a/demo.py
++++ b/demo.py
+@@ -1,2 +1,2 @@
+-old
++new
+"""
+
+    model_patch, notes = normalize_swebench_model_patch(raw_response)
+
+    assert model_patch.count("diff --git a/demo.py b/demo.py") == 1
+    assert "--- a/demo.py\n+++ b/demo.py" in model_patch
+    assert "Inserted git diff headers" not in notes
+    assert "Normalized file headers" not in notes
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,8 @@
 
 from .skillsbench import (
     HarborNotFoundError,
-    HarborRunResult,
     HarborRunner,
+    HarborRunResult,
     HarborTimeoutError,
     SkillsBenchFetchError,
     SkillsBenchRemoteConfig,

@@ -153,7 +153,7 @@ async def compact_text_for_context(
 
 
 def deterministic_mediator_signal(
-    report: "MediatorReport",
+    report: MediatorReport,
 ) -> MediatorSignal:
     feedback = report.exposed_content or ""
     raw_length = len(feedback)
@@ -181,6 +181,7 @@ def build_planner_signal(update: SkillUpdate) -> PlannerSignal:
         diff_excerpt=excerpt,
     )
 
+
 def first_sentence(text: str, max_chars: int) -> str:
     """Return the first sentence or line of text, bounded by max_chars."""
     stripped = text.strip()
@@ -195,7 +196,7 @@ def first_sentence(text: str, max_chars: int) -> str:
 
 
 def trace_header_summary(
-    trace: "ExecutionTrace",
+    trace: ExecutionTrace,
     *,
     include_source_task: bool = False,
 ) -> str:
@@ -219,12 +220,13 @@ def head_tail_text(text: str, budget: int) -> str:
     return f"{text[:half].rstrip()}\n…\n{text[-half:].lstrip()}"
 
 
-def abstraction_level_str(report: "MediatorReport") -> str:
+def abstraction_level_str(report: MediatorReport) -> str:
     """Return the report's abstraction_level as a string."""
     return report.abstraction_level.value
 
 
 # ── Planner diff helper (internal) ──────────────────────────────────────
+
 
 def _diff_parts(old: str, new: str) -> tuple[int, int, str]:
     """Compute a unified diff, return (added, removed, head+tail excerpt)."""
@@ -247,5 +249,7 @@ def _diff_parts(old: str, new: str) -> tuple[int, int, str]:
         excerpt = "".join(diff_lines)
     else:
         gap = f"... ({len(diff_lines) - head_lines - tail_lines} more diff lines) ...\n"
-        excerpt = "".join(diff_lines[:head_lines]) + gap + "".join(diff_lines[-tail_lines:])
+        excerpt = (
+            "".join(diff_lines[:head_lines]) + gap + "".join(diff_lines[-tail_lines:])
+        )
     return added, removed, excerpt

@@ -102,10 +102,7 @@ class HistoryStore:
     def _save_rejected_proposals(self) -> None:
         """Persist rejected proposal batches to disk."""
         path = self._history_dir / self._REJECTED_PROPOSALS_FILE
-        lines = [
-            batch.model_dump_json()
-            for batch in self._rejected_proposal_batches
-        ]
+        lines = [batch.model_dump_json() for batch in self._rejected_proposal_batches]
         path.write_text("\n".join(lines) + "\n")
 
     def add(self, entry: HistoryEntry) -> str:
@@ -129,12 +126,14 @@ class HistoryStore:
         payload: HistorySignal,
     ) -> str:
         """Persist one role signal with standard experiment metadata."""
-        return self.add(HistoryEntry(
-            iteration=iteration,
-            agent_role=agent_role,
-            payload=payload,
-            metadata={"task_id": task_id, "condition": condition},
-        ))
+        return self.add(
+            HistoryEntry(
+                iteration=iteration,
+                agent_role=agent_role,
+                payload=payload,
+                metadata={"task_id": task_id, "condition": condition},
+            )
+        )
 
     def remember_pending_outcome(
         self,
@@ -152,9 +151,9 @@ class HistoryStore:
     def tag_pending_outcome(
         self,
         task_id: str,
-        trace: "ExecutionTrace",
+        trace: ExecutionTrace,
         *,
-        proposals: list["SkillProposal"] | None = None,
+        proposals: list[SkillProposal] | None = None,
     ) -> None:
         """Tag pending role entries with this trace's reward, when usable."""
         if trace.iteration <= 0:
@@ -180,7 +179,10 @@ class HistoryStore:
         if planner_entry_id:
             self.tag_outcome_by_id(planner_entry_id, reward=reward)
         for proposal in proposals or []:
-            if proposal.iteration == trace.iteration - 1 and proposal.task_id == task_id:
+            if (
+                proposal.iteration == trace.iteration - 1
+                and proposal.task_id == task_id
+            ):
                 proposal.reward = reward
 
     def tag_outcome_by_id(self, entry_id: str, reward: float) -> None:
@@ -250,8 +252,7 @@ class HistoryStore:
         ]
         if task_id is not None:
             tagged = [
-                item for item in tagged
-                if item.entry.metadata.get("task_id") == task_id
+                item for item in tagged if item.entry.metadata.get("task_id") == task_id
             ]
 
         by_task: dict[str, list[_RewardedEntry]] = defaultdict(list)
@@ -286,10 +287,12 @@ class HistoryStore:
             bot = sorted_entries[:k_bot]
             top = sorted_entries[-k_top:]
 
-            for worse in bot:
-                for better in top:
-                    if better.reward > worse.reward:
-                        pool.append((worse, better))
+            pool.extend(
+                (worse, better)
+                for worse in bot
+                for better in top
+                if better.reward > worse.reward
+            )
 
         if not pool:
             return []

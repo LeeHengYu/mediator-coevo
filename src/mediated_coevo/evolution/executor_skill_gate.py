@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.planner import PlannerAgent
@@ -77,8 +77,7 @@ class ExecutorSkillGate:
         current_skill = self.skill_store.read_skill("executor") or ""
         buffered_proposals = list(proposal_buffer)
         self.last_proposal_ids = [
-            proposal.proposal_id
-            for proposal in buffered_proposals
+            proposal.proposal_id for proposal in buffered_proposals
         ]
         batch_id = f"coevo-iter-{iteration:04d}"
         advisor_feedback = await self.skill_advisor.review(
@@ -90,8 +89,7 @@ class ExecutorSkillGate:
         if not advisor_feedback:
             logger.info("Advisor rejected — no skill update.")
             rejection_reason = (
-                self.skill_advisor.last_rejection_reason
-                or "advisor_rejected"
+                self.skill_advisor.last_rejection_reason or "advisor_rejected"
             )
             self.last_advisor_decision = "rejected"
             self.last_advisor_reason = rejection_reason
@@ -107,7 +105,9 @@ class ExecutorSkillGate:
         logger.info("Advisor approved — Planner patching skill...")
         self.last_advisor_decision = "approved"
         self.last_advisor_reason = advisor_feedback
-        contributing_tasks = sorted({p.task_id for p in buffered_proposals if p.task_id})
+        contributing_tasks = sorted(
+            {p.task_id for p in buffered_proposals if p.task_id}
+        )
         contributing_task_ids = ",".join(contributing_tasks)
         edit_history = self.history_store.query(
             agent_role="planner",
@@ -200,7 +200,9 @@ class ExecutorSkillGate:
             batch_id=batch_id,
             iteration=iteration,
             skill_id="executor",
-            task_ids=sorted(proposal.task_id for proposal in proposals if proposal.task_id),
+            task_ids=sorted(
+                proposal.task_id for proposal in proposals if proposal.task_id
+            ),
             base_skill_hash=old_skill_hash,
             reason=reason,
             advisor_feedback=advisor_feedback,
@@ -349,9 +351,7 @@ class ExecutorSkillGate:
     ) -> SkillValidationResult:
         validation_config = self.config.experiment.skill_validation
         usable_results = [result for result in task_results if result.usable]
-        current_mean = _mean_reward(
-            result.current_reward for result in usable_results
-        )
+        current_mean = _mean_reward(result.current_reward for result in usable_results)
         candidate_mean = _mean_reward(
             result.candidate_reward for result in usable_results
         )

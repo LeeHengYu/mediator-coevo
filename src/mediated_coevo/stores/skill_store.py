@@ -76,12 +76,12 @@ class SkillStore:
             if not skill_dir.is_dir():
                 continue
             markdown_paths = sorted(
-                path for path in skill_dir.iterdir()
+                path
+                for path in skill_dir.iterdir()
                 if path.is_file() and path.suffix.lower() == ".md"
             )
             valid = (
-                len(markdown_paths) == 1
-                and markdown_paths[0].name == self.ENTRYPOINT
+                len(markdown_paths) == 1 and markdown_paths[0].name == self.ENTRYPOINT
             )
             if not valid:
                 found = ", ".join(path.name for path in markdown_paths) or "none"

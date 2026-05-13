@@ -101,7 +101,9 @@ class Config(BaseModel):
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
-    executor_runtime: ExecutorRuntimeConfig = Field(default_factory=ExecutorRuntimeConfig)
+    executor_runtime: ExecutorRuntimeConfig = Field(
+        default_factory=ExecutorRuntimeConfig
+    )
 
 
 def load_config(config_dir: Path) -> Config:

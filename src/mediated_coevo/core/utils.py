@@ -59,7 +59,9 @@ def parse_json_object(text: str) -> dict:
     if result is not None:
         return result
 
-    logger.debug("parse_json_object failed: no JSON object found | input=%r", text[:200])
+    logger.debug(
+        "parse_json_object failed: no JSON object found | input=%r", text[:200]
+    )
     return {}
 
 

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mediated_coevo.agents.swebench_patch_generator import SWEbenchPatchGenerator
 from mediated_coevo.benchmarks import (
     HarborNotFoundError,
     HarborRunner,
@@ -15,7 +16,6 @@ from mediated_coevo.benchmarks import (
     parse_execution_trace,
 )
 from mediated_coevo.benchmarks import swebench as swebench_helpers
-from mediated_coevo.agents.swebench_patch_generator import SWEbenchPatchGenerator
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 
 if TYPE_CHECKING:

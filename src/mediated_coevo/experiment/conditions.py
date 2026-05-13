@@ -6,7 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from mediated_coevo.core.config import BudgetsConfig
+    from mediated_coevo.core.config import BudgetsConfig, SkillUpdateConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.trace import ExecutionTrace
@@ -20,7 +20,9 @@ ConditionName = Literal[
     "learned_mediator",
 ]
 
-MEDIATOR_CONDITIONS: frozenset[ConditionName] = frozenset({"static_mediator", "learned_mediator"})
+MEDIATOR_CONDITIONS: frozenset[ConditionName] = frozenset(
+    {"static_mediator", "learned_mediator"}
+)
 MEDIATOR_EVOLVE_CONDITIONS: frozenset[ConditionName] = frozenset({"learned_mediator"})
 
 
@@ -31,12 +33,16 @@ class ExperimentDesignError(ValueError):
 def validate_experiment_design(
     *,
     condition: ConditionName,
-    skill_updates: object,
+    skill_updates: SkillUpdateConfig,
     baseline_preset: str | None = None,
 ) -> None:
     """Validate experiment condition/update semantics before runtime side effects."""
     enabled_updates = _enabled_skill_updates(skill_updates)
-    design_label = f"baseline preset {baseline_preset!r}" if baseline_preset else "experiment design"
+    design_label = (
+        f"baseline preset {baseline_preset!r}"
+        if baseline_preset
+        else "experiment design"
+    )
 
     if condition == "no_feedback" and enabled_updates:
         raise ExperimentDesignError(
@@ -59,12 +65,15 @@ def validate_experiment_design(
         )
 
 
-def _enabled_skill_updates(skill_updates: object) -> tuple[str, ...]:
-    return tuple(
-        role
-        for role in ("executor", "planner", "mediator")
-        if bool(getattr(skill_updates, role, False))
-    )
+def _enabled_skill_updates(skill_updates: SkillUpdateConfig) -> tuple[str, ...]:
+    enabled_roles: list[str] = []
+    if skill_updates.executor:
+        enabled_roles.append("executor")
+    if skill_updates.planner:
+        enabled_roles.append("planner")
+    if skill_updates.mediator:
+        enabled_roles.append("mediator")
+    return tuple(enabled_roles)
 
 
 async def get_executor_proposal_feedback(
@@ -117,11 +126,15 @@ async def get_prior_context(
     current_iteration: int | None = None,
 ) -> str | None:
     """Return the prior-context string the planner should receive, or None."""
-    from mediated_coevo.runtime.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
+    from mediated_coevo.runtime.token_budget import (
+        BudgetSection,
+        fit_text_to_tokens,
+        pack_sections,
+    )
 
     if condition == "no_feedback":
         return None
-    elif condition == "full_traces":
+    if condition == "full_traces":
         summaries = await build_trace_summaries(
             artifact_store.query_traces(
                 task_id=task_id,
@@ -139,24 +152,32 @@ async def get_prior_context(
         if budgets:
             return pack_sections(
                 model,
-                [BudgetSection("full_traces", text, max_tokens=budgets.historical_summary_tokens)],
+                [
+                    BudgetSection(
+                        "full_traces",
+                        text,
+                        max_tokens=budgets.historical_summary_tokens,
+                    )
+                ],
                 budgets.historical_summary_tokens,
             )
         return text
-    elif condition == "shared_notes":
+    if condition == "shared_notes":
         if shared_notes and budgets:
-            return fit_text_to_tokens(model, shared_notes, budgets.historical_summary_tokens)
+            return fit_text_to_tokens(
+                model, shared_notes, budgets.historical_summary_tokens
+            )
         return shared_notes
-    else:  # static_mediator, learned_mediator
-        if previous_report and not previous_report.withheld:
-            if budgets:
-                return fit_text_to_tokens(
-                    model,
-                    previous_report.content,
-                    budgets.mediator_report_tokens,
-                )
-            return previous_report.content
-        return None
+    # static_mediator, learned_mediator
+    if previous_report and not previous_report.withheld:
+        if budgets:
+            return fit_text_to_tokens(
+                model,
+                previous_report.content,
+                budgets.mediator_report_tokens,
+            )
+        return previous_report.content
+    return None
 
 
 async def get_cross_task_prior_context(
@@ -199,7 +220,13 @@ async def get_cross_task_prior_context(
         if budgets:
             return pack_sections(
                 model,
-                [BudgetSection("cross_task_full_traces", text, max_tokens=budgets.historical_summary_tokens)],
+                [
+                    BudgetSection(
+                        "cross_task_full_traces",
+                        text,
+                        max_tokens=budgets.historical_summary_tokens,
+                    )
+                ],
                 budgets.historical_summary_tokens,
             )
         return text
@@ -212,7 +239,9 @@ async def get_cross_task_prior_context(
         ]
         if not reports:
             return None
-        reports.sort(key=lambda report: (report.iteration, report.timestamp), reverse=True)
+        reports.sort(
+            key=lambda report: (report.iteration, report.timestamp), reverse=True
+        )
         text = "\n\n".join(
             f"source_task={report.task_id} iter={report.iteration}\n{report.content}"
             for report in reports[:recent]
@@ -220,7 +249,13 @@ async def get_cross_task_prior_context(
         if budgets:
             return pack_sections(
                 model,
-                [BudgetSection("cross_task_reports", text, max_tokens=budgets.mediator_report_tokens)],
+                [
+                    BudgetSection(
+                        "cross_task_reports",
+                        text,
+                        max_tokens=budgets.mediator_report_tokens,
+                    )
+                ],
                 budgets.mediator_report_tokens,
             )
         return text

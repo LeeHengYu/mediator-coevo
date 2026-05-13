@@ -512,6 +512,11 @@ def test_swebench_run_cli_delegates_integrated_experiment(monkeypatch):
             "django__django-11099",
             "--iterations",
             "2",
+            "--coevo-interval",
+            "2",
+            "--advisor-buffer-max",
+            "1",
+            "--no-skill-validation",
         ],
     )
 
@@ -519,6 +524,39 @@ def test_swebench_run_cli_delegates_integrated_experiment(monkeypatch):
     assert captured["evolve_instance_ids"] == ["django__django-11910"]
     assert captured["eval_instance_ids"] == ["django__django-11099"]
     assert captured["iterations"] == 2
+    assert captured["coevo_interval"] == 2
+    assert captured["advisor_buffer_max"] == 1
+    assert captured["skill_validation_enabled"] is False
+
+
+def test_common_experiment_override_flags_are_shared_by_benchmark_clis():
+    runner = CliRunner()
+
+    cases = (
+        (["run"], "provide --tasks or --task-set"),
+        (["matrix"], "provide --tasks or --task-set"),
+        (["swebench", "run"], "provide --evolve-instance-id or --evolve-limit"),
+    )
+    for base_command, expected_error in cases:
+        command = [
+            *base_command,
+            "--coevo-interval",
+            "2",
+            "--advisor-buffer-max",
+            "1",
+            "--skill-validation",
+        ]
+        result = runner.invoke(app, command)
+
+        assert expected_error in result.output
+        assert "No such option" not in result.output
+
+        no_validation_result = runner.invoke(
+            app,
+            [*command[:-1], "--no-skill-validation"],
+        )
+        assert expected_error in no_validation_result.output
+        assert "No such option" not in no_validation_result.output
 
 
 def test_swebench_runtime_backend_is_persisted(tmp_path, monkeypatch):
@@ -539,6 +577,14 @@ def test_swebench_runtime_backend_is_persisted(tmp_path, monkeypatch):
     config.paths.data_dir = "data"
     config.executor_runtime.backend = "skillsbench"
 
+    main_module._apply_experiment_settings(
+        config,
+        iterations=5,
+        seed=7,
+        coevo_interval=2,
+        advisor_buffer_max=1,
+        skill_validation_enabled=False,
+    )
     main_module._force_swebench_runtime(config)
     experiment_dir, _ = main_module._prepare_swebench_experiment_root(
         config=config,
@@ -548,6 +594,9 @@ def test_swebench_runtime_backend_is_persisted(tmp_path, monkeypatch):
 
     saved = tomllib.loads((experiment_dir / "config.toml").read_text())
     assert saved["executor_runtime"]["backend"] == "swebench"
+    assert saved["experiment"]["coevo_interval"] == 2
+    assert saved["experiment"]["advisor_buffer_max"] == 1
+    assert saved["experiment"]["skill_validation"]["enabled"] is False
 
 
 def test_swebench_experiment_does_not_check_harbor_availability(

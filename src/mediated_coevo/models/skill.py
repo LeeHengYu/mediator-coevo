@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-
 
 SkillUpdateDecision = Literal["approved", "committed", "rejected", "no_change"]
 SkillValidationDecision = Literal["accepted", "rejected"]
@@ -134,7 +133,7 @@ class ContrastiveReflectionProvenance(SkillUpdateProvenance):
 
 
 SkillProvenance = Annotated[
-    Union[AdvisorBatchProvenance, ContrastiveReflectionProvenance],
+    AdvisorBatchProvenance | ContrastiveReflectionProvenance,
     Field(discriminator="kind"),
 ]
 

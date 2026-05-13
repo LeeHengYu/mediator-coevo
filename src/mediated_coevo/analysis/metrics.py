@@ -18,10 +18,7 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
     if record.skill_update:
         skill_updates.append(record.skill_update)
     skill_updates.extend(record.skill_updates)
-    skill_update_summaries = [
-        _skill_update_summary(update)
-        for update in skill_updates
-    ]
+    skill_update_summaries = [_skill_update_summary(update) for update in skill_updates]
     success = record.success
     verifier_status = record.verifier_status
     harbor_job_path = None
@@ -78,8 +75,7 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
             for agent, usage in token_usage_by_agent.items()
         },
         "llm_token_events": [
-            event.model_dump(mode="json")
-            for event in record.llm_token_events
+            event.model_dump(mode="json") for event in record.llm_token_events
         ],
         "harbor_job_path": harbor_job_path,
         "harbor_trial_path": harbor_trial_path,

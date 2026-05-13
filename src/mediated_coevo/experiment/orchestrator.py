@@ -15,18 +15,19 @@ from pathlib import Path
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.benchmarks import SkillsBenchRepository
-from mediated_coevo.experiment.conditions import (
-    ConditionName,
-    get_executor_proposal_feedback,
-    get_cross_task_prior_context,
-    get_prior_context,
-)
 from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.evolution.reflector import Reflector
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
+from mediated_coevo.experiment.conditions import (
+    ConditionName,
+    get_cross_task_prior_context,
+    get_executor_proposal_feedback,
+    get_prior_context,
+)
 from mediated_coevo.experiment.records import (
     attach_skill_identity,
     build_coevolution_record,
@@ -37,7 +38,6 @@ from mediated_coevo.experiment.records import (
     skill_version,
     task_metadata_fields,
 )
-from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import (
@@ -113,7 +113,9 @@ class Orchestrator:
             for task_id in task_ids:
                 logger.info(
                     "=== Iteration %d/%d | Task: %s ===",
-                    iteration + 1, num_iterations, task_id,
+                    iteration + 1,
+                    num_iterations,
+                    task_id,
                 )
                 record = await self._run_iteration(task_id, iteration)
                 records.append(record)
@@ -133,7 +135,11 @@ class Orchestrator:
                 coevolution_record=coevolution_record,
             )
 
-        logger.info("Experiment complete: %d iterations, %d records", num_iterations, len(records))
+        logger.info(
+            "Experiment complete: %d iterations, %d records",
+            num_iterations,
+            len(records),
+        )
         return records
 
     async def _run_iteration(
@@ -224,7 +230,10 @@ class Orchestrator:
             iteration=iteration,
             proposal_buffer=self._proposal_buffer,
         )
-        mediator_entry_id, planner_entry_id = await self._record_history_and_remember_outcome(
+        (
+            mediator_entry_id,
+            planner_entry_id,
+        ) = await self._record_history_and_remember_outcome(
             task_id=task_id,
             iteration=iteration,
             condition=condition,
@@ -259,7 +268,12 @@ class Orchestrator:
         reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
         logger.info(
             "Iteration %d complete: condition=%s status=%s reward=%s tokens=%d duration=%.1fs",
-            iteration, condition, trace.status, reward_str, record.total_tokens, duration,
+            iteration,
+            condition,
+            trace.status,
+            reward_str,
+            record.total_tokens,
+            duration,
         )
         return record
 
@@ -337,7 +351,9 @@ class Orchestrator:
         )
         if proposal:
             self._proposal_buffer.append(proposal)
-            logger.info("Proposal buffered (buffer size=%d)", len(self._proposal_buffer))
+            logger.info(
+                "Proposal buffered (buffer size=%d)", len(self._proposal_buffer)
+            )
         else:
             logger.info("Planner decided: no proposal needed.")
 
@@ -443,7 +459,8 @@ class Orchestrator:
         start = time.time()
         logger.info(
             "=== Co-evolution checkpoint at iteration %d (condition=%s) ===",
-            iteration, condition,
+            iteration,
+            condition,
         )
 
         reflector = Reflector(
@@ -463,7 +480,9 @@ class Orchestrator:
                 selection_seed=reflection_seed,
             )
             if mediator_result:
-                mediator_result.provenance.rollback_snapshot = rollback_snapshot(iteration)
+                mediator_result.provenance.rollback_snapshot = rollback_snapshot(
+                    iteration
+                )
                 self.mediator.load_protocol(mediator_result.new_content)
                 skill_updates.append(skill_update_from_reflection(mediator_result))
         else:
@@ -477,7 +496,9 @@ class Orchestrator:
                 selection_seed=reflection_seed + 1,
             )
             if planner_result:
-                planner_result.provenance.rollback_snapshot = rollback_snapshot(iteration)
+                planner_result.provenance.rollback_snapshot = rollback_snapshot(
+                    iteration
+                )
                 skill_updates.append(skill_update_from_reflection(planner_result))
         else:
             logger.info("Planner skill evolution skipped (skill updates disabled).")

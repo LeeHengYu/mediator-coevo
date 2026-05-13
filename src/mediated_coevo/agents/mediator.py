@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mediated_coevo.experiment.conditions import ConditionName, MEDIATOR_CONDITIONS
+from mediated_coevo.experiment.conditions import MEDIATOR_CONDITIONS, ConditionName
 
 from .base import BaseAgent
 
@@ -32,8 +32,8 @@ if TYPE_CHECKING:
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.models.trace import ExecutionTrace
-    from mediated_coevo.stores.artifact_store import ArtifactStore
     from mediated_coevo.runtime.token_budget import BudgetSection
+    from mediated_coevo.stores.artifact_store import ArtifactStore
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +115,13 @@ class MediatorAgent(BaseAgent):
             sections.append(self._trace_section(trace))
 
         if task_context := context.get("task_context"):
-            sections.append(BudgetSection(
-                "task_context",
-                f"## Task Context\n{task_context.instruction}",
-                required=True,
-            ))
+            sections.append(
+                BudgetSection(
+                    "task_context",
+                    f"## Task Context\n{task_context.instruction}",
+                    required=True,
+                )
+            )
 
         if self._budgets and user_budget:
             user_content = pack_sections(model, sections, user_budget)
@@ -267,7 +269,7 @@ class MediatorAgent(BaseAgent):
     async def compact_feedback(
         self,
         report: MediatorReport,
-    ) -> "MediatorSignal":
+    ) -> MediatorSignal:
         """Compact a mediator report into a structured ``MediatorSignal``.
 
         Short feedback (``<= RAW_PASSTHROUGH_CHARS``) passes through the
@@ -283,6 +285,7 @@ class MediatorAgent(BaseAgent):
         producer, compactor, and reflector are therefore all the same
         model — see the design notes in ``evolution/compactor.py``.
         """
+        from mediated_coevo.core.utils import parse_json_object
         from mediated_coevo.evolution.compactor import (
             COMPACTOR_SYSTEM_PROMPT,
             RAW_PASSTHROUGH_CHARS,
@@ -293,9 +296,12 @@ class MediatorAgent(BaseAgent):
             first_sentence,
             head_tail_text,
         )
-        from mediated_coevo.runtime.token_budget import BudgetSection, fit_text_to_tokens, pack_sections
         from mediated_coevo.models.history_signals import MediatorSignal
-        from mediated_coevo.core.utils import parse_json_object
+        from mediated_coevo.runtime.token_budget import (
+            BudgetSection,
+            fit_text_to_tokens,
+            pack_sections,
+        )
 
         feedback = report.exposed_content or ""
         raw_length = len(feedback)

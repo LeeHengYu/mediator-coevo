@@ -45,14 +45,16 @@ class SkillAdvisorPrompt:
     def render(self) -> tuple[str, int | None]:
         from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
 
-        user_content = "\n".join([
-            "## Current Executor Skill\n",
-            self._current_skill_text(),
-            "\n## Buffered Proposals\n",
-            *self._proposal_blocks(),
-            "\nRespond with JSON only. The feedback field is required and "
-            "must be non-empty for both approval and rejection.",
-        ])
+        user_content = "\n".join(
+            [
+                "## Current Executor Skill\n",
+                self._current_skill_text(),
+                "\n## Buffered Proposals\n",
+                *self._proposal_blocks(),
+                "\nRespond with JSON only. The feedback field is required and "
+                "must be non-empty for both approval and rejection.",
+            ]
+        )
         if not self.budgets:
             return user_content, None
 
@@ -171,7 +173,8 @@ class SkillAdvisor:
                 temperature=temperature,
                 max_tokens=(
                     min(max_tokens, self._budgets.advisor_completion_tokens)
-                    if self._budgets else max_tokens
+                    if self._budgets
+                    else max_tokens
                 ),
                 budget_label="skill_advisor.review",
                 prompt_budget=prompt_budget,
@@ -185,9 +188,7 @@ class SkillAdvisor:
                     return feedback
                 self._last_rejection_reason = "advisor_approved_without_feedback"
                 return None
-            self._last_rejection_reason = (
-                feedback or "advisor_rejected_without_reason"
-            )
+            self._last_rejection_reason = feedback or "advisor_rejected_without_reason"
         except Exception as e:
             logger.error("SkillAdvisor review failed: %s", e)
             self._last_rejection_reason = f"advisor_error: {e}"

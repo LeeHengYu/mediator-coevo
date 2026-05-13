@@ -98,7 +98,7 @@ def count_message_tokens(model: str, messages: list[dict[str, Any]]) -> int:
 
 def _count_messages_with_tiktoken(model: str, messages: list[dict[str, Any]]) -> int:
     import tiktoken
-    
+
     encoding = tiktoken.get_encoding("o200k_base")
     total = 3
     for message in messages:
@@ -146,7 +146,9 @@ def fit_text_to_tokens(
     best = ""
     while lo <= hi:
         mid = (lo + hi) // 2
-        candidate = f"{text[:mid].rstrip()}{marker}{text[-mid:].lstrip()}" if mid else marker
+        candidate = (
+            f"{text[:mid].rstrip()}{marker}{text[-mid:].lstrip()}" if mid else marker
+        )
         if count_text_tokens(model, candidate) <= max_tokens:
             best = candidate
             lo = mid + 1
@@ -188,7 +190,9 @@ def pack_sections(
             content = fit_text_to_tokens(model, content, section.max_tokens)
         packed.append((section, content))
 
-    required_text = separator.join(content for section, content in packed if section.required)
+    required_text = separator.join(
+        content for section, content in packed if section.required
+    )
     required_tokens = count_text_tokens(model, required_text)
     if required_tokens > budget_limit:
         raise TokenBudgetExceeded(

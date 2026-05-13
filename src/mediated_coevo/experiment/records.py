@@ -4,18 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from mediated_coevo.benchmarks.task_sets import (
-    SKILLSBENCH_10_TASK_METADATA,
-    SKILLSBENCH_EXPECTED_REWARD_RANGE,
-    SKILLSBENCH_VERIFIER_TYPE,
-)
-from mediated_coevo.experiment.conditions import ConditionName
-from mediated_coevo.core.config import Config
 from mediated_coevo.analysis.metrics import (
     metric_success,
     metric_verifier_status,
     token_totals_by_agent,
 )
+from mediated_coevo.benchmarks.task_sets import (
+    SKILLSBENCH_10_TASK_METADATA,
+    SKILLSBENCH_EXPECTED_REWARD_RANGE,
+    SKILLSBENCH_VERIFIER_TYPE,
+)
+from mediated_coevo.core.config import Config
+from mediated_coevo.core.utils import as_mapping, as_nonempty_string
+from mediated_coevo.experiment.conditions import ConditionName
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import (
@@ -24,9 +25,8 @@ from mediated_coevo.models.skill import (
 )
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
-from mediated_coevo.stores.skill_store import SkillStore
 from mediated_coevo.runtime.token_budget import TokenBudgetEvent
-from mediated_coevo.core.utils import as_mapping, as_nonempty_string
+from mediated_coevo.stores.skill_store import SkillStore
 
 if TYPE_CHECKING:
     from mediated_coevo.evolution.reflector import ReflectionResult
@@ -94,9 +94,7 @@ def build_iteration_record(
     previous_reward_by_task: dict[str, float],
 ) -> IterationRecord:
     """Build a complete metric/history record for one normal task iteration."""
-    executor_tokens = (
-        trace.token_usage.input_tokens + trace.token_usage.output_tokens
-    )
+    executor_tokens = trace.token_usage.input_tokens + trace.token_usage.output_tokens
     total_tokens = executor_tokens + sum(e.total_tokens for e in llm_token_events)
     history_entry_ids: dict[str, str] = {}
     if mediator_entry_id:
@@ -177,9 +175,7 @@ def experiment_record_fields(config: Config) -> ExperimentRecordFields:
     """Return shared experiment metadata for metrics records."""
     return {
         "baseline_preset": config.experiment.baseline_preset,
-        "cross_task_feedback_enabled": (
-            config.experiment.allow_cross_task_feedback
-        ),
+        "cross_task_feedback_enabled": (config.experiment.allow_cross_task_feedback),
         "skill_update_policy": config.experiment.skill_updates.model_dump(),
     }
 
@@ -205,9 +201,7 @@ def task_metadata_fields(
 
     category = as_nonempty_string(metadata.get("category"))
     difficulty = as_nonempty_string(metadata.get("difficulty"))
-    expected_reward_range = _reward_range_value(
-        metadata.get("expected_reward_range")
-    )
+    expected_reward_range = _reward_range_value(metadata.get("expected_reward_range"))
     verifier_type = as_nonempty_string(verifier.get("type"))
 
     if curated_metadata:
@@ -259,7 +253,7 @@ def rollback_snapshot(iteration: int) -> str | None:
     return skill_version(iteration - 1)
 
 
-def skill_update_from_reflection(result: "ReflectionResult") -> SkillUpdate:
+def skill_update_from_reflection(result: ReflectionResult) -> SkillUpdate:
     """Convert a committed reflection result into a metrics skill update."""
     new_skill_hash = SkillStore.content_hash(result.new_content)
     return SkillUpdate(

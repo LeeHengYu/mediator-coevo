@@ -20,6 +20,7 @@ from mediated_coevo.experiment.conditions import (
 from mediated_coevo.core.config import Config, SkillUpdateConfig
 from mediated_coevo.main import (
     ExperimentFactory,
+    _apply_experiment_settings,
     _build_matrix_runtimes,
 )
 from mediated_coevo.experiment.records import build_coevolution_record
@@ -58,6 +59,26 @@ def test_parse_skill_updates(raw, expected):
 def test_parse_skill_updates_rejects_invalid_values(raw):
     with pytest.raises(SkillUpdateParseError):
         parse_skill_updates(raw)
+
+
+def test_apply_experiment_settings_supports_shared_runtime_knobs():
+    config = _config()
+
+    updated = _apply_experiment_settings(
+        config,
+        iterations=4,
+        seed=123,
+        coevo_interval=2,
+        advisor_buffer_max=1,
+        skill_validation_enabled=False,
+    )
+
+    assert updated is config
+    assert config.experiment.num_iterations == 4
+    assert config.experiment.seed == 123
+    assert config.experiment.coevo_interval == 2
+    assert config.experiment.advisor_buffer_max == 1
+    assert config.experiment.skill_validation.enabled is False
 
 
 def test_baseline_preset_mapping_matches_matrix_plan():
@@ -137,7 +158,11 @@ def test_all_baseline_presets_validate():
     [
         ("no_feedback", SkillUpdateConfig(planner=True), "no_feedback"),
         ("full_traces", SkillUpdateConfig(mediator=True), "mediator"),
-        ("shared_notes", SkillUpdateConfig(executor=True, planner=False, mediator=False), "shared_notes"),
+        (
+            "shared_notes",
+            SkillUpdateConfig(executor=True, planner=False, mediator=False),
+            "shared_notes",
+        ),
         ("static_mediator", SkillUpdateConfig(mediator=True), "static_mediator"),
     ],
 )
@@ -171,6 +196,7 @@ def _write_minimal_config(config_dir) -> None:
 def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     _write_minimal_config(config_dir)
+
     def fail_if_called(config):
         raise AssertionError("harbor check should happen after design validation")
 
@@ -321,7 +347,9 @@ class _NoCallPlanner:
 
 class _NoCallAdvisor:
     async def review(self, *args, **kwargs):
-        raise AssertionError("advisor should not review when executor updates are disabled")
+        raise AssertionError(
+            "advisor should not review when executor updates are disabled"
+        )
 
 
 @pytest.mark.asyncio

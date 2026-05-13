@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -105,11 +106,11 @@ def normalize_swebench_model_patch(raw_response: str) -> tuple[str, str]:
 
     fenced_diff = _extract_fenced_diff(response)
     if fenced_diff is not None:
-        return _ensure_trailing_newline(fenced_diff), "Extracted fenced diff block."
+        return _normalized_patch_result(fenced_diff, "Extracted fenced diff block.")
 
     inline_diff = _extract_inline_diff(response)
     if inline_diff is not None:
-        return _ensure_trailing_newline(inline_diff), "Extracted inline unified diff."
+        return _normalized_patch_result(inline_diff, "Extracted inline unified diff.")
 
     return "", "No unified diff found in LLM response; using an empty model_patch."
 
@@ -128,7 +129,6 @@ def _generation_messages(
             "# SWE-bench Task",
             f"Instance ID: {task.task_id}",
             f"Repository: {task.repo}",
-            f"Base commit: {task.base_commit}",
             f"Workspace path: {workspace}",
             "# Planner Instruction",
             planner_instruction,
@@ -138,9 +138,17 @@ def _generation_messages(
             skill_section,
             "# Required Output",
             (
-                "Return only a unified diff suitable for SWE-bench model_patch. "
-                "Do not include prose, markdown explanations, test patches, or "
-                "gold patch fields."
+                "Your entire response must be only the contents of a git-style "
+                "unified diff suitable for SWE-bench model_patch, exactly like "
+                "`git diff --binary HEAD -- .`. The response must start with "
+                "`diff --git ` and end immediately after the final diff hunk or "
+                "binary patch section. "
+                "Every changed file must include `diff --git a/<path> b/<path>`, "
+                "`--- a/<path>`, and `+++ b/<path>` headers using repo-relative "
+                "paths. Do not use bare paths such as `--- django/...`. Do not "
+                "include prose, markdown explanations, test patches, absolute "
+                "paths, commit hashes, base commit lines, summaries, metadata, "
+                "or gold patch fields."
             ),
         ]
     )
@@ -150,7 +158,9 @@ def _generation_messages(
             "content": (
                 "You are the Executor for a SWE-bench task. Generate the minimal "
                 "repository patch needed to resolve the issue. Output only a "
-                "valid unified diff."
+                "valid git-style unified diff with `diff --git` file headers. "
+                "Do not include commit hashes, metadata, or any text outside "
+                "the patch."
             ),
         },
         {"role": "user", "content": user_content},
@@ -182,7 +192,7 @@ def _extract_fenced_diff(response: str) -> str | None:
 def _extract_inline_diff(response: str) -> str | None:
     lines = response.splitlines()
     for index, line in enumerate(lines):
-        if line.startswith("diff --git ") or line.startswith("--- "):
+        if line.startswith(("diff --git ", "--- ")):
             candidate = "\n".join(lines[index:]).strip()
             if _looks_like_diff(candidate):
                 return candidate
@@ -193,6 +203,167 @@ def _looks_like_diff(text: str) -> bool:
     return text.startswith("diff --git ") or (
         "\n--- " in f"\n{text}" and "\n+++ " in f"\n{text}" and "\n@@ " in f"\n{text}"
     )
+
+
+def _normalized_patch_result(diff_text: str, base_note: str) -> tuple[str, str]:
+    normalized_diff, hunk_note = _normalize_unified_diff(diff_text)
+    normalized_diff, header_note = _normalize_git_style_file_headers(normalized_diff)
+    return (
+        _ensure_trailing_newline(normalized_diff),
+        _normalization_notes(base_note, hunk_note, header_note),
+    )
+
+
+def _normalize_git_style_file_headers(diff_text: str) -> tuple[str, str | None]:
+    lines = diff_text.splitlines()
+    normalized_lines: list[str] = []
+    inserted_git_headers = 0
+    rewritten_file_headers = 0
+    current_section_has_git_header = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("diff --git "):
+            current_section_has_git_header = True
+            normalized_lines.append(line)
+            index += 1
+            continue
+
+        if (
+            line.startswith("--- ")
+            and index + 1 < len(lines)
+            and lines[index + 1].startswith("+++ ")
+        ):
+            old_path = line[4:].strip()
+            new_path = lines[index + 1][4:].strip()
+            normalized_old_path = _canonical_patch_header_path(old_path, "a")
+            normalized_new_path = _canonical_patch_header_path(new_path, "b")
+            if normalized_old_path != old_path or normalized_new_path != new_path:
+                rewritten_file_headers += 1
+            if not current_section_has_git_header:
+                normalized_lines.append(
+                    "diff --git "
+                    f"{_diff_git_path(normalized_old_path, normalized_new_path, 'a')} "
+                    f"{_diff_git_path(normalized_old_path, normalized_new_path, 'b')}"
+                )
+                inserted_git_headers += 1
+            normalized_lines.append(f"--- {normalized_old_path}")
+            normalized_lines.append(f"+++ {normalized_new_path}")
+            current_section_has_git_header = False
+            index += 2
+            continue
+
+        normalized_lines.append(line)
+        index += 1
+
+    notes = []
+    if inserted_git_headers:
+        notes.append(f"Inserted git diff headers for {inserted_git_headers} file(s).")
+    if rewritten_file_headers:
+        notes.append(
+            f"Normalized file headers to a/ and b/ prefixes for "
+            f"{rewritten_file_headers} file(s)."
+        )
+    return "\n".join(normalized_lines), " ".join(notes) or None
+
+
+def _canonical_patch_header_path(path: str, side_prefix: str) -> str:
+    if path == "/dev/null":
+        return path
+    normalized_path = path.removeprefix("./")
+    if normalized_path.startswith(("a/", "b/")):
+        normalized_path = normalized_path[2:]
+    return f"{side_prefix}/{normalized_path}"
+
+
+def _diff_git_path(old_path: str, new_path: str, side_prefix: str) -> str:
+    path = new_path if old_path == "/dev/null" else old_path
+    if new_path == "/dev/null":
+        path = old_path
+    if path.startswith(("a/", "b/")):
+        return f"{side_prefix}/{path[2:]}"
+    return f"{side_prefix}/{path}"
+
+
+_HUNK_HEADER_RE = re.compile(
+    r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
+    r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@(?P<section>.*)$"
+)
+
+
+def _normalize_unified_diff(diff_text: str) -> tuple[str, str | None]:
+    lines = diff_text.strip().splitlines()
+    normalized_lines: list[str] = []
+    recomputed_hunks = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = _HUNK_HEADER_RE.match(line)
+        if match is None:
+            normalized_lines.append(line)
+            index += 1
+            continue
+
+        body_lines: list[str] = []
+        index += 1
+        while index < len(lines) and not _starts_next_diff_section(lines, index):
+            body_lines.append(lines[index])
+            index += 1
+
+        old_count, new_count = _count_hunk_body_lines(body_lines)
+        original_old_count = int(match.group("old_count") or "1")
+        original_new_count = int(match.group("new_count") or "1")
+        if old_count != original_old_count or new_count != original_new_count:
+            recomputed_hunks += 1
+
+        normalized_lines.append(
+            "@@ -{old_start},{old_count} +{new_start},{new_count} @@{section}".format(
+                old_start=match.group("old_start"),
+                old_count=old_count,
+                new_start=match.group("new_start"),
+                new_count=new_count,
+                section=match.group("section"),
+            )
+        )
+        normalized_lines.extend(body_lines)
+
+    note = None
+    if recomputed_hunks:
+        note = f"Recomputed line counts for {recomputed_hunks} hunk(s)."
+    return "\n".join(normalized_lines), note
+
+
+def _starts_next_diff_section(lines: list[str], index: int) -> bool:
+    line = lines[index]
+    if _HUNK_HEADER_RE.match(line) or line.startswith("diff --git "):
+        return True
+    return (
+        line.startswith("--- ")
+        and index + 1 < len(lines)
+        and lines[index + 1].startswith("+++ ")
+    )
+
+
+def _count_hunk_body_lines(lines: list[str]) -> tuple[int, int]:
+    old_count = 0
+    new_count = 0
+    for line in lines:
+        if line.startswith("\\ No newline at end of file"):
+            continue
+        if line.startswith("+"):
+            new_count += 1
+        elif line.startswith("-"):
+            old_count += 1
+        else:
+            old_count += 1
+            new_count += 1
+    return old_count, new_count
+
+
+def _normalization_notes(base_note: str, *extra_notes: str | None) -> str:
+    notes = [base_note]
+    notes.extend(note for note in extra_notes if note)
+    return " ".join(notes)
 
 
 def _ensure_trailing_newline(text: str) -> str:

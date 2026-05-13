@@ -16,12 +16,12 @@ from mediated_coevo.evolution.compactor import (
     head_tail_text,
     trace_header_summary,
 )
-from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.models.report import MediatorReport
+from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
 
-_T = TypeVar("_T", bound=BaseModel)
+_T = TypeVar("_T", ExecutionTrace, MediatorReport)
 
 
 class ArtifactStore:
@@ -48,7 +48,9 @@ class ArtifactStore:
 
     def store_report(self, report: MediatorReport, *, overwrite: bool = False) -> Path:
         """Persist a mediator report. Returns the file path."""
-        filename = f"{report.task_id}_iter{report.iteration:04d}_{report.report_id}.json"
+        filename = (
+            f"{report.task_id}_iter{report.iteration:04d}_{report.report_id}.json"
+        )
         path = self._reports_dir / filename
         if path.exists() and not overwrite:
             raise FileExistsError(f"Report already exists: {path}")
@@ -113,19 +115,16 @@ class ArtifactStore:
             except Exception as e:
                 logger.warning("Failed to load %s %s: %s", model_cls.__name__, path, e)
                 continue
-            if task_id is not None and getattr(artifact, "task_id", None) != task_id:
+            if task_id is not None and artifact.task_id != task_id:
                 continue
-            if (
-                before_iteration is not None
-                and getattr(artifact, "iteration", -1) >= before_iteration
-            ):
+            if before_iteration is not None and artifact.iteration >= before_iteration:
                 continue
             results.append(artifact)
 
         results.sort(
             key=lambda artifact: (
-                getattr(artifact, "iteration", -1),
-                getattr(artifact, "timestamp", None),
+                artifact.iteration,
+                artifact.timestamp,
             ),
             reverse=True,
         )
@@ -165,6 +164,8 @@ class ArtifactStore:
         for trace in traces:
             summary = trace_header_summary(trace)
             if trace.stderr:
-                summary += f" stderr={head_tail_text(trace.stderr, TARGET_EVIDENCE_CHARS)}"
+                summary += (
+                    f" stderr={head_tail_text(trace.stderr, TARGET_EVIDENCE_CHARS)}"
+                )
             summaries.append(summary)
         return summaries

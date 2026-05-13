@@ -64,7 +64,9 @@ class PlannerAgent(BaseAgent):
         self._budgets = budgets
         self._condition_name = condition_name
 
-    def set_skill_context(self, executor_skills: str, skill_refiner: str | None = None) -> None:
+    def set_skill_context(
+        self, executor_skills: str, skill_refiner: str | None = None
+    ) -> None:
         """Inject executor skills and planner's own skill-refiner guidance.
 
         Called by the orchestrator before process().
@@ -90,10 +92,12 @@ class PlannerAgent(BaseAgent):
                 content,
                 self._budgets.max_skill_tokens,
             )
-        messages.append({
-            "role": "system",
-            "content": f"# {heading}\n\n{description}\n\n{content}",
-        })
+        messages.append(
+            {
+                "role": "system",
+                "content": f"# {heading}\n\n{description}\n\n{content}",
+            }
+        )
 
     def construct_messages(self, context: dict[str, Any]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [
@@ -292,27 +296,33 @@ class PlannerAgent(BaseAgent):
                 )
             ]
             if instruction := context.get("base_instruction"):
-                sections.append(BudgetSection(
-                    "benchmark_instruction",
-                    (
-                        "## Benchmark Instruction\n"
-                        "Use the following as the base task instruction. You may clarify or "
-                        "restructure it for the Executor, but do not change the task goal.\n\n"
-                        f"{instruction}"
-                    ),
-                    required=True,
-                ))
+                sections.append(
+                    BudgetSection(
+                        "benchmark_instruction",
+                        (
+                            "## Benchmark Instruction\n"
+                            "Use the following as the base task instruction. You may clarify or "
+                            "restructure it for the Executor, but do not change the task goal.\n\n"
+                            f"{instruction}"
+                        ),
+                        required=True,
+                    )
+                )
             if report := context.get("mediator_report"):
-                sections.append(BudgetSection(
-                    "prior_context",
-                    f"## Feedback from previous execution\n{report}",
-                    max_tokens=budgets.mediator_report_tokens,
-                ))
-            sections.append(BudgetSection(
-                "response_schema",
-                PLAN_RESPONSE_SCHEMA,
-                required=True,
-            ))
+                sections.append(
+                    BudgetSection(
+                        "prior_context",
+                        f"## Feedback from previous execution\n{report}",
+                        max_tokens=budgets.mediator_report_tokens,
+                    )
+                )
+            sections.append(
+                BudgetSection(
+                    "response_schema",
+                    PLAN_RESPONSE_SCHEMA,
+                    required=True,
+                )
+            )
             return pack_sections(model, sections, budget)
 
         parts = [f"Plan a task for task_id: {context.get('task_id', 'unknown')}"]
@@ -349,22 +359,28 @@ class PlannerAgent(BaseAgent):
                 )
             ]
             if feedback := context.get("feedback"):
-                sections.append(BudgetSection(
-                    "execution_feedback",
-                    f"## Execution Feedback\n{feedback}",
-                    max_tokens=budgets.mediator_report_tokens,
-                ))
+                sections.append(
+                    BudgetSection(
+                        "execution_feedback",
+                        f"## Execution Feedback\n{feedback}",
+                        max_tokens=budgets.mediator_report_tokens,
+                    )
+                )
             if history := context.get("edit_history"):
-                sections.append(BudgetSection(
-                    "recent_edit_history",
-                    f"## Recent Edit History\n{history}",
-                    max_tokens=budgets.historical_summary_tokens,
-                ))
-            sections.append(BudgetSection(
-                "response_schema",
-                UPDATE_RESPONSE_SCHEMA,
-                required=True,
-            ))
+                sections.append(
+                    BudgetSection(
+                        "recent_edit_history",
+                        f"## Recent Edit History\n{history}",
+                        max_tokens=budgets.historical_summary_tokens,
+                    )
+                )
+            sections.append(
+                BudgetSection(
+                    "response_schema",
+                    UPDATE_RESPONSE_SCHEMA,
+                    required=True,
+                )
+            )
             return pack_sections(model, sections, budget)
 
         parts = [
