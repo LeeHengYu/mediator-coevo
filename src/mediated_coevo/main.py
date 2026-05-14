@@ -11,7 +11,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Annotated, Any, cast, get_args
 
 import tomli_w
 import typer
@@ -319,6 +319,9 @@ def _apply_experiment_settings(
     condition_name: ConditionName | None = None,
     skill_updates: SkillUpdateConfig | None = None,
     baseline_preset: str | None = None,
+    coevo_interval: int | None = None,
+    advisor_buffer_max: int | None = None,
+    skill_validation_enabled: bool | None = None,
 ) -> Config:
     """Apply CLI experiment settings to a loaded config object."""
     config.experiment.num_iterations = iterations
@@ -328,6 +331,12 @@ def _apply_experiment_settings(
     if skill_updates is not None:
         config.experiment.skill_updates = skill_updates
     config.experiment.baseline_preset = baseline_preset
+    if coevo_interval is not None:
+        config.experiment.coevo_interval = coevo_interval
+    if advisor_buffer_max is not None:
+        config.experiment.advisor_buffer_max = advisor_buffer_max
+    if skill_validation_enabled is not None:
+        config.experiment.skill_validation.enabled = skill_validation_enabled
     return config
 
 
@@ -624,6 +633,17 @@ def _print_task_selection(
     console.print(f"[bold]Tasks:[/] {task_ids}")
     if tasks is None and task_set is not None:
         console.print(f"[bold]Task set:[/] {task_set}")
+
+
+def _print_experiment_controls(config: Config) -> None:
+    """Print shared co-evolution controls after config and CLI overrides apply."""
+    console.print(f"[bold]Coevo interval:[/] {config.experiment.coevo_interval}")
+    console.print(
+        f"[bold]Advisor buffer max:[/] {config.experiment.advisor_buffer_max}"
+    )
+    console.print(
+        f"[bold]Skill validation:[/] {config.experiment.skill_validation.enabled}"
+    )
 
 
 def _resolve_output_dir(output_dir: Path) -> Path:
@@ -1035,6 +1055,9 @@ def _run_swebench_experiment(
     timeout: int,
     max_workers: int,
     run_id: str | None,
+    coevo_interval: int | None = None,
+    advisor_buffer_max: int | None = None,
+    skill_validation_enabled: bool | None = None,
 ) -> None:
     random.seed(seed)
     config = _force_swebench_runtime(
@@ -1044,6 +1067,9 @@ def _run_swebench_experiment(
             seed=seed,
             condition_name=condition_name,
             skill_updates=skill_updates,
+            coevo_interval=coevo_interval,
+            advisor_buffer_max=advisor_buffer_max,
+            skill_validation_enabled=skill_validation_enabled,
         )
     )
     _validate_or_raise_bad_parameter(config)
@@ -1069,6 +1095,7 @@ def _run_swebench_experiment(
     console.print(f"[bold]Iterations:[/] {iterations}")
     console.print(f"[bold]Condition:[/] {condition_name}")
     console.print(f"[bold]Skill updates:[/] {skill_updates.model_dump()}")
+    _print_experiment_controls(config)
     console.print(f"[bold]Experiment:[/] {experiment_dir}")
 
     evolve_dir = experiment_dir / "evolve"
@@ -1158,6 +1185,29 @@ def run(
         "--skill-updates",
         help="Comma-separated skill updates allowed: none | executor | planner | mediator | all",
     ),
+    coevo_interval: Annotated[
+        int | None,
+        typer.Option(
+            "--coevo-interval",
+            min=1,
+            help="Override experiment.coevo_interval for this run.",
+        ),
+    ] = None,
+    advisor_buffer_max: Annotated[
+        int | None,
+        typer.Option(
+            "--advisor-buffer-max",
+            min=1,
+            help="Override experiment.advisor_buffer_max for this run.",
+        ),
+    ] = None,
+    skill_validation_enabled: Annotated[
+        bool | None,
+        typer.Option(
+            "--skill-validation/--no-skill-validation",
+            help="Enable or disable executor skill candidate validation.",
+        ),
+    ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -1177,6 +1227,9 @@ def run(
         seed=seed,
         condition_name=condition_name,
         skill_updates=skill_update_config,
+        coevo_interval=coevo_interval,
+        advisor_buffer_max=advisor_buffer_max,
+        skill_validation_enabled=skill_validation_enabled,
     )
 
     _validate_or_raise_bad_parameter(config)
@@ -1194,6 +1247,7 @@ def run(
     console.print(f"[bold]Iterations:[/] {iterations}")
     console.print(f"[bold]Condition:[/] {condition_name}")
     console.print(f"[bold]Skill updates:[/] {skill_update_config.model_dump()}")
+    _print_experiment_controls(config)
     console.print(
         "[bold]Models:[/] "
         f"planner={config.models.planner} "
@@ -1235,6 +1289,29 @@ def matrix(
     ),
     iterations: int = typer.Option(30, help="Number of iterations per row"),
     seed: int = typer.Option(42, help="Random seed reused for every row"),
+    coevo_interval: Annotated[
+        int | None,
+        typer.Option(
+            "--coevo-interval",
+            min=1,
+            help="Override experiment.coevo_interval for every matrix row.",
+        ),
+    ] = None,
+    advisor_buffer_max: Annotated[
+        int | None,
+        typer.Option(
+            "--advisor-buffer-max",
+            min=1,
+            help="Override experiment.advisor_buffer_max for every matrix row.",
+        ),
+    ] = None,
+    skill_validation_enabled: Annotated[
+        bool | None,
+        typer.Option(
+            "--skill-validation/--no-skill-validation",
+            help="Enable or disable executor skill candidate validation for every row.",
+        ),
+    ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -1245,6 +1322,9 @@ def matrix(
         load_config(config_dir),
         iterations=iterations,
         seed=seed,
+        coevo_interval=coevo_interval,
+        advisor_buffer_max=advisor_buffer_max,
+        skill_validation_enabled=skill_validation_enabled,
     )
     for preset_name in BASELINE_PRESET_NAMES:
         preset = get_baseline_preset(preset_name)
@@ -1275,6 +1355,7 @@ def matrix(
     _print_task_selection(task_ids=task_ids, tasks=tasks, task_set=task_set)
     console.print(f"[bold]Iterations per row:[/] {iterations}")
     console.print(f"[bold]Seed per row:[/] {seed}")
+    _print_experiment_controls(config)
     console.print(f"[bold]Matrix:[/] {matrix_dir}")
     console.print(f"[bold]Rows:[/] {', '.join(BASELINE_PRESET_NAMES)}")
 
@@ -1418,6 +1499,29 @@ def run_swebench(
         "--skill-updates",
         help="Comma-separated skill updates allowed during evolution: none | executor | planner | mediator | all",
     ),
+    coevo_interval: Annotated[
+        int | None,
+        typer.Option(
+            "--coevo-interval",
+            min=1,
+            help="Override experiment.coevo_interval for this run.",
+        ),
+    ] = None,
+    advisor_buffer_max: Annotated[
+        int | None,
+        typer.Option(
+            "--advisor-buffer-max",
+            min=1,
+            help="Override experiment.advisor_buffer_max for this run.",
+        ),
+    ] = None,
+    skill_validation_enabled: Annotated[
+        bool | None,
+        typer.Option(
+            "--skill-validation/--no-skill-validation",
+            help="Enable or disable executor skill candidate validation.",
+        ),
+    ] = None,
     run_id: str | None = typer.Option(
         None,
         "--run-id",
@@ -1478,6 +1582,9 @@ def run_swebench(
         timeout=timeout,
         max_workers=max_workers,
         run_id=run_id,
+        coevo_interval=coevo_interval,
+        advisor_buffer_max=advisor_buffer_max,
+        skill_validation_enabled=skill_validation_enabled,
     )
 
 
