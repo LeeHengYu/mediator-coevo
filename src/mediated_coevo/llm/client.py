@@ -1,15 +1,18 @@
-"""Universal LLM client via litellm.
+"""LLM client via LiteLLM/OpenRouter routing.
 
 Adapted from OpenSpace's openspace/llm/client.py — single class handles
-any provider (Anthropic, Google, OpenAI) through litellm routing.
+chat completions through LiteLLM. This project supports OpenRouter as the
+model credential boundary.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
-from typing import Any, Protocol, TypedDict, cast
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
 import litellm
 from litellm.types.utils import ModelResponse
@@ -24,6 +27,12 @@ litellm.set_verbose = False
 litellm.suppress_debug_info = True
 
 logger = logging.getLogger(__name__)
+
+OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+OPENROUTER_MODEL_PREFIX = "openrouter/"
+
+if TYPE_CHECKING:
+    from mediated_coevo.core.config import Config
 
 
 class CompletionResult(TypedDict):
@@ -40,6 +49,41 @@ class LLMUsageError(RuntimeError):
     """Raised when a LiteLLM response does not include required usage data."""
 
 
+class LLMCredentialError(RuntimeError):
+    """Raised when required OpenRouter model credentials are unavailable."""
+
+
+def normalize_openrouter_model(model: str) -> str:
+    """Return an OpenRouter-routed model ID."""
+    model = model.strip()
+    if not model:
+        raise LLMCredentialError("model names must be non-empty OpenRouter model IDs")
+    if model.startswith(OPENROUTER_MODEL_PREFIX):
+        return model
+    return f"{OPENROUTER_MODEL_PREFIX}{model}"
+
+
+def normalize_openrouter_models(config: "Config") -> "Config":
+    """Normalize planner/executor/mediator model IDs on a loaded config object."""
+    config.models.planner = normalize_openrouter_model(config.models.planner)
+    config.models.executor = normalize_openrouter_model(config.models.executor)
+    config.models.mediator = normalize_openrouter_model(config.models.mediator)
+    return config
+
+
+def validate_openrouter_credentials(
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Fail clearly when the only supported model credential is missing."""
+    source = os.environ if environ is None else environ
+    api_key = source.get(OPENROUTER_API_KEY_ENV, "")
+    if not api_key.strip():
+        raise LLMCredentialError(
+            f"{OPENROUTER_API_KEY_ENV} is required for all model calls. "
+            f"Export {OPENROUTER_API_KEY_ENV} before running experiments."
+        )
+
+
 class _UsageCounts(Protocol):
     prompt_tokens: int
     completion_tokens: int
@@ -51,10 +95,10 @@ class _UsageResponse(Protocol):
 
 
 class LLMClient:
-    """Single-round LLM call via litellm. One class, any provider.
+    """Single-round LLM call via LiteLLM/OpenRouter.
 
     Usage:
-        client = LLMClient(model="anthropic/claude-opus-4")
+        client = LLMClient(model="openrouter/anthropic/claude-opus-4")
         result = await client.complete("Hello, world!")
         print(result["content"])
     """

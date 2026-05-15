@@ -311,6 +311,22 @@ def _ensure_harbor_available(config: Config) -> None:
         raise typer.Exit(code=1)
 
 
+def _prepare_llm_credentials_or_exit(config: Config) -> Config:
+    from mediated_coevo.llm.client import (
+        LLMCredentialError,
+        normalize_openrouter_models,
+        validate_openrouter_credentials,
+    )
+
+    try:
+        normalize_openrouter_models(config)
+        validate_openrouter_credentials()
+    except LLMCredentialError as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    return config
+
+
 def _apply_experiment_settings(
     config: Config,
     *,
@@ -1076,6 +1092,7 @@ def _run_swebench_experiment(
         )
     )
     _validate_or_raise_bad_parameter(config)
+    _prepare_llm_credentials_or_exit(config)
     try:
         swebench_helpers.validate_modal_credentials()
     except RuntimeError as exc:
@@ -1237,6 +1254,7 @@ def run(
 
     _validate_or_raise_bad_parameter(config)
     preflight_task_ids = _preflight_task_ids_from_cli(tasks, task_set)
+    _prepare_llm_credentials_or_exit(config)
     _ensure_harbor_available(config)
 
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
@@ -1337,6 +1355,7 @@ def matrix(
             baseline_preset=preset.name,
         )
     preflight_task_ids = _preflight_task_ids_from_cli(tasks, task_set)
+    _prepare_llm_credentials_or_exit(config)
     _ensure_harbor_available(config)
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
     task_ids = preflight_task_ids or _task_ids_from_cli_with_repo(

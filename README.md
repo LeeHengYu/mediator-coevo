@@ -98,12 +98,15 @@ docker --version
 docker compose version
 ```
 
-The default config uses OpenRouter model IDs for Planner, Executor, and
-Mediator, so export an OpenRouter key before normal experiments:
+The project uses OpenRouter as the only supported model credential. Export an
+OpenRouter key before normal experiments:
 
 ```
 export OPENROUTER_API_KEY=...
 ```
+
+Model names are routed through OpenRouter. If a configured model omits the
+`openrouter/` prefix, the CLI adds it before writing run configs.
 
 Run one selected task for one smoke iteration:
 
@@ -183,7 +186,7 @@ Potential Troubleshooting Procedures:
 
 - `harbor CLI not found on PATH`: run `uv tool install harbor`, then confirm `harbor --version`. For CI-only orchestrator checks that intentionally do not call Harbor, set `executor_runtime.harbor_required = false` in `config/default.toml`.
 - Docker or Compose errors in SkillsBench/Harbor runs: start Docker Desktop or Colima, then confirm `docker --version` and `docker compose version`. SWE-bench runs use Modal instead of local Docker.
-- Model credential errors: export `OPENROUTER_API_KEY` for the default `openrouter/...` models, or change `config/default.toml` and export the key required by the configured provider.
+- Model credential errors: export `OPENROUTER_API_KEY`. Model IDs are normalized to `openrouter/...`; other provider-specific credential variables are not used.
 - Missing benchmark task: pre-cache selected tasks with `uv run medcoevo skillsbench sync --tasks <task-id>` or `uv run medcoevo skillsbench sync --task-set skillsbench-10`. If `executor_runtime.remote_fetch = false`, the task must already exist under `benchmarks/skillsbench/tasks/`.
 
 ### Task Selection
@@ -328,7 +331,8 @@ uv run pytest tests/test_skillsbench_integration.py -m integration -v -s
 The integration test uses Harbor's `opencode` agent with
 `openrouter/google/<model>` by default. Source the shell
 environment that exports `OPENROUTER_API_KEY` before running it, or override
-with `MEDIATED_COEVO_INTEGRATION_AGENT` and `MEDIATED_COEVO_INTEGRATION_MODEL`.
+with `MEDIATED_COEVO_INTEGRATION_AGENT` and an OpenRouter-routed
+`MEDIATED_COEVO_INTEGRATION_MODEL`.
 
 ### Two Distinct Skill Update Flows
 

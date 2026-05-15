@@ -484,7 +484,7 @@ def test_swebench_run_cli_requires_evolution_and_eval_selection():
     result = CliRunner().invoke(app, ["swebench", "run"])
 
     assert result.exit_code != 0
-    assert "provide --evolve-instance-id or --evolve-limit" in result.stdout
+    assert "provide --evolve-instance-id or --evolve-limit" in result.output
 
 
 def test_swebench_run_cli_fails_when_evolve_and_eval_overlap(monkeypatch):
@@ -508,7 +508,7 @@ def test_swebench_run_cli_fails_when_evolve_and_eval_overlap(monkeypatch):
     )
 
     assert result.exit_code != 0
-    assert "must be disjoint" in result.stdout
+    assert "must be disjoint" in result.output
 
 
 def test_swebench_run_cli_delegates_integrated_experiment(monkeypatch):
@@ -660,6 +660,7 @@ def test_swebench_experiment_does_not_check_harbor_availability(
     def fail_harbor_check(_: Config) -> None:
         raise AssertionError("SWE-bench should not check Harbor availability")
 
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setattr(main_module, "load_config", lambda _: config)
     monkeypatch.setattr(main_module, "_validate_or_raise_bad_parameter", lambda _: None)
     monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_harbor_check)
