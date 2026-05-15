@@ -148,6 +148,33 @@ def test_environment_failures_are_not_scored_even_with_reward():
     assert summary.mean_reward == pytest.approx(1.0)
 
 
+def test_single_scored_task_does_not_warn_about_dominance():
+    records = [
+        _record("task-a", 1.0, iteration=0),
+        _record("task-a", 0.0, iteration=1),
+    ]
+
+    summary = build_score_summary(records, bootstrap_samples=50)
+
+    assert summary.scored_count == 2
+    assert summary.dominant_task_id == "task-a"
+    assert summary.max_task_scored_share == pytest.approx(1.0)
+    assert summary.dominance_warning is False
+
+
+def test_balanced_scored_tasks_do_not_warn_about_dominance():
+    records = [
+        _record("task-a", 1.0, iteration=0),
+        _record("task-b", 0.0, iteration=0),
+    ]
+
+    summary = build_score_summary(records, bootstrap_samples=50)
+
+    assert summary.scored_count == 2
+    assert summary.max_task_scored_share == pytest.approx(0.5)
+    assert summary.dominance_warning is False
+
+
 def test_all_unscored_summary_has_no_dominant_task():
     summary = build_score_summary(
         [_record("task-a", None, status="env_failure")],

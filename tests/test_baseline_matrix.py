@@ -222,7 +222,7 @@ def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path
 
     monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_if_called)
 
-    with pytest.raises(typer.BadParameter, match="provide --tasks or --task-set"):
+    with pytest.raises(typer.BadParameter, match="provide at least one SkillsBench"):
         main_module.run(
             tasks=None,
             task_set=None,

@@ -19,7 +19,11 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from mediated_coevo.agents.executor import ExecutorAgent, SWEbenchExecutorAgent
+from mediated_coevo.agents.executor import (
+    ExecutorAgent,
+    RoutedExecutorAgent,
+    SWEbenchExecutorAgent,
+)
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.swebench_patch_generator import LLMSWEbenchPatchGenerator
@@ -35,6 +39,11 @@ from mediated_coevo.benchmarks import (
     SkillsBenchFetchError,
     SkillsBenchRemoteConfig,
     SkillsBenchRepository,
+)
+from mediated_coevo.benchmarks.mixed import (
+    BenchmarkTaskSelection,
+    MixedBenchmarkRepository,
+    build_benchmark_task_selection,
 )
 from mediated_coevo.benchmarks import swebench as swebench_helpers
 from mediated_coevo.benchmarks.task_sets import (
@@ -221,6 +230,29 @@ def _task_ids_from_cli(tasks: str | None, task_set: str | None) -> list[str]:
         raise typer.BadParameter(str(exc)) from exc
 
 
+def _task_ids_from_repeatable_cli(
+    raw_values: list[str] | None,
+    *,
+    label: str,
+) -> list[str]:
+    """Parse repeatable comma-separated task options."""
+    if not raw_values:
+        return []
+    task_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        for candidate in raw_value.split(","):
+            task_id = candidate.strip()
+            if not task_id:
+                continue
+            if task_id not in seen:
+                task_ids.append(task_id)
+                seen.add(task_id)
+    if not task_ids:
+        raise typer.BadParameter(f"at least one {label} is required")
+    return task_ids
+
+
 def _build_benchmark_repo(project_root: Path, config: Config) -> SkillsBenchRepository:
     return SkillsBenchRepository(
         root_dir=project_root / config.paths.benchmarks_dir,
@@ -275,6 +307,106 @@ def _task_ids_from_cli_with_repo(
     if task_set_name == SKILLSBENCH_ALL_TASK_SET:
         return _skillsbench_all_task_ids(benchmark_repo)
     return _task_ids_from_cli(tasks, task_set)
+
+
+def _skillsbench_task_ids_from_unified_cli(
+    *,
+    skillsbench_tasks: list[str] | None,
+    skillsbench_task_set: str | None,
+    legacy_tasks: str | None,
+    legacy_task_set: str | None,
+    benchmark_repo: SkillsBenchRepository,
+) -> list[str]:
+    """Resolve SkillsBench selections from new options and legacy aliases."""
+    if skillsbench_tasks and legacy_tasks is not None:
+        raise typer.BadParameter(
+            "cannot combine --skillsbench-task with legacy --tasks"
+        )
+    if skillsbench_task_set is not None and legacy_task_set is not None:
+        raise typer.BadParameter(
+            "cannot combine --skillsbench-task-set with legacy --task-set"
+        )
+
+    explicit_tasks = _task_ids_from_repeatable_cli(
+        skillsbench_tasks,
+        label="SkillsBench task",
+    )
+    if explicit_tasks:
+        return explicit_tasks
+    if legacy_tasks is not None:
+        return _task_ids_from_cli_with_repo(legacy_tasks, None, benchmark_repo)
+
+    task_set = (
+        skillsbench_task_set
+        if skillsbench_task_set is not None
+        else legacy_task_set
+    )
+    if task_set is not None:
+        return _task_ids_from_cli_with_repo(None, task_set, benchmark_repo)
+    return []
+
+
+def _swebench_instance_ids_from_unified_cli(
+    *,
+    swebench_instances: list[str] | None,
+    swebench_limit: int | None,
+    dataset_name: str,
+    split: str,
+) -> list[str]:
+    """Resolve optional SWE-bench selections without defaulting to smoke IDs."""
+    if not swebench_instances and swebench_limit is None:
+        return []
+    try:
+        return swebench_helpers.resolve_swebench_instance_ids(
+            dataset_name=dataset_name,
+            split=split,
+            raw_instance_ids=swebench_instances,
+            limit=swebench_limit,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _resolve_unified_task_selection(
+    *,
+    skillsbench_tasks: list[str] | None,
+    skillsbench_task_set: str | None,
+    legacy_tasks: str | None,
+    legacy_task_set: str | None,
+    swebench_instances: list[str] | None,
+    swebench_limit: int | None,
+    dataset_name: str,
+    split: str,
+    benchmark_repo: SkillsBenchRepository,
+) -> BenchmarkTaskSelection:
+    """Resolve all benchmark selections for a unified evolution run."""
+    skillsbench_task_ids = _skillsbench_task_ids_from_unified_cli(
+        skillsbench_tasks=skillsbench_tasks,
+        skillsbench_task_set=skillsbench_task_set,
+        legacy_tasks=legacy_tasks,
+        legacy_task_set=legacy_task_set,
+        benchmark_repo=benchmark_repo,
+    )
+    swebench_instance_ids = _swebench_instance_ids_from_unified_cli(
+        swebench_instances=swebench_instances,
+        swebench_limit=swebench_limit,
+        dataset_name=dataset_name,
+        split=split,
+    )
+    try:
+        selection = build_benchmark_task_selection(
+            skillsbench_task_ids=skillsbench_task_ids,
+            swebench_instance_ids=swebench_instance_ids,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not selection.task_ids:
+        raise typer.BadParameter(
+            "provide at least one SkillsBench task or SWE-bench instance "
+            "(--skillsbench-task/--skillsbench-task-set/--tasks/--task-set or "
+            "--swebench-instance/--swebench-limit)"
+        )
+    return selection
 
 
 def _preflight_task_ids_from_cli(
@@ -668,6 +800,11 @@ def _resolve_output_dir(output_dir: Path) -> Path:
     return PROJECT_ROOT / output_dir
 
 
+def _timestamped_run_id(suffix: str) -> str:
+    """Return a run ID with a timestamp prefix and caller-provided suffix."""
+    return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
+
+
 def _print_swebench_instances(
     instances: list[swebench_helpers.SWEbenchInstanceInfo],
 ) -> None:
@@ -727,9 +864,7 @@ def _run_swebench_eval(
         console.print(f"[bold red]ERROR:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
-    resolved_run_id = run_id or datetime.now().strftime(
-        f"%Y%m%d-%H%M%S-{run_id_suffix}"
-    )
+    resolved_run_id = _timestamped_run_id(run_id or run_id_suffix)
     resolved_output_dir = _resolve_output_dir(output_dir)
     raw_output_root = resolved_output_dir / resolved_run_id / "raw"
     raw_output_root.mkdir(parents=True, exist_ok=True)
@@ -842,9 +977,7 @@ def _prepare_swebench_experiment_root(
     seed: int,
     run_id: str | None,
 ) -> tuple[Path, Path]:
-    resolved_run_id = run_id or datetime.now().strftime(
-        f"%Y%m%d-%H%M%S-{seed}-swebench"
-    )
+    resolved_run_id = _timestamped_run_id(run_id or f"{seed}-swebench")
     experiment_dir = (
         PROJECT_ROOT / config.paths.data_dir / "experiments" / resolved_run_id
     )
@@ -951,6 +1084,224 @@ def _build_swebench_executor(
         timeout=timeout,
         max_workers=max_workers,
         run_id_prefix=run_id_prefix,
+    )
+
+
+def _prepare_unified_experiment_root(
+    *,
+    config: Config,
+    seed: int,
+    run_id: str | None,
+    suffix: str,
+) -> tuple[Path, Path]:
+    resolved_run_id = _timestamped_run_id(run_id or f"{seed}-{suffix}")
+    experiment_dir = (
+        PROJECT_ROOT / config.paths.data_dir / "experiments" / resolved_run_id
+    )
+    experiment_dir.mkdir(parents=True, exist_ok=False)
+    runtime_skills_dir = shutil.copytree(
+        PROJECT_ROOT / config.paths.skills_dir,
+        experiment_dir / "skills",
+    )
+    with open(experiment_dir / "config.toml", "wb") as f:
+        tomli_w.dump(config.model_dump(exclude_none=True), f)
+    return experiment_dir, runtime_skills_dir
+
+
+def _build_unified_runtime(
+    *,
+    config: Config,
+    selection: BenchmarkTaskSelection,
+    condition_name: ConditionName,
+    runtime_skills_dir: Path,
+    experiment_dir: Path,
+    dataset_name: str,
+    split: str,
+    timeout: int,
+    max_workers: int,
+) -> ExperimentRuntime:
+    """Build one orchestrator that can route across selected benchmark backends."""
+    from mediated_coevo.llm.client import LLMClient
+
+    validate_experiment_design(
+        condition=condition_name,
+        skill_updates=config.experiment.skill_updates,
+        baseline_preset=config.experiment.baseline_preset,
+    )
+    skill_store = SkillStore(runtime_skills_dir)
+    skill_store.validate()
+    artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
+    history_store = HistoryStore(history_dir=experiment_dir / "history")
+
+    skillsbench_repo = (
+        _build_benchmark_repo(PROJECT_ROOT, config)
+        if selection.has_skillsbench
+        else None
+    )
+    swebench_repo = (
+        swebench_helpers.SWEbenchRepository(dataset_name=dataset_name, split=split)
+        if selection.has_swebench
+        else None
+    )
+    benchmark_repo = MixedBenchmarkRepository(
+        benchmark_by_task_id=selection.benchmark_by_task_id,
+        skillsbench_repo=skillsbench_repo,
+        swebench_repo=swebench_repo,
+    )
+
+    skillsbench_executor = None
+    if selection.has_skillsbench:
+        assert skillsbench_repo is not None
+        skillsbench_executor = ExecutorAgent(
+            model=config.models.executor,
+            benchmark_repo=skillsbench_repo,
+            harbor_runner=HarborRunner(
+                agent_name=config.executor_runtime.agent_name,
+                jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
+                timeout_sec=config.executor_runtime.harbor_timeout_sec,
+            ),
+            workspace_root=experiment_dir / "benchmarks",
+            injected_skill_name=config.executor_runtime.injected_skill_name,
+        )
+
+    swebench_executor = None
+    if selection.has_swebench:
+        assert swebench_repo is not None
+        swebench_executor = _build_swebench_executor(
+            config=config,
+            benchmark_repo=swebench_repo,
+            phase_dir=experiment_dir,
+            timeout=timeout,
+            max_workers=max_workers,
+            run_id_prefix=experiment_dir.name,
+        )
+
+    planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
+    planner.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
+    executor = RoutedExecutorAgent(
+        benchmark_by_task_id=selection.benchmark_by_task_id,
+        skillsbench_executor=skillsbench_executor,
+        swebench_executor=swebench_executor,
+    )
+    mediator = MediatorAgent(
+        llm_client=LLMClient(model=config.models.mediator),
+        artifact_store=artifact_store,
+    )
+    mediator.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
+    protocol = skill_store.read_skill("mediator")
+    if protocol:
+        mediator.load_protocol(protocol)
+    skill_advisor = SkillAdvisor(llm_client=LLMClient(model=config.models.planner))
+    skill_advisor.configure_token_budget(
+        config.budgets,
+        condition_name=config.experiment.condition_name,
+    )
+
+    return ExperimentRuntime(
+        experiment_dir=experiment_dir,
+        orchestrator=Orchestrator(
+            planner=planner,
+            executor=executor,  # type: ignore[arg-type]
+            mediator=mediator,
+            skill_store=skill_store,
+            artifact_store=artifact_store,
+            history_store=history_store,
+            benchmark_repo=benchmark_repo,  # type: ignore[arg-type]
+            config=config,
+            experiment_dir=experiment_dir,
+            skill_advisor=skill_advisor,
+        ),
+    )
+
+
+def _print_unified_task_selection(selection: BenchmarkTaskSelection) -> None:
+    if selection.skillsbench_task_ids:
+        console.print(f"[bold]SkillsBench tasks:[/] {selection.skillsbench_task_ids}")
+    if selection.swebench_instance_ids:
+        console.print(f"[bold]SWE-bench instances:[/] {selection.swebench_instance_ids}")
+    console.print(f"[bold]Executor backend:[/] {selection.backend_name}")
+
+
+def _run_unified_experiment(
+    *,
+    config: Config,
+    selection: BenchmarkTaskSelection,
+    iterations: int,
+    seed: int,
+    condition_name: ConditionName,
+    dataset_name: str,
+    split: str,
+    timeout: int,
+    max_workers: int,
+    run_id: str | None,
+) -> None:
+    """Run SkillsBench, SWE-bench, or mixed selections in one evolution loop."""
+    random.seed(seed)
+    config.executor_runtime.backend = selection.backend_name
+    config.experiment.benchmark_selection.skillsbench_tasks = (
+        selection.skillsbench_task_ids
+    )
+    config.experiment.benchmark_selection.swebench_instances = (
+        selection.swebench_instance_ids
+    )
+
+    _prepare_llm_credentials_or_exit(config)
+    if selection.has_skillsbench:
+        _ensure_harbor_available(config)
+    if selection.has_swebench:
+        try:
+            swebench_helpers.validate_modal_credentials()
+        except RuntimeError as exc:
+            console.print(f"[bold red]ERROR:[/] {exc}")
+            raise typer.Exit(code=1) from exc
+
+    experiment_dir, runtime_skills_dir = _prepare_unified_experiment_root(
+        config=config,
+        seed=seed,
+        run_id=run_id,
+        suffix=selection.backend_name,
+    )
+    runtime = _build_unified_runtime(
+        config=config,
+        selection=selection,
+        condition_name=condition_name,
+        runtime_skills_dir=runtime_skills_dir,
+        experiment_dir=experiment_dir,
+        dataset_name=dataset_name,
+        split=split,
+        timeout=timeout,
+        max_workers=max_workers,
+    )
+
+    _print_unified_task_selection(selection)
+    if selection.has_swebench:
+        console.print(f"[bold]SWE-bench dataset:[/] {dataset_name} ({split})")
+    console.print(f"[bold]Iterations:[/] {iterations}")
+    console.print(f"[bold]Condition:[/] {condition_name}")
+    console.print(
+        f"[bold]Skill updates:[/] {config.experiment.skill_updates.model_dump()}"
+    )
+    _print_experiment_controls(config)
+    console.print(
+        "[bold]Models:[/] "
+        f"planner={config.models.planner} "
+        f"executor={config.models.executor} "
+        f"mediator={config.models.mediator}"
+    )
+    console.print(f"\n[bold green]Starting experiment:[/] {runtime.experiment_dir}\n")
+    records = asyncio.run(
+        runtime.orchestrator.run_experiment(selection.task_ids, iterations)
+    )
+    _write_and_print_result_summary(
+        records=records,
+        data_dir=runtime.experiment_dir,
+        header="Results",
     )
 
 
@@ -1181,30 +1532,96 @@ def _run_swebench_experiment(
 
 @app.command()
 def run(
-    tasks: str | None = typer.Option(
-        None,
-        "--tasks",
-        help="Comma-separated task IDs. Overrides --task-set when provided.",
-    ),
-    task_set: str | None = typer.Option(
-        None,
-        "--task-set",
-        help=(
-            "Named task set to run when --tasks is omitted. "
-            f"Available: {_available_task_set_help()}"
+    skillsbench_tasks: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skillsbench-task",
+            help=(
+                "SkillsBench task ID. Repeat the option or provide comma-separated "
+                "IDs. Overrides --skillsbench-task-set."
+            ),
         ),
-    ),
-    iterations: int = typer.Option(30, help="Number of iterations"),
-    seed: int = typer.Option(42, help="Random seed"),
-    condition: str = typer.Option(
-        "learned_mediator",
-        help="Experiment condition: no_feedback | full_traces | shared_notes | static_mediator | learned_mediator",
-    ),
-    skill_updates: str = typer.Option(
-        "all",
-        "--skill-updates",
-        help="Comma-separated skill updates allowed: none | executor | planner | mediator | all",
-    ),
+    ] = None,
+    skillsbench_task_set: Annotated[
+        str | None,
+        typer.Option(
+            "--skillsbench-task-set",
+            help=(
+                "Named SkillsBench task set. "
+                f"Available: {_available_task_set_help()}"
+            ),
+        ),
+    ] = None,
+    swebench_instances: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--swebench-instance",
+            help=(
+                "SWE-bench instance ID. Repeat the option or provide "
+                "comma-separated IDs."
+            ),
+        ),
+    ] = None,
+    swebench_limit: Annotated[
+        int | None,
+        typer.Option(
+            "--swebench-limit",
+            min=1,
+            help="Use the first N instances from the selected SWE-bench split.",
+        ),
+    ] = None,
+    tasks: Annotated[
+        str | None,
+        typer.Option(
+            "--tasks",
+            help=(
+                "Legacy alias for comma-separated --skillsbench-task IDs. "
+                "Overrides --task-set."
+            ),
+        ),
+    ] = None,
+    task_set: Annotated[
+        str | None,
+        typer.Option(
+            "--task-set",
+            help="Legacy alias for --skillsbench-task-set.",
+        ),
+    ] = None,
+    dataset_name: Annotated[
+        str,
+        typer.Option(
+            "--swebench-dataset-name",
+            help="SWE-bench dataset name or local dataset path.",
+        ),
+    ] = swebench_helpers.DEFAULT_SWEBENCH_DATASET,
+    split: Annotated[
+        str,
+        typer.Option(
+            "--swebench-split",
+            help="SWE-bench dataset split to use.",
+        ),
+    ] = swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
+    iterations: Annotated[int, typer.Option(help="Number of iterations")] = 30,
+    seed: Annotated[int, typer.Option(help="Random seed")] = 42,
+    condition: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Experiment condition: no_feedback | full_traces | shared_notes | "
+                "static_mediator | learned_mediator"
+            ),
+        ),
+    ] = "learned_mediator",
+    skill_updates: Annotated[
+        str,
+        typer.Option(
+            "--skill-updates",
+            help=(
+                "Comma-separated skill updates allowed: none | executor | planner | "
+                "mediator | all"
+            ),
+        ),
+    ] = "all",
     coevo_interval: Annotated[
         int | None,
         typer.Option(
@@ -1228,12 +1645,40 @@ def run(
             help="Enable or disable executor skill candidate validation.",
         ),
     ] = None,
-    config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
+    run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--run-id",
+            help=(
+                "Run ID suffix. The actual experiment directory is prefixed with "
+                "a timestamp."
+            ),
+        ),
+    ] = None,
+    timeout: Annotated[
+        int,
+        typer.Option(
+            "--timeout",
+            min=1,
+            help="Per-SWE-bench-instance test timeout in seconds.",
+        ),
+    ] = 1800,
+    max_workers: Annotated[
+        int,
+        typer.Option(
+            "--max-workers",
+            min=1,
+            help="SWE-bench Modal harness worker count.",
+        ),
+    ] = 1,
+    config_dir: Annotated[
+        Path,
+        typer.Option(help="Config directory"),
+    ] = PROJECT_ROOT / "config",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run a mediated co-evolution experiment."""
+    """Run a unified SkillsBench, SWE-bench, or mixed co-evolution experiment."""
     _setup_logging(verbose)
-    random.seed(seed)
 
     condition_name = _validate_condition_name(condition)
     try:
@@ -1253,43 +1698,29 @@ def run(
     )
 
     _validate_or_raise_bad_parameter(config)
-    preflight_task_ids = _preflight_task_ids_from_cli(tasks, task_set)
-    _prepare_llm_credentials_or_exit(config)
-    _ensure_harbor_available(config)
-
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
-    task_ids = preflight_task_ids or _task_ids_from_cli_with_repo(
-        tasks,
-        task_set,
-        benchmark_repo,
-    )
-
-    _print_task_selection(task_ids=task_ids, tasks=tasks, task_set=task_set)
-    console.print(f"[bold]Iterations:[/] {iterations}")
-    console.print(f"[bold]Condition:[/] {condition_name}")
-    console.print(f"[bold]Skill updates:[/] {skill_update_config.model_dump()}")
-    _print_experiment_controls(config)
-    console.print(
-        "[bold]Models:[/] "
-        f"planner={config.models.planner} "
-        f"executor={config.models.executor} "
-        f"mediator={config.models.mediator}"
-    )
-
-    runtime = ExperimentFactory(PROJECT_ROOT).build(
-        config=config,
-        seed=seed,
-        condition_name=condition_name,
+    selection = _resolve_unified_task_selection(
+        skillsbench_tasks=skillsbench_tasks,
+        skillsbench_task_set=skillsbench_task_set,
+        legacy_tasks=tasks,
+        legacy_task_set=task_set,
+        swebench_instances=swebench_instances,
+        swebench_limit=swebench_limit,
+        dataset_name=dataset_name,
+        split=split,
         benchmark_repo=benchmark_repo,
     )
-
-    console.print(f"\n[bold green]Starting experiment:[/] {runtime.experiment_dir}\n")
-    records = asyncio.run(runtime.orchestrator.run_experiment(task_ids, iterations))
-
-    _write_and_print_result_summary(
-        records=records,
-        data_dir=runtime.experiment_dir,
-        header="Results",
+    _run_unified_experiment(
+        config=config,
+        selection=selection,
+        iterations=iterations,
+        seed=seed,
+        condition_name=condition_name,
+        dataset_name=dataset_name,
+        split=split,
+        timeout=timeout,
+        max_workers=max_workers,
+        run_id=run_id,
     )
 
 
@@ -1547,7 +1978,10 @@ def run_swebench(
     run_id: str | None = typer.Option(
         None,
         "--run-id",
-        help="Experiment directory name. Defaults to a timestamped SWE-bench run ID.",
+        help=(
+            "Run ID suffix. The actual experiment directory is prefixed with "
+            "a timestamp."
+        ),
     ),
     timeout: int = typer.Option(
         1800,
@@ -1638,7 +2072,10 @@ def smoke_swebench(
     run_id: str | None = typer.Option(
         None,
         "--run-id",
-        help="Run identifier. Defaults to a timestamped SWE-bench smoke ID.",
+        help=(
+            "Run ID suffix. The actual SWE-bench run ID is prefixed with "
+            "a timestamp."
+        ),
     ),
     timeout: int = typer.Option(
         1800,

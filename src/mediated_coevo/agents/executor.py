@@ -15,6 +15,7 @@ from mediated_coevo.benchmarks import (
     SkillsBenchRepository,
     parse_execution_trace,
 )
+from mediated_coevo.benchmarks.mixed import BenchmarkKind
 from mediated_coevo.benchmarks import swebench as swebench_helpers
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 
@@ -392,6 +393,70 @@ class SWEbenchExecutorAgent:
             harbor_metadata={
                 "verifier_type": swebench_helpers.SWEBENCH_VERIFIER_TYPE,
             },
+        )
+
+
+class RoutedExecutorAgent:
+    """Route task execution to the selected benchmark-specific executor."""
+
+    def __init__(
+        self,
+        *,
+        benchmark_by_task_id: dict[str, BenchmarkKind],
+        skillsbench_executor: ExecutorAgent | None = None,
+        swebench_executor: SWEbenchExecutorAgent | None = None,
+    ) -> None:
+        self._benchmark_by_task_id = dict(benchmark_by_task_id)
+        self._skillsbench_executor = skillsbench_executor
+        self._swebench_executor = swebench_executor
+
+    async def execute_task(
+        self,
+        task_spec: TaskSpec,
+        skills: list[str],
+    ) -> ExecutionTrace:
+        start = time.time()
+        benchmark = self._benchmark_by_task_id.get(task_spec.task_id)
+        if benchmark == "skillsbench":
+            if self._skillsbench_executor is None:
+                return self._env_failure(
+                    task_spec,
+                    start,
+                    "executor_not_configured",
+                    "SkillsBench executor is not configured",
+                )
+            return await self._skillsbench_executor.execute_task(task_spec, skills)
+        if benchmark == "swebench":
+            if self._swebench_executor is None:
+                return self._env_failure(
+                    task_spec,
+                    start,
+                    "executor_not_configured",
+                    "SWE-bench executor is not configured",
+                )
+            return await self._swebench_executor.execute_task(task_spec, skills)
+        return self._env_failure(
+            task_spec,
+            start,
+            "task_not_selected",
+            f"Task {task_spec.task_id!r} is not selected for this run",
+        )
+
+    def _env_failure(
+        self,
+        task_spec: TaskSpec,
+        start: float,
+        error_kind: str,
+        error_detail: str,
+    ) -> ExecutionTrace:
+        return ExecutionTrace(
+            task_id=task_spec.task_id,
+            iteration=task_spec.iteration,
+            duration_sec=time.time() - start,
+            exit_code=-1,
+            status="env_failure",
+            error_kind=error_kind,
+            error_detail=error_detail,
         )
 
 

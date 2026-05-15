@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -468,7 +469,11 @@ def test_swebench_smoke_cli_runs_harness_and_writes_outputs(monkeypatch, tmp_pat
     command = captured["command"]
     assert isinstance(command, list)
     assert captured["stream_output"] is True
-    assert captured["cwd"] == tmp_path / "out" / "smoke-run" / "raw"
+    raw_dir = captured["cwd"]
+    assert isinstance(raw_dir, Path)
+    run_dir = raw_dir.parent
+    assert raw_dir == run_dir / "raw"
+    assert re.fullmatch(r"\d{8}-\d{6}-smoke-run", run_dir.name)
     assert command[command.index("--report_dir") + 1] == "."
     assert command[-4:] == [
         "sympy__sympy-20590",
@@ -476,8 +481,8 @@ def test_swebench_smoke_cli_runs_harness_and_writes_outputs(monkeypatch, tmp_pat
         "--modal",
         "true",
     ]
-    assert (tmp_path / "out" / "smoke-run" / "traces.jsonl").exists()
-    assert (tmp_path / "out" / "smoke-run" / "raw").exists()
+    assert (run_dir / "traces.jsonl").exists()
+    assert raw_dir.exists()
 
 
 def test_swebench_run_cli_requires_evolution_and_eval_selection():
@@ -561,7 +566,7 @@ def test_common_experiment_override_flags_are_shared_by_benchmark_clis():
     runner = CliRunner()
 
     cases = (
-        (["run"], "provide --tasks or --task-set"),
+        (["run"], "provide at least one SkillsBench"),
         (["matrix"], "provide --tasks or --task-set"),
         (["swebench", "run"], "provide --evolve-instance-id or --evolve-limit"),
     )
@@ -620,6 +625,7 @@ def test_swebench_runtime_backend_is_persisted(tmp_path, monkeypatch):
         run_id="swebench-test",
     )
 
+    assert re.fullmatch(r"\d{8}-\d{6}-swebench-test", experiment_dir.name)
     saved = tomllib.loads((experiment_dir / "config.toml").read_text())
     assert saved["executor_runtime"]["backend"] == "swebench"
     assert saved["experiment"]["coevo_interval"] == 2

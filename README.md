@@ -53,10 +53,12 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 ## Current Implementation
 
 - Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
-- Executor runs a vendored local SkillsBench-style Harbor task and parses the Harbor job reward, optional CTRF diagnostics, and agent logs into `ExecutionTrace`.
+- Executor routes each selected task to either the SkillsBench/Harbor runtime or
+  the SWE-bench patch-generation + Modal harness runtime, then normalizes the
+  result into `ExecutionTrace`.
 - The local benchmark task tree lives under `benchmarks/skillsbench/`. Selected tasks, including the curated `skillsbench-10` tasks, are cached under `benchmarks/skillsbench/tasks/`.
 - Missing SkillsBench tasks are fetched on demand from the configured SkillsBench archive by default; fetched tasks are cached under `benchmarks/skillsbench/tasks/`.
-- A curated `skillsbench-10` task set is available via `--task-set skillsbench-10` for broad early experiments across build, control, networking, logistics, documents, science, visualization, and parsing tasks. `--task-set skillsbench-all` dynamically discovers local and remote task IDs, then fetches each missing task lazily as it runs.
+- A curated `skillsbench-10` task set is available via `--skillsbench-task-set skillsbench-10` for broad early experiments across build, control, networking, logistics, documents, science, visualization, and parsing tasks. `--skillsbench-task-set skillsbench-all` dynamically discovers local and remote task IDs, then fetches each missing task lazily as it runs.
 - Experiment conditions selectable via `--condition` (`no_feedback` | `full_traces` | `shared_notes` | `static_mediator` | `learned_mediator`).
 - Skill update permissions are independently selectable via `--skill-updates` (`none` | `executor` | `planner` | `mediator` | `all`, comma-separated except for `none` and `all`). Invalid condition/update combinations fail before Harbor, LLM, directory, artifact, or benchmark side effects.
 - Previous-report state is task-keyed; cross-task feedback is opt-in via `experiment.allow_cross_task_feedback` (default `false`).
@@ -68,7 +70,7 @@ User → Claude (plans) ──── task goal (unmodified) ───► Gemini 
 Use `uv run medcoevo --help` to see the top-level commands:
 
 ```
-uv run medcoevo run
+uv run medcoevo run --skillsbench-task fix-build-google-auto
 uv run medcoevo matrix
 uv run medcoevo inspect
 uv run medcoevo skillsbench sync
@@ -111,7 +113,13 @@ Model names are routed through OpenRouter. If a configured model omits the
 Run one selected task for one smoke iteration:
 
 ```
-uv run medcoevo run --tasks fix-build-google-auto --iterations 1 --seed 42
+uv run medcoevo run --skillsbench-task fix-build-google-auto --iterations 1 --seed 42
+```
+
+Run one SkillsBench task and one SWE-bench instance in a shared evolution loop:
+
+```
+uv run medcoevo run --skillsbench-task fix-build-google-auto --swebench-instance sympy__sympy-13915 --iterations 4 --advisor-buffer-max 2 --coevo-interval 1 --skill-validation
 ```
 
 Run the six-row baseline matrix on the curated multi-task set:
@@ -137,8 +145,18 @@ user-created task names. List a few valid IDs before running an evaluation:
 uv run medcoevo swebench list-instances --limit 20
 ```
 
-Run selected evolution and frozen-eval instances through the official SWE-bench
-Modal harness:
+For SWE-bench-only co-evolution, use the unified `run` command:
+
+```
+uv run medcoevo run --swebench-instance django__django-11910 --iterations 4 --run-id swebench-django-evolve
+```
+
+`--run-id` is treated as a suffix. The actual output directory/run ID is
+prefixed with the current timestamp, for example
+`20260515-173012-swebench-django-evolve`.
+
+Run selected evolution and frozen-eval instances through the legacy SWE-bench
+Modal harness path when you need a held-out frozen eval phase:
 
 ```
 uv run medcoevo swebench run --evolve-instance-id django__django-11910 --eval-instance-id django__django-11099 --run-id swebench-django
@@ -191,14 +209,19 @@ Potential Troubleshooting Procedures:
 
 ### Task Selection
 
-`run` and `matrix` share the same task-selection behavior:
+`run` requires at least one SkillsBench or SWE-bench selector:
 
-- Must provide `--tasks` or `--task-set`.
-- `--tasks task-a,task-b`: runs explicit comma-separated task IDs.
-- `--task-set skillsbench-10`: runs the curated 10-task subset.
-- `--task-set skillsbench-all`: dynamically discovers all local and remote SkillsBench task IDs, then fetches missing task contents lazily as each task runs.
+- `--skillsbench-task task-a --skillsbench-task task-b`: runs explicit SkillsBench task IDs. Comma-separated values are also accepted.
+- `--skillsbench-task-set skillsbench-10`: runs the curated 10-task subset.
+- `--skillsbench-task-set skillsbench-all`: dynamically discovers all local and remote SkillsBench task IDs, then fetches missing task contents lazily as each task runs.
+- `--swebench-instance django__django-11910`: runs explicit SWE-bench instances. Comma-separated values are also accepted.
+- `--swebench-limit N`: selects the first `N` instances from the configured SWE-bench dataset split.
 
-Note: `--tasks` always overrides `--task-set` when both are provided. Missing local tasks are fetched on demand from the provided SkillsBench archive by default. If the local copy is missing and the network/archive fetch fails, the command fails explicitly instead of silently skipping the task.
+Legacy `--tasks` and `--task-set` remain as aliases for SkillsBench selection.
+Explicit task IDs override task sets within the same benchmark. Missing local
+SkillsBench tasks are fetched on demand from the provided archive by default. If
+the local copy is missing and the network/archive fetch fails, the command fails
+explicitly instead of silently skipping the task.
 
 Pre-cache selected tasks before running:
 
@@ -229,7 +252,7 @@ from the project root.
 `run` executes one configured experiment condition:
 
 ```
-uv run medcoevo run --tasks fix-build-google-auto --iterations 30 --seed 42
+uv run medcoevo run --skillsbench-task fix-build-google-auto --iterations 30 --seed 42
 ```
 
 Useful options:
@@ -244,7 +267,7 @@ Useful options:
 Example custom row:
 
 ```
-uv run medcoevo run --task-set skillsbench-10 --condition learned_mediator --skill-updates executor,planner,mediator
+uv run medcoevo run --skillsbench-task-set skillsbench-10 --condition learned_mediator --skill-updates executor,planner,mediator
 ```
 
 ### Matrix Command
@@ -255,10 +278,10 @@ uv run medcoevo run --task-set skillsbench-10 --condition learned_mediator --ski
 uv run medcoevo matrix --task-set skillsbench-10 --iterations 30 --seed 42
 ```
 
-`matrix` supports the same `--tasks`, `--task-set`, `--iterations`, `--seed`,
-`--coevo-interval`, `--advisor-buffer-max`,
-`--skill-validation` / `--no-skill-validation`, `--config-dir`, and
-`--verbose` options as `run`, except that `--iterations` applies to each row.
+`matrix` supports the SkillsBench `--tasks`, `--task-set`, `--iterations`,
+`--seed`, `--coevo-interval`, `--advisor-buffer-max`, `--skill-validation` /
+`--no-skill-validation`, `--config-dir`, and `--verbose` options. Unlike
+unified `run`, matrix rows remain SkillsBench-only.
 The command copies the configured `skills/` tree into each row's experiment
 directory before that row starts, so rows cannot write to repo-level skills or
 contaminate one another.

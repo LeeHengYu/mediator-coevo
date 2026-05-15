@@ -53,6 +53,13 @@ class SkillValidationConfig(BaseModel):
     require_all_tasks_usable: bool = True
 
 
+class BenchmarkSelectionConfig(BaseModel):
+    """Run-local benchmark task selection persisted with experiment config."""
+
+    skillsbench_tasks: list[str] = Field(default_factory=list)
+    swebench_instances: list[str] = Field(default_factory=list)
+
+
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
@@ -64,6 +71,9 @@ class ExperimentConfig(BaseModel):
     skill_updates: SkillUpdateConfig = Field(default_factory=SkillUpdateConfig)
     skill_validation: SkillValidationConfig = Field(
         default_factory=SkillValidationConfig
+    )
+    benchmark_selection: BenchmarkSelectionConfig = Field(
+        default_factory=BenchmarkSelectionConfig
     )
     baseline_preset: str | None = None
     shared_notes: str | None = None

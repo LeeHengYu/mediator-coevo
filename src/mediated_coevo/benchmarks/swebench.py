@@ -291,7 +291,9 @@ def load_swebench_dataset(
 ) -> list[dict[str, Any]]:
     """Load a SWE-bench dataset split through the official package."""
     ensure_swebench_available()
-    from swebench.harness.utils import load_swebench_dataset as load_dataset
+    from swebench.harness.utils import (  # type: ignore[import-untyped]
+        load_swebench_dataset as load_dataset,
+    )
 
     return list(load_dataset(dataset_name, split, instance_ids))
 

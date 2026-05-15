@@ -120,6 +120,10 @@ def build_score_summary(
     if total_scored:
         dominant_task = max(per_task, key=lambda task: task.scored_share, default=None)
     max_task_scored_share = dominant_task.scored_share if dominant_task else 0.0
+    scored_task_count = sum(1 for task in per_task if task.scored_count > 0)
+    dominance_warning = (
+        scored_task_count > 1 and max_task_scored_share > dominance_threshold
+    )
 
     return ExperimentScoreSummary(
         total_runs=total_runs,
@@ -140,7 +144,7 @@ def build_score_summary(
         dominance_threshold=dominance_threshold,
         dominant_task_id=dominant_task.task_id if dominant_task else None,
         max_task_scored_share=max_task_scored_share,
-        dominance_warning=max_task_scored_share > dominance_threshold,
+        dominance_warning=dominance_warning,
     )
 
 
