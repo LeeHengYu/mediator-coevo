@@ -11,7 +11,7 @@ from mediated_coevo.core.config import Config
 from mediated_coevo.benchmarks import swebench
 from mediated_coevo import main as main_module
 from mediated_coevo.main import app
-from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 
 
 def test_parse_swebench_instance_ids_defaults_to_smoke_instance():
@@ -343,6 +343,7 @@ def test_write_swebench_eval_outputs_writes_traces_and_summary(tmp_path):
             reward=1.0,
             status="ok",
             run_id="smoke-run",
+            token_usage=TokenUsage(input_tokens=11, output_tokens=22),
         )
     ]
 
@@ -355,7 +356,34 @@ def test_write_swebench_eval_outputs_writes_traces_and_summary(tmp_path):
     assert traces_path.exists()
     assert summary_path.exists()
     assert json.loads(traces_path.read_text())["reward"] == 1.0
-    assert json.loads(summary_path.read_text())["mean_reward"] == 1.0
+    summary = json.loads(summary_path.read_text())
+    assert summary["mean_reward"] == 1.0
+    assert summary["total_tokens"] == 33
+
+
+def test_records_from_swebench_traces_count_executor_tokens():
+    trace = ExecutionTrace(
+        task_id="django__django-11099",
+        iteration=0,
+        reward=1.0,
+        status="ok",
+        token_usage=TokenUsage(input_tokens=7, output_tokens=5),
+    )
+    config = Config(
+        models={
+            "planner": "planner-model",
+            "executor": "executor-model",
+            "mediator": "mediator-model",
+        }
+    )
+
+    records = main_module._records_from_swebench_traces(
+        traces=[trace],
+        config=config,
+    )
+
+    assert records[0].total_tokens == 12
+    assert records[0].token_totals_by_agent == {"executor": 12}
 
 
 def test_swebench_list_instances_cli_prints_dataset_ids(monkeypatch):

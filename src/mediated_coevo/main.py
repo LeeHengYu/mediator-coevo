@@ -997,6 +997,9 @@ def _records_from_swebench_traces(
             verifier_type=swebench_helpers.SWEBENCH_VERIFIER_TYPE,
             success=trace.is_usable_feedback_signal,
             verifier_status=trace.status,
+            total_tokens=(
+                trace.token_usage.input_tokens + trace.token_usage.output_tokens
+            ),
             token_totals_by_agent={
                 "executor": (
                     trace.token_usage.input_tokens + trace.token_usage.output_tokens

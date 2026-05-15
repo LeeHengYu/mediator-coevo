@@ -497,6 +497,9 @@ def write_swebench_eval_outputs(
             run_id=run_id,
             expected_reward_range=(0.0, 1.0),
             verifier_type=SWEBENCH_VERIFIER_TYPE,
+            total_tokens=(
+                trace.token_usage.input_tokens + trace.token_usage.output_tokens
+            ),
         )
         for trace in traces
     ]
