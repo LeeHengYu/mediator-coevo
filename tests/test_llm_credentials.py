@@ -67,63 +67,10 @@ def test_run_cli_fails_fast_when_openrouter_key_is_missing(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_harbor_check)
 
-    result = CliRunner().invoke(app, ["run", "--tasks", "demo"])
+    result = CliRunner().invoke(app, ["run", "--skillsbench-task", "demo"])
 
     assert result.exit_code == 1
     assert "OPENROUTER_API_KEY" in result.output
-
-
-def test_matrix_cli_fails_fast_when_openrouter_key_is_missing(monkeypatch):
-    def fail_harbor_check(_: Config) -> None:
-        raise AssertionError("Harbor should not be checked before credentials")
-
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_harbor_check)
-
-    result = CliRunner().invoke(app, ["matrix", "--tasks", "demo"])
-
-    assert result.exit_code == 1
-    assert "OPENROUTER_API_KEY" in result.output
-
-
-def test_swebench_experiment_fails_before_directory_creation_without_key(
-    monkeypatch,
-    tmp_path,
-):
-    def fail_prepare_experiment_root(**_: object) -> None:
-        raise AssertionError("experiment directory should not be created")
-
-    config = Config(
-        models={
-            "planner": "anthropic/claude-sonnet-4.6",
-            "executor": "google/gemini-3-flash-preview",
-            "mediator": "openai/gpt-5.5",
-        }
-    )
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.setattr(main_module, "load_config", lambda _: config)
-    monkeypatch.setattr(
-        main_module,
-        "_prepare_swebench_experiment_root",
-        fail_prepare_experiment_root,
-    )
-
-    with pytest.raises(main_module.typer.Exit) as exc_info:
-        main_module._run_swebench_experiment(
-            evolve_instance_ids=["django__django-11910"],
-            eval_instance_ids=["django__django-11099"],
-            dataset_name="SWE-bench/SWE-bench_Lite",
-            split="test",
-            iterations=1,
-            seed=7,
-            condition_name="learned_mediator",
-            skill_updates=config.experiment.skill_updates,
-            config_dir=tmp_path / "config",
-            timeout=30,
-            max_workers=1,
-            run_id="swebench-test",
-        )
-    assert exc_info.value.exit_code == 1
 
 
 def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):

@@ -204,7 +204,7 @@ def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
 
     with pytest.raises(typer.BadParameter, match="no_feedback"):
         main_module.run(
-            tasks="task-A",
+            skillsbench_tasks=["task-A"],
             iterations=1,
             seed=42,
             condition="no_feedback",
@@ -224,8 +224,6 @@ def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path
 
     with pytest.raises(typer.BadParameter, match="provide at least one SkillsBench"):
         main_module.run(
-            tasks=None,
-            task_set=None,
             iterations=1,
             seed=42,
             condition="learned_mediator",
