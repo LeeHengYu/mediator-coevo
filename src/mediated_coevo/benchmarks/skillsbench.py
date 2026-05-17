@@ -751,6 +751,8 @@ class HarborTraceParser:
         status: TraceStatus = "ok"
         if self.run_result.returncode != 0:
             status = "harbor_failed"
+        elif exception_info:
+            status = "env_failure"
         if self.run_result.returncode != 0 and error_kind is None:
             error_kind = "harbor_nonzero"
             error_detail = (
@@ -790,9 +792,9 @@ def parse_execution_trace(
       env_failure    : missing_trial_dir | missing_result_json |
                        malformed_result_json | missing_job_result_json |
                        malformed_job_result_json | missing_job_reward |
-                       malformed_job_reward | ambiguous_job_reward
+                       malformed_job_reward | ambiguous_job_reward |
+                       harbor_exception
       harbor_failed  : harbor_nonzero
-      ok (warnings)  : harbor_exception
 
     Reward is parsed only from the Harbor job-level result.json. CTRF output
     under the trial verifier directory is optional diagnostic context and can
