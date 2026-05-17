@@ -143,7 +143,11 @@ class Config(BaseModel):
     def normalize_models(self) -> Self:
         """Normalize every configured model name in-place."""
         for field_name, model in self.models:
-            setattr(self.models, field_name, _normalize_openrouter_model_name(model))
+            model_str = _normalize_openrouter_model_name(model)
+            if field_name != 'executor':
+                setattr(self.models, field_name, model_str)
+            else: 
+                setattr(self.models, field_name, '/'.join(model_str.split('/')[1:]))
         return self
 
 

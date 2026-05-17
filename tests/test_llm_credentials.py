@@ -11,7 +11,7 @@ from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_cr
 from mediated_coevo.main import ExperimentFactory, app
 
 
-def test_config_normalize_models_updates_all_agent_models():
+def test_config_normalize_models_keeps_executor_model_harbor_ready():
     config = Config(
         models={
             "planner": "anthropic/claude-sonnet-4.6",
@@ -24,7 +24,7 @@ def test_config_normalize_models_updates_all_agent_models():
     config.normalize_models()
 
     assert config.models.planner == "openrouter/anthropic/claude-sonnet-4.6"
-    assert config.models.executor == "openrouter/google/gemini-3-flash-preview"
+    assert config.models.executor == "google/gemini-3-flash-preview"
     assert config.models.mediator == "openrouter/openai/gpt-5.5"
     assert config.models.judge == "openrouter/openai/gpt-5.5"
 
@@ -99,7 +99,7 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
     saved = tomllib.loads((runtime.experiment_dir / "config.toml").read_text())
     assert saved["models"] == {
         "planner": "openrouter/anthropic/claude-sonnet-4.6",
-        "executor": "openrouter/google/gemini-3-flash-preview",
+        "executor": "google/gemini-3-flash-preview",
         "mediator": "openrouter/openai/gpt-5.5",
         "judge": "openrouter/openai/gpt-5.5",
     }
