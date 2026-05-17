@@ -196,7 +196,7 @@ class Orchestrator:
         report = None
         try:
             report = await self.mediator.mediate_trace(condition, trace, task_spec)
-            if report:
+            if report is not None:
                 self.artifact_store.store_report(report)
         finally:
             self.artifact_store.store_trace(trace)
@@ -219,7 +219,6 @@ class Orchestrator:
             feedback=proposal_feedback,
         )
 
-        # 5. TAG previous entries with this iteration's reward + backfill buffer.
         self.history_store.tag_pending_outcome(
             task_id,
             trace,
@@ -230,15 +229,14 @@ class Orchestrator:
             iteration=iteration,
             proposal_buffer=self._proposal_buffer,
         )
-        (
-            mediator_entry_id,
-            planner_entry_id,
-        ) = await self._record_history_and_remember_outcome(
-            task_id=task_id,
-            iteration=iteration,
-            condition=condition,
-            report=report,
-            skill_update=skill_update,
+        mediator_entry_id, planner_entry_id = (
+            await self._record_history_and_remember_outcome(
+                task_id=task_id,
+                iteration=iteration,
+                condition=condition,
+                report=report,
+                skill_update=skill_update,
+            )
         )
 
         duration = time.time() - start
@@ -367,7 +365,7 @@ class Orchestrator:
         skill_update: SkillUpdate | None,
     ) -> tuple[str | None, str | None]:
         mediator_entry_id = None
-        if report:
+        if report is not None:
             mediator_signal = await self.mediator.compact_feedback(report)
             mediator_entry_id = self.history_store.record_signal(
                 iteration=iteration,
@@ -378,7 +376,7 @@ class Orchestrator:
             )
 
         planner_entry_id = None
-        if skill_update:
+        if skill_update is not None:
             planner_entry_id = self.history_store.record_signal(
                 iteration=iteration,
                 agent_role="planner",
@@ -392,7 +390,7 @@ class Orchestrator:
             mediator_entry_id=mediator_entry_id,
             planner_entry_id=planner_entry_id,
         )
-        if report and report.is_exposed:
+        if report is not None and report.is_exposed:
             self._previous_report_by_task[task_id] = report
         return mediator_entry_id, planner_entry_id
 
@@ -532,7 +530,7 @@ class Orchestrator:
         self.skill_store.snapshot(iteration, self._snapshots_dir)
         skill_hashes = self._current_skill_hashes()
         records_to_write = list(records)
-        if coevolution_record:
+        if coevolution_record is not None:
             records_to_write.append(coevolution_record)
         for record in records_to_write:
             attach_skill_identity(record, skill_hashes, current_skill_version)

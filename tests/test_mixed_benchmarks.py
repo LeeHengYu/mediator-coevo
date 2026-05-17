@@ -234,6 +234,66 @@ def test_unified_run_supports_swebench_limit(monkeypatch):
     assert resolve_calls[0]["limit"] == 2
 
 
+def test_unified_run_supports_swebench_frozen_eval(monkeypatch):
+    captured: dict[str, object] = {}
+    resolve_calls: list[dict] = []
+
+    def resolve_ids(**kwargs) -> list[str]:
+        resolve_calls.append(kwargs)
+        return swebench.parse_swebench_instance_ids(kwargs["raw_instance_ids"])
+
+    monkeypatch.setattr(swebench, "resolve_swebench_instance_ids", resolve_ids)
+    monkeypatch.setattr(
+        main_module,
+        "_run_unified_experiment",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--swebench-instance",
+            "django__django-11910",
+            "--swebench-eval-instance",
+            "django__django-11099",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["swebench_eval_instance_ids"] == ["django__django-11099"]
+    assert resolve_calls[0]["raw_instance_ids"] == ["django__django-11910"]
+    assert resolve_calls[1]["raw_instance_ids"] == ["django__django-11099"]
+
+
+def test_unified_run_rejects_overlapping_swebench_eval(monkeypatch):
+    def resolve_ids(**kwargs) -> list[str]:
+        return swebench.parse_swebench_instance_ids(kwargs["raw_instance_ids"])
+
+    monkeypatch.setattr(swebench, "resolve_swebench_instance_ids", resolve_ids)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--swebench-instance",
+            "django__django-11910",
+            "--swebench-eval-instance",
+            "django__django-11910",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "must be disjoint" in result.output
+
+
+def test_legacy_swebench_run_command_is_not_registered():
+    result = CliRunner().invoke(app, ["swebench", "run"])
+
+    assert result.exit_code != 0
+    assert "No such command" in result.output
+
+
 def test_unified_experiment_root_prefixes_user_run_id_with_timestamp(
     monkeypatch,
     tmp_path,

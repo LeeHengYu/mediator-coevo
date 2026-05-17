@@ -155,17 +155,23 @@ uv run medcoevo run --swebench-instance django__django-11910 --iterations 4 --ru
 prefixed with the current timestamp, for example
 `20260515-173012-swebench-django-evolve`.
 
-Run selected evolution and frozen-eval instances through the legacy SWE-bench
-Modal harness path when you need a held-out frozen eval phase:
+Add a held-out frozen eval phase to the same unified command with
+`--swebench-eval-instance`:
 
 ```
-uv run medcoevo swebench run --evolve-instance-id django__django-11910 --eval-instance-id django__django-11099 --run-id swebench-django
+uv run medcoevo run \
+  --swebench-instance django__django-11910 \
+  --swebench-eval-instance django__django-11099 \
+  --run-id swebench-django
 ```
 
 Run a small discovered evolution slice with an explicit held-out eval instance:
 
 ```
-uv run medcoevo swebench run --evolve-limit 5 --eval-instance-id django__django-11099 --run-id swebench-lite-5
+uv run medcoevo run \
+  --swebench-limit 5 \
+  --swebench-eval-instance django__django-11099 \
+  --run-id swebench-lite-5
 ```
 
 `swebench smoke` remains available as a one-instance convenience command using
