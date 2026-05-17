@@ -175,9 +175,27 @@ class HistoryStore:
             return
 
         if mediator_entry_id:
-            self.tag_outcome_by_id(mediator_entry_id, reward=reward)
+            self.tag_outcome_by_id(
+                mediator_entry_id,
+                reward=reward,
+                metadata={
+                    "verifier_reward": reward,
+                    "outcome_task_id": task_id,
+                    "outcome_iteration": trace.iteration,
+                    "trace_status": trace.status,
+                },
+            )
         if planner_entry_id:
-            self.tag_outcome_by_id(planner_entry_id, reward=reward)
+            self.tag_outcome_by_id(
+                planner_entry_id,
+                reward=reward,
+                metadata={
+                    "verifier_reward": reward,
+                    "outcome_task_id": task_id,
+                    "outcome_iteration": trace.iteration,
+                    "trace_status": trace.status,
+                },
+            )
         for proposal in proposals or []:
             if (
                 proposal.iteration == trace.iteration - 1
@@ -185,14 +203,56 @@ class HistoryStore:
             ):
                 proposal.reward = reward
 
-    def tag_outcome_by_id(self, entry_id: str, reward: float) -> None:
+    def tag_outcome_by_id(
+        self,
+        entry_id: str,
+        reward: float,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Tag a specific entry by its stable ID."""
         for entry in reversed(self._entries):
             if entry.entry_id == entry_id:
                 entry.reward = reward
+                if metadata:
+                    entry.metadata.update(metadata)
                 self._save()
                 return
         logger.warning("No history entry found for entry_id=%s", entry_id)
+
+    def annotate_judge_reward(
+        self,
+        *,
+        task_id: str,
+        iteration: int,
+        judge_reward: float,
+        judge_reward_record_id: str,
+        rubric_version: str,
+        confidence: float,
+        applied_cap: str | None,
+    ) -> int:
+        """Attach judge reward metadata to verifier-tagged history entries."""
+        updated = 0
+        for entry in self._entries:
+            if (
+                entry.reward is None
+                or entry.metadata.get("outcome_task_id") != task_id
+                or entry.metadata.get("outcome_iteration") != iteration
+            ):
+                continue
+            entry.metadata.update(
+                {
+                    "judge_reward": judge_reward,
+                    "judge_reward_record_id": judge_reward_record_id,
+                    "judge_rubric_version": rubric_version,
+                    "judge_confidence": confidence,
+                    "judge_applied_cap": applied_cap,
+                }
+            )
+            updated += 1
+        if updated:
+            self._save()
+        return updated
 
     def query(
         self,

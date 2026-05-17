@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -14,7 +15,7 @@ from mediated_coevo.benchmarks.mixed import (
     build_benchmark_task_selection,
 )
 from mediated_coevo.core.config import Config
-from mediated_coevo.main import app
+from mediated_coevo.main import ExperimentRuntime, MatrixRuntime, app
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
 
@@ -294,6 +295,127 @@ def test_legacy_swebench_run_command_is_not_registered():
     assert "No such command" in result.output
 
 
+def test_unified_experiment_invokes_judge_after_summary(monkeypatch, tmp_path):
+    events: list[str] = []
+    history_store = object()
+
+    class _Orchestrator:
+        config = Config(
+            models={
+                "planner": "p",
+                "executor": "e",
+                "mediator": "m",
+                "judge": "j",
+            }
+        )
+
+        async def run_experiment(self, task_ids, iterations):
+            events.append("run")
+            return []
+
+    run_dir = tmp_path / "run"
+    skills_dir = run_dir / "skills"
+    runtime = ExperimentRuntime(
+        experiment_dir=run_dir,
+        orchestrator=_Orchestrator(),  # type: ignore[arg-type]
+    )
+    runtime.orchestrator.history_store = history_store
+    selection = build_benchmark_task_selection(
+        skillsbench_task_ids=["task-a"],
+        swebench_instance_ids=[],
+    )
+
+    monkeypatch.setattr(main_module, "_prepare_llm_credentials_or_exit", lambda c: c)
+    monkeypatch.setattr(main_module, "_ensure_harbor_available", lambda c: None)
+    monkeypatch.setattr(
+        main_module,
+        "_prepare_unified_experiment_root",
+        lambda **kwargs: (run_dir, skills_dir),
+    )
+    monkeypatch.setattr(main_module, "_build_unified_runtime", lambda **kwargs: runtime)
+    monkeypatch.setattr(
+        main_module,
+        "_write_and_print_result_summary",
+        lambda **kwargs: events.append("summary"),
+    )
+
+    def annotate(**kwargs) -> None:
+        assert kwargs["data_dir"] == run_dir
+        assert kwargs["history_store"] is history_store
+        events.append("judge")
+
+    monkeypatch.setattr(main_module, "_annotate_judge_rewards_or_exit", annotate)
+
+    main_module._run_unified_experiment(
+        config=_Orchestrator.config,
+        selection=selection,
+        iterations=1,
+        seed=42,
+        condition_name="learned_mediator",
+        dataset_name=swebench.DEFAULT_SWEBENCH_DATASET,
+        split=swebench.DEFAULT_SWEBENCH_SPLIT,
+        timeout=1,
+        max_workers=1,
+        run_id=None,
+        swebench_eval_instance_ids=[],
+    )
+
+    assert events == ["run", "summary", "judge"]
+
+
+def test_matrix_invokes_judge_for_each_row(monkeypatch):
+    events: list[tuple[str, Path]] = []
+
+    class _Orchestrator:
+        config = Config(
+            models={
+                "planner": "p",
+                "executor": "e",
+                "mediator": "m",
+                "judge": "j",
+            }
+        )
+        history_store = object()
+
+        async def run_experiment(self, task_ids, iterations):
+            return []
+
+    row_dir = Path("/tmp/matrix/no_feedback")
+    runtime = ExperimentRuntime(
+        experiment_dir=row_dir,
+        orchestrator=_Orchestrator(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(main_module, "_preflight_task_ids_from_cli", lambda *a: ["task-a"])
+    monkeypatch.setattr(main_module, "_prepare_llm_credentials_or_exit", lambda c: c)
+    monkeypatch.setattr(main_module, "_ensure_harbor_available", lambda c: None)
+    monkeypatch.setattr(main_module, "_build_benchmark_repo", lambda *a: object())
+    monkeypatch.setattr(
+        main_module.ExperimentFactory,
+        "create_matrix_dir",
+        lambda self, **kwargs: Path("/tmp/matrix"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_build_matrix_runtimes",
+        lambda **kwargs: [MatrixRuntime(preset_name="no_feedback", runtime=runtime)],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_write_and_print_result_summary",
+        lambda **kwargs: events.append(("summary", kwargs["data_dir"])),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_annotate_judge_rewards_or_exit",
+        lambda **kwargs: events.append(("judge", kwargs["data_dir"])),
+    )
+
+    result = CliRunner().invoke(app, ["matrix", "--tasks", "task-a", "--iterations", "1"])
+
+    assert result.exit_code == 0
+    assert events == [("summary", row_dir), ("judge", row_dir)]
+
+
 def test_unified_experiment_root_prefixes_user_run_id_with_timestamp(
     monkeypatch,
     tmp_path,
@@ -307,6 +429,7 @@ def test_unified_experiment_root_prefixes_user_run_id_with_timestamp(
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     config.paths.skills_dir = "skills"

@@ -132,6 +132,25 @@ def test_score_summary_excludes_coevolution_records_and_writes_json(tmp_path):
     assert loaded["mean_reward"] == pytest.approx(0.5)
     assert loaded["per_task"][0]["task_id"] == "task-a"
     assert loaded["per_task"][0]["expected_reward_range"] == [0.0, 1.0]
+    assert loaded["judge_reward_summary"] is None
+
+
+def test_score_summary_can_include_judge_reward_summary(tmp_path):
+    verifier_summary = build_score_summary(
+        [_record("task-a", 0.5)],
+        bootstrap_samples=50,
+    )
+    verifier_summary.judge_reward_summary = build_score_summary(
+        [_record("task-a", 0.75)],
+        bootstrap_samples=50,
+    )
+
+    summary_path = tmp_path / "summary.json"
+    write_score_summary(verifier_summary, summary_path)
+    loaded = json.loads(summary_path.read_text())
+
+    assert loaded["mean_reward"] == pytest.approx(0.5)
+    assert loaded["judge_reward_summary"]["mean_reward"] == pytest.approx(0.75)
 
 
 def test_environment_failures_are_not_scored_even_with_reward():

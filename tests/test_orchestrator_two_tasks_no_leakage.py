@@ -151,6 +151,7 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     config.experiment.condition_name = "learned_mediator"
@@ -269,6 +270,7 @@ async def test_full_traces_cross_task_feedback_is_round_causal(tmp_path):
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     config.experiment.condition_name = "full_traces"

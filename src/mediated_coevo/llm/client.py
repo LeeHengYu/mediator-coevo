@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
+from typing import Any, Protocol, TypedDict, cast
 
 import litellm
 from litellm.types.utils import ModelResponse
@@ -29,10 +29,6 @@ litellm.suppress_debug_info = True
 logger = logging.getLogger(__name__)
 
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
-OPENROUTER_MODEL_PREFIX = "openrouter/"
-
-if TYPE_CHECKING:
-    from mediated_coevo.core.config import Config
 
 
 class CompletionResult(TypedDict):
@@ -51,24 +47,6 @@ class LLMUsageError(RuntimeError):
 
 class LLMCredentialError(RuntimeError):
     """Raised when required OpenRouter model credentials are unavailable."""
-
-
-def normalize_openrouter_model(model: str) -> str:
-    """Return an OpenRouter-routed model ID."""
-    model = model.strip()
-    if not model:
-        raise LLMCredentialError("model names must be non-empty OpenRouter model IDs")
-    if model.startswith(OPENROUTER_MODEL_PREFIX):
-        return model
-    return f"{OPENROUTER_MODEL_PREFIX}{model}"
-
-
-def normalize_openrouter_models(config: "Config") -> "Config":
-    """Normalize planner/executor/mediator model IDs on a loaded config object."""
-    config.models.planner = normalize_openrouter_model(config.models.planner)
-    config.models.executor = normalize_openrouter_model(config.models.executor)
-    config.models.mediator = normalize_openrouter_model(config.models.mediator)
-    return config
 
 
 def validate_openrouter_credentials(

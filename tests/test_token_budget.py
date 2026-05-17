@@ -199,6 +199,7 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     config.budgets.trace_excerpt_tokens = 20
@@ -252,6 +253,7 @@ def test_planner_constructed_prompt_fits_budget():
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     config.budgets.max_skill_tokens = 30

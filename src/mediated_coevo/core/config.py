@@ -4,20 +4,36 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from mediated_coevo.experiment.conditions import ConditionName
 
+OPENROUTER_MODEL_PREFIX = "openrouter/"
 DEFAULT_SKILLSBENCH_ARCHIVE_URL = (
     "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
 )
+
+
+class ModelConfigError(ValueError):
+    """Raised when configured model names are invalid."""
+
+
+def _normalize_openrouter_model_name(model: str) -> str:
+    model = model.strip()
+    if not model:
+        raise ModelConfigError("model names must be non-empty OpenRouter model IDs")
+    if model.startswith(OPENROUTER_MODEL_PREFIX):
+        return model
+    return f"{OPENROUTER_MODEL_PREFIX}{model}"
 
 
 class ModelsConfig(BaseModel):
     planner: str
     executor: str
     mediator: str
+    judge: str
 
 
 class BudgetsConfig(BaseModel):
@@ -30,10 +46,18 @@ class BudgetsConfig(BaseModel):
     mediator_prompt_tokens: int = 16000
     advisor_prompt_tokens: int = 12000
     reflector_prompt_tokens: int = 16000
+    judge_prompt_tokens: int = 16000
     planner_completion_tokens: int = 4096
     mediator_completion_tokens: int = 2048
     advisor_completion_tokens: int = 512
     reflector_completion_tokens: int = 4096
+    judge_completion_tokens: int = 2048
+
+
+class JudgeConfig(BaseModel):
+    """LLM judge reward annotation settings."""
+
+    rubric_version: str = "rar-v1"
 
 
 class SkillUpdateConfig(BaseModel):
@@ -110,10 +134,17 @@ class Config(BaseModel):
     models: ModelsConfig
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
+    judge: JudgeConfig = Field(default_factory=JudgeConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     executor_runtime: ExecutorRuntimeConfig = Field(
         default_factory=ExecutorRuntimeConfig
     )
+
+    def normalize_models(self) -> Self:
+        """Normalize every configured model name in-place."""
+        for field_name, model in self.models:
+            setattr(self.models, field_name, _normalize_openrouter_model_name(model))
+        return self
 
 
 def load_config(config_dir: Path) -> Config:

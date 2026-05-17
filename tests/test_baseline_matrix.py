@@ -37,6 +37,7 @@ def _config() -> Config:
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
 
@@ -189,6 +190,7 @@ def _write_minimal_config(config_dir) -> None:
         planner = "test-planner"
         executor = "test-executor"
         mediator = "test-mediator"
+        judge = "test-judge"
         """
     )
 

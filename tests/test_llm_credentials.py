@@ -6,43 +6,41 @@ import pytest
 from typer.testing import CliRunner
 
 from mediated_coevo import main as main_module
-from mediated_coevo.core.config import Config
-from mediated_coevo.llm.client import (
-    LLMCredentialError,
-    normalize_openrouter_model,
-    normalize_openrouter_models,
-    validate_openrouter_credentials,
-)
+from mediated_coevo.core.config import Config, ModelConfigError
+from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_credentials
 from mediated_coevo.main import ExperimentFactory, app
 
 
-def test_normalize_openrouter_model_adds_missing_prefix():
-    assert (
-        normalize_openrouter_model("anthropic/claude-sonnet-4.6")
-        == "openrouter/anthropic/claude-sonnet-4.6"
-    )
-
-
-def test_normalize_openrouter_model_preserves_existing_prefix():
-    model = "openrouter/google/gemini-3-flash-preview"
-
-    assert normalize_openrouter_model(model) == model
-
-
-def test_normalize_openrouter_models_updates_all_agent_models():
+def test_config_normalize_models_updates_all_agent_models():
     config = Config(
         models={
             "planner": "anthropic/claude-sonnet-4.6",
             "executor": "openrouter/google/gemini-3-flash-preview",
             "mediator": "openai/gpt-5.5",
+            "judge": "openai/gpt-5.5",
         }
     )
 
-    normalize_openrouter_models(config)
+    config.normalize_models()
 
     assert config.models.planner == "openrouter/anthropic/claude-sonnet-4.6"
     assert config.models.executor == "openrouter/google/gemini-3-flash-preview"
     assert config.models.mediator == "openrouter/openai/gpt-5.5"
+    assert config.models.judge == "openrouter/openai/gpt-5.5"
+
+
+def test_config_normalize_models_rejects_blank_model_name():
+    config = Config(
+        models={
+            "planner": "anthropic/claude-sonnet-4.6",
+            "executor": "google/gemini-3-flash-preview",
+            "mediator": "openai/gpt-5.5",
+            "judge": "   ",
+        }
+    )
+
+    with pytest.raises(ModelConfigError, match="model names must be non-empty"):
+        config.normalize_models()
 
 
 def test_validate_openrouter_credentials_accepts_nonblank_key():
@@ -85,6 +83,7 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
             "planner": "anthropic/claude-sonnet-4.6",
             "executor": "google/gemini-3-flash-preview",
             "mediator": "openrouter/openai/gpt-5.5",
+            "judge": "openai/gpt-5.5",
         }
     )
     config.paths.skills_dir = "skills"
@@ -102,4 +101,5 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
         "planner": "openrouter/anthropic/claude-sonnet-4.6",
         "executor": "openrouter/google/gemini-3-flash-preview",
         "mediator": "openrouter/openai/gpt-5.5",
+        "judge": "openrouter/openai/gpt-5.5",
     }

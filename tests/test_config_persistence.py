@@ -17,6 +17,7 @@ def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     config.experiment.shared_notes = None

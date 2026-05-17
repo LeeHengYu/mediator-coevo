@@ -184,7 +184,7 @@ def runtime_record_fields(config: Config) -> dict[str, Any]:
     """Return compact runtime fields that should travel with every row."""
     return {
         "seed": config.experiment.seed,
-        "models": config.models.model_dump(),
+        "models": config.models.model_dump(exclude_none=True),
         "executor_agent": config.executor_runtime.agent_name,
     }
 

@@ -69,8 +69,8 @@ class TaskScoreSummary(BaseModel):
     verifier_type: str | None = None
 
 
-class ExperimentScoreSummary(BaseModel):
-    """Score summary for an experiment row."""
+class RewardScoreSummary(BaseModel):
+    """Score summary for one reward source."""
 
     total_runs: int
     scored_count: int
@@ -89,6 +89,12 @@ class ExperimentScoreSummary(BaseModel):
     dominant_task_id: str | None = None
     max_task_scored_share: float = 0.0
     dominance_warning: bool = False
+
+
+class ExperimentScoreSummary(RewardScoreSummary):
+    """Score summary for an experiment row."""
+
+    judge_reward_summary: RewardScoreSummary | None = None
 
 
 def build_score_summary(

@@ -376,6 +376,7 @@ def test_build_coevolution_record_captures_reflector_token_events():
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch.skill_store = _EmptySkillStore()
@@ -406,6 +407,7 @@ def test_build_coevolution_record_captures_reflector_token_events():
         "planner": "test-planner",
         "executor": "test-executor",
         "mediator": "test-mediator",
+        "judge": "test-judge",
     }
     assert record.executor_agent == "opencode"
     assert record.token_totals_by_agent == {"reflector": 15}
@@ -418,6 +420,7 @@ def test_build_iteration_record_adds_compact_metric_fields():
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch._previous_reward_by_task = {"task-A": 0.25}
@@ -485,6 +488,7 @@ def test_build_iteration_record_adds_compact_metric_fields():
         "planner": "test-planner",
         "executor": "test-executor",
         "mediator": "test-mediator",
+        "judge": "test-judge",
     }
     assert record.executor_agent == "opencode"
     assert record.mediator_report_id == report.report_id
@@ -617,6 +621,7 @@ def test_zero_reward_harbor_run_is_logged_as_task_failure():
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch._previous_reward_by_task = {}
@@ -724,6 +729,7 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch.experiment_dir = tmp_path
@@ -959,6 +965,7 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch.experiment_dir = tmp_path
@@ -992,6 +999,7 @@ async def test_run_iteration_logs_advisor_rejection_in_metrics_record(tmp_path):
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch.config.experiment.advisor_buffer_max = 1
@@ -1074,6 +1082,7 @@ def _advisor_validation_orchestrator(
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch.config.experiment.advisor_buffer_max = len(proposal_task_ids)

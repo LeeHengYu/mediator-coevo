@@ -2,6 +2,7 @@
 
 from .history_signals import HistorySignal, MediatorSignal, PlannerSignal
 from .iteration import IterationRecord
+from .judge import JudgeAxisScores, JudgeCapFlags, JudgeLLMResponse, JudgeRewardRecord
 from .report import AbstractionLevel, MediatorReport, OutcomeTag
 from .skill import (
     AdvisorBatchProvenance,
@@ -45,4 +46,8 @@ __all__ = [
     "MediatorSignal",
     "PlannerSignal",
     "IterationRecord",
+    "JudgeAxisScores",
+    "JudgeCapFlags",
+    "JudgeLLMResponse",
+    "JudgeRewardRecord",
 ]

@@ -244,6 +244,7 @@ def _orchestrator(
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch.config.experiment.condition_name = condition
@@ -698,6 +699,7 @@ def test_condition_assignment_and_cli_validation_reject_unknown_names():
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     with pytest.raises(ValidationError):

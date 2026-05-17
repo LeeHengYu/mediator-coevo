@@ -66,6 +66,7 @@ def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _Skill
             "planner": "test-planner",
             "executor": "test-executor",
             "mediator": "test-mediator",
+            "judge": "test-judge",
         }
     )
     orch.config.experiment.advisor_buffer_max = 2

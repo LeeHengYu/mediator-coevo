@@ -27,6 +27,10 @@ from mediated_coevo.agents.executor import (
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.agents.swebench_patch_generator import LLMSWEbenchPatchGenerator
+from mediated_coevo.analysis.judge_rewards import (
+    JudgeRewardAnnotationError,
+    annotate_judge_rewards,
+)
 from mediated_coevo.analysis.reporting import (
     BootstrapConfidenceInterval,
     ExperimentScoreSummary,
@@ -444,16 +448,16 @@ def _ensure_harbor_available(config: Config) -> None:
 
 
 def _prepare_llm_credentials_or_exit(config: Config) -> Config:
+    from mediated_coevo.core.config import ModelConfigError
     from mediated_coevo.llm.client import (
         LLMCredentialError,
-        normalize_openrouter_models,
         validate_openrouter_credentials,
     )
 
     try:
-        normalize_openrouter_models(config)
+        config.normalize_models()
         validate_openrouter_credentials()
-    except LLMCredentialError as exc:
+    except (ModelConfigError, LLMCredentialError) as exc:
         console.print(f"[bold red]ERROR:[/] {exc}")
         raise typer.Exit(code=1) from exc
     return config
@@ -547,6 +551,13 @@ def _print_result_summary(
     console.print(f"  Median reward: {_format_score(summary.median_reward)}")
     console.print(f"  Macro mean reward: {_format_score(summary.macro_mean_reward)}")
     console.print(f"  Bootstrap CI: {_format_ci(summary.bootstrap_ci)}")
+    if summary.judge_reward_summary is not None:
+        judge_summary = summary.judge_reward_summary
+        console.print(
+            "  Judge mean reward: "
+            f"{_format_score(judge_summary.mean_reward)} "
+            f"(macro={_format_score(judge_summary.macro_mean_reward)})"
+        )
     console.print(f"  Total tokens: {summary.total_tokens:,}")
     if summary.per_task:
         console.print("  Per-task:")
@@ -586,6 +597,28 @@ def _write_and_print_result_summary(
         summary_path=summary_path,
         header=header,
     )
+
+
+def _annotate_judge_rewards_or_exit(
+    *,
+    data_dir: Path,
+    config: Config,
+    history_store: HistoryStore | None = None,
+) -> None:
+    try:
+        asyncio.run(
+            annotate_judge_rewards(
+                data_dir=data_dir,
+                config=config,
+                history_store=history_store,
+            )
+        )
+    except JudgeRewardAnnotationError as exc:
+        console.print(f"[bold red]ERROR:[/] Judge reward annotation failed: {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        console.print(f"[bold red]ERROR:[/] Judge reward annotation failed: {exc}")
+        raise typer.Exit(code=1) from exc
 
 
 def _experiments_root(config: Config) -> Path:
@@ -1180,7 +1213,8 @@ def _run_unified_experiment(
         "[bold]Models:[/] "
         f"planner={config.models.planner} "
         f"executor={config.models.executor} "
-        f"mediator={config.models.mediator}"
+        f"mediator={config.models.mediator} "
+        f"judge={config.models.judge}"
     )
     console.print(f"\n[bold green]Starting experiment:[/] {runtime.experiment_dir}\n")
     records = asyncio.run(
@@ -1190,6 +1224,11 @@ def _run_unified_experiment(
         records=records,
         data_dir=runtime.experiment_dir,
         header="Results",
+    )
+    _annotate_judge_rewards_or_exit(
+        data_dir=runtime.experiment_dir,
+        config=config,
+        history_store=runtime.orchestrator.history_store,
     )
     if not swebench_eval_instance_ids:
         return
@@ -1231,6 +1270,7 @@ def _run_unified_experiment(
         summary_path=summary_path,
         header="Frozen eval results",
     )
+    _annotate_judge_rewards_or_exit(data_dir=eval_dir, config=eval_config)
     console.print(f"  Predictions: {predictions_path}")
     console.print(f"  Traces: {traces_path}")
 
@@ -1287,7 +1327,7 @@ def _records_from_swebench_traces(
             run_id=trace.run_id,
             condition_name=config.experiment.condition_name,
             seed=config.experiment.seed,
-            models=config.models.model_dump(),
+            models=config.models.model_dump(exclude_none=True),
             executor_agent=config.executor_runtime.agent_name,
             skill_update_policy=config.experiment.skill_updates.model_dump(),
             expected_reward_range=(0.0, 1.0),
@@ -1681,6 +1721,11 @@ def matrix(
             records=records,
             data_dir=row.runtime.experiment_dir,
             header=f"Row results: {row.preset_name}",
+        )
+        _annotate_judge_rewards_or_exit(
+            data_dir=row.runtime.experiment_dir,
+            config=row_config,
+            history_store=row.runtime.orchestrator.history_store,
         )
 
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
