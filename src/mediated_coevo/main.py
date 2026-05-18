@@ -55,7 +55,12 @@ from mediated_coevo.benchmarks.task_sets import (
     TaskSetError,
     resolve_task_selection,
 )
-from mediated_coevo.core.config import Config, SkillUpdateConfig, load_config
+from mediated_coevo.core.config import (
+    Config,
+    OPENROUTER_MODEL_PREFIX,
+    SkillUpdateConfig,
+    load_config,
+)
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
@@ -989,7 +994,9 @@ def _build_swebench_executor(
     from mediated_coevo.llm.client import LLMClient
 
     artifact_root = phase_dir / "artifacts"
-    patch_generator = LLMSWEbenchPatchGenerator(LLMClient(model=config.models.executor))
+    patch_generator = LLMSWEbenchPatchGenerator(
+        LLMClient(model=_openrouter_model_for_llm(config.models.executor))
+    )
     return SWEbenchExecutorAgent(
         model=config.models.executor,
         benchmark_repo=benchmark_repo,
@@ -1001,6 +1008,14 @@ def _build_swebench_executor(
         max_workers=max_workers,
         run_id_prefix=run_id_prefix,
     )
+
+
+def _openrouter_model_for_llm(model: str) -> str:
+    """Return a LiteLLM/OpenRouter model id from a Harbor-ready model id."""
+    model = model.strip()
+    if model.startswith(OPENROUTER_MODEL_PREFIX):
+        return model
+    return f"{OPENROUTER_MODEL_PREFIX}{model}"
 
 
 def _prepare_unified_experiment_root(

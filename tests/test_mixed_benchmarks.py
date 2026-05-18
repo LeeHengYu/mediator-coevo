@@ -121,6 +121,45 @@ async def test_routed_executor_routes_selected_tasks_to_backend_executors():
     assert swe_executor.calls == ["swe-task"]
 
 
+def test_swebench_executor_uses_openrouter_model_for_llm_patch_generation(
+    monkeypatch,
+    tmp_path,
+):
+    captured: dict[str, str] = {}
+
+    class _PatchGenerator:
+        def __init__(self, llm_client) -> None:
+            captured["llm_model"] = llm_client.model
+
+    monkeypatch.setattr(main_module, "LLMSWEbenchPatchGenerator", _PatchGenerator)
+    config = Config(
+        models={
+            "planner": "openrouter/test/planner",
+            "executor": "google/gemini-3-flash-preview",
+            "mediator": "openrouter/test/mediator",
+            "judge": "openrouter/test/judge",
+        }
+    )
+
+    executor = main_module._build_swebench_executor(
+        config=config,
+        benchmark_repo=object(),  # type: ignore[arg-type]
+        phase_dir=tmp_path,
+        timeout=1,
+        max_workers=1,
+        run_id_prefix="test-run",
+    )
+
+    assert captured["llm_model"] == "openrouter/google/gemini-3-flash-preview"
+    assert executor._model == "google/gemini-3-flash-preview"
+    assert (
+        main_module._openrouter_model_for_llm(
+            "openrouter/google/gemini-3-flash-preview"
+        )
+        == "openrouter/google/gemini-3-flash-preview"
+    )
+
+
 def test_unified_run_requires_at_least_one_benchmark_selection():
     result = CliRunner().invoke(app, ["run"])
 
