@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -21,7 +22,22 @@ DEFAULT_SWEBENCH_DATASET = "SWE-bench/SWE-bench_Lite"
 DEFAULT_SWEBENCH_SPLIT = "test"
 DEFAULT_SWEBENCH_INSTANCE_ID = "sympy__sympy-20590"
 DEFAULT_SWEBENCH_OUTPUT_DIR = Path("data/swebench-evals")
+SWEBENCH_HARNESS_WRAPPER_MODULE = "mediated_coevo.benchmarks.swebench_harness_wrapper"
 SWEBENCH_VERIFIER_TYPE = "swebench_harness"
+GIT_CLONE_MAX_ATTEMPTS = 3
+TRANSIENT_GIT_CLONE_ERRORS = (
+    "curl 56",
+    "operation timed out",
+    "early eof",
+    "unexpected disconnect",
+    "invalid index-pack",
+)
+SWEBENCH_MODAL_IMAGE_SETUP_ERROR_KIND = "swebench_modal_image_setup_failed"
+SWEBENCH_MODAL_IMAGE_SETUP_SIGNALS = (
+    "error creating sandbox",
+    "local client disconnected",
+    "app_state_stopped",
+)
 
 
 class SWEbenchDependencyError(RuntimeError):
@@ -100,7 +116,7 @@ class SWEbenchRepository:
         run_dir.parent.mkdir(parents=True, exist_ok=True)
 
         clone_url = f"https://github.com/{task.repo}.git"
-        _run_git(["clone", clone_url, str(run_dir)], cwd=None)
+        _clone_repo_with_retry(clone_url, run_dir)
         _run_git(["checkout", task.base_commit], cwd=run_dir)
 
         (run_dir / "instruction.md").write_text(planner_instruction)
@@ -319,11 +335,11 @@ def build_swebench_harness_command(
     max_workers: int,
     report_dir: str | None = None,
 ) -> list[str]:
-    """Build the official SWE-bench Modal harness command."""
+    """Build the project-wrapped SWE-bench Modal harness command."""
     command = [
         sys.executable,
         "-m",
-        "swebench.harness.run_evaluation",
+        SWEBENCH_HARNESS_WRAPPER_MODULE,
         "--dataset_name",
         dataset_name,
         "--split",
@@ -677,6 +693,20 @@ def _trace_from_aggregate_report(
                 f"Aggregate SWE-bench report marks {instance_id} incomplete."
             ),
         )
+    if outcome == "error":
+        setup_failure_signal = _modal_image_setup_failure_signal(harness_run)
+        if setup_failure_signal is not None:
+            return _failure_trace(
+                instance_id=instance_id,
+                run_id=run_id,
+                harness_run=harness_run,
+                status="env_failure",
+                error_kind=SWEBENCH_MODAL_IMAGE_SETUP_ERROR_KIND,
+                error_detail=(
+                    f"Aggregate SWE-bench report marks {instance_id} errored "
+                    f"after harness setup failure: {setup_failure_signal}."
+                ),
+            )
 
     resolved = outcome == "resolved"
     test_results: dict[str, Any] = {
@@ -797,6 +827,41 @@ def _run_git(args: list[str], *, cwd: Path | None) -> subprocess.CompletedProces
             f"stdout:\n{completed.stdout}\n\nstderr:\n{completed.stderr}"
         )
     return completed
+
+
+def _clone_repo_with_retry(
+    clone_url: str,
+    run_dir: Path,
+) -> subprocess.CompletedProcess[str]:
+    for attempt in range(1, GIT_CLONE_MAX_ATTEMPTS + 1):
+        try:
+            return _run_git(["clone", clone_url, str(run_dir)], cwd=None)
+        except RuntimeError as exc:
+            if attempt == GIT_CLONE_MAX_ATTEMPTS or not _is_transient_clone_error(exc):
+                raise
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+    raise RuntimeError("unreachable git clone retry state")
+
+
+def _is_transient_clone_error(exc: RuntimeError) -> bool:
+    error_text = str(exc).lower()
+    return any(signal in error_text for signal in TRANSIENT_GIT_CLONE_ERRORS)
+
+
+def _modal_image_setup_failure_signal(
+    harness_run: SWEbenchHarnessRun,
+) -> str | None:
+    log_text = f"{harness_run.stdout}\n{harness_run.stderr}"
+    normalized_log = log_text.lower()
+    for signal in SWEBENCH_MODAL_IMAGE_SETUP_SIGNALS:
+        if signal in normalized_log:
+            return signal
+    if "image build" in normalized_log and "failed" in normalized_log:
+        return "image build failed"
+    if "remote branch" in normalized_log and "not found" in normalized_log:
+        return "remote branch not found"
+    return None
 
 
 def _optional_string(value: Any) -> str | None:
