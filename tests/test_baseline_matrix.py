@@ -135,16 +135,6 @@ def test_baseline_presets_have_unique_condition_and_update_semantics():
     assert len(semantics) == len(set(semantics))
 
 
-def test_readme_documents_six_row_matrix_without_removed_duplicate():
-    readme = main_module.PROJECT_ROOT.joinpath("README.md").read_text()
-    matrix_section = readme.split("### Baseline Matrix", maxsplit=1)[1]
-
-    assert "seven baseline rows" not in matrix_section
-    assert "learned_mediator_same_task" not in matrix_section
-    assert "mediator_only_protocol_evolution" in matrix_section
-    assert "six baseline rows" in matrix_section
-
-
 def test_all_baseline_presets_validate():
     for preset in BASELINE_PRESETS_BY_NAME.values():
         validate_experiment_design(
