@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -76,6 +77,69 @@ def _trace(task_id: str = "task-a", iteration: int = 1) -> ExecutionTrace:
     )
 
 
+def _scored_run_with_history(tmp_path: Path) -> tuple[Path, HistoryStore, str]:
+    run_dir = tmp_path / "run"
+    trace_dir = run_dir / "artifacts" / "traces"
+    trace_dir.mkdir(parents=True)
+    trace = _trace()
+    trace_path = trace_dir / "task-a_iter0001.json"
+    trace_path.write_text(trace.model_dump_json())
+    metrics_path = run_dir / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "iteration": 1,
+                "task_id": "task-a",
+                "run_id": "run-1",
+                "reward": 0.5,
+                "verifier_status": "ok",
+                "total_tokens": 12,
+                "task_category": "skillsbench",
+                "task_difficulty": "medium",
+                "expected_reward_range": [0.0, 1.0],
+                "verifier_type": "pytest",
+                "trace_artifact_path": "artifacts/traces/task-a_iter0001.json",
+            }
+        )
+        + "\n"
+    )
+    write_score_summary(
+        build_score_summary(
+            [
+                IterationRecord(
+                    iteration=1,
+                    task_id="task-a",
+                    reward=0.5,
+                    total_tokens=12,
+                    execution_trace=trace,
+                )
+            ],
+            bootstrap_samples=50,
+        ),
+        run_dir / "summary.json",
+    )
+    history = HistoryStore(run_dir / "history")
+    source_entry_id = history.add(
+        HistoryEntry(
+            iteration=0,
+            agent_role="mediator",
+            payload=MediatorSignal(headline="useful feedback"),
+            metadata={"task_id": "task-a"},
+        )
+    )
+    history.tag_outcome_by_id(
+        source_entry_id,
+        reward=0.5,
+        metadata={
+            "verifier_reward": 0.5,
+            "outcome_task_id": "task-a",
+            "outcome_iteration": 1,
+            "trace_status": "ok",
+        },
+    )
+    return run_dir, history, source_entry_id
+
+
 def test_compute_judge_reward_applies_weights_exactly():
     response = JudgeLLMResponse(
         axis_scores=JudgeAxisScores(
@@ -137,65 +201,7 @@ def test_true_flag_requires_evidence():
 
 @pytest.mark.asyncio
 async def test_annotate_judge_rewards_writes_sidecar_summary_and_history(tmp_path):
-    run_dir = tmp_path / "run"
-    trace_dir = run_dir / "artifacts" / "traces"
-    trace_dir.mkdir(parents=True)
-    trace = _trace()
-    trace_path = trace_dir / "task-a_iter0001.json"
-    trace_path.write_text(trace.model_dump_json())
-    metrics_path = run_dir / "metrics.jsonl"
-    metrics_path.write_text(
-        json.dumps(
-            {
-                "iteration": 1,
-                "task_id": "task-a",
-                "run_id": "run-1",
-                "reward": 0.5,
-                "verifier_status": "ok",
-                "total_tokens": 12,
-                "task_category": "skillsbench",
-                "task_difficulty": "medium",
-                "expected_reward_range": [0.0, 1.0],
-                "verifier_type": "pytest",
-                "trace_artifact_path": "artifacts/traces/task-a_iter0001.json",
-            }
-        )
-        + "\n"
-    )
-    write_score_summary(
-        build_score_summary(
-            [
-                IterationRecord(
-                    iteration=1,
-                    task_id="task-a",
-                    reward=0.5,
-                    total_tokens=12,
-                    execution_trace=trace,
-                )
-            ],
-            bootstrap_samples=50,
-        ),
-        run_dir / "summary.json",
-    )
-    history = HistoryStore(run_dir / "history")
-    source_entry_id = history.add(
-        HistoryEntry(
-            iteration=0,
-            agent_role="mediator",
-            payload=MediatorSignal(headline="useful feedback"),
-            metadata={"task_id": "task-a"},
-        )
-    )
-    history.tag_outcome_by_id(
-        source_entry_id,
-        reward=0.5,
-        metadata={
-            "verifier_reward": 0.5,
-            "outcome_task_id": "task-a",
-            "outcome_iteration": 1,
-            "trace_status": "ok",
-        },
-    )
+    run_dir, history, source_entry_id = _scored_run_with_history(tmp_path)
 
     records = await annotate_judge_rewards(
         data_dir=run_dir,
@@ -229,6 +235,45 @@ async def test_annotate_judge_rewards_writes_sidecar_summary_and_history(tmp_pat
     assert entries[0].metadata["judge_confidence"] == pytest.approx(0.9)
     assert entries[0].metadata["judge_applied_cap"] is None
     assert "reward_source" not in entries[0].metadata
+
+
+@pytest.mark.asyncio
+async def test_malformed_judge_response_falls_back_to_verifier_reward(tmp_path):
+    run_dir, history, _ = _scored_run_with_history(tmp_path)
+
+    records = await annotate_judge_rewards(
+        data_dir=run_dir,
+        config=_config(),
+        history_store=history,
+        llm_client=_FakeJudgeClient(content="not-json"),
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.raw_reward == pytest.approx(0.5)
+    assert record.judge_reward == pytest.approx(0.5)
+    assert record.base_reward == pytest.approx(0.5)
+    assert record.confidence == pytest.approx(0.0)
+    assert record.metadata["judge_reward_fallback"] is True
+    assert record.metadata["fallback_source"] == "verifier_reward"
+    assert record.metadata["fallback_reason"] == "invalid_judge_response"
+    assert "invalid judge response" in record.metadata["fallback_error"]
+
+    sidecar_rows = [
+        json.loads(line)
+        for line in (run_dir / "artifacts" / "judge_rewards.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert sidecar_rows[0]["judge_reward"] == pytest.approx(0.5)
+    assert sidecar_rows[0]["metadata"]["judge_reward_fallback"] is True
+
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["judge_reward_summary"]["mean_reward"] == pytest.approx(0.5)
+
+    entries = history.query(recent=10)
+    assert entries[0].metadata["judge_reward"] == pytest.approx(0.5)
+    assert entries[0].metadata["judge_confidence"] == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio

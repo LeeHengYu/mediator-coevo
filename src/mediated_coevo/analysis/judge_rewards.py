@@ -19,7 +19,12 @@ from mediated_coevo.core.utils import as_optional_float, parse_json_object
 from mediated_coevo.evolution.compactor import head_tail_text, trace_header_summary
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.models.judge import JudgeLLMResponse, JudgeRewardRecord
+from mediated_coevo.models.judge import (
+    JudgeAxisScores,
+    JudgeCapFlags,
+    JudgeLLMResponse,
+    JudgeRewardRecord,
+)
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.history_store import HistoryStore
 
@@ -101,38 +106,56 @@ async def annotate_judge_rewards(
         record_id = candidate.record_id(config.judge.rubric_version)
         if record_id in records_by_id:
             continue
-        judge_response = await _judge_candidate(
-            candidate=candidate,
-            config=config,
-            llm_client=client,
-        )
-        judge_reward, base_reward, applied_cap = compute_judge_reward(judge_response)
-        record = JudgeRewardRecord(
-            record_id=record_id,
-            task_id=candidate.task_id,
-            iteration=candidate.iteration,
-            run_id=candidate.run_id,
-            raw_reward=candidate.raw_reward,
-            judge_reward=judge_reward,
-            base_reward=base_reward,
-            applied_cap=applied_cap,
-            axis_scores=judge_response.axis_scores,
-            flags=judge_response.flags,
-            confidence=judge_response.confidence,
-            rationale=judge_response.rationale,
-            flag_evidence=judge_response.flag_evidence,
-            judge_model=judge_model,
-            rubric_version=config.judge.rubric_version,
-            trace_path=_relative_path(candidate.trace_path, data_dir),
-            metrics_path=_relative_path(candidate.metrics_path, data_dir),
-            verifier_status=candidate.verifier_status,
-            trace_status=candidate.trace_status,
-            total_tokens=candidate.total_tokens,
-            task_category=candidate.task_category,
-            task_difficulty=candidate.task_difficulty,
-            expected_reward_range=candidate.expected_reward_range,
-            verifier_type=candidate.verifier_type,
-        )
+        try:
+            judge_response = await _judge_candidate(
+                candidate=candidate,
+                config=config,
+                llm_client=client,
+            )
+        except JudgeRewardAnnotationError as exc:
+            logger.warning(
+                "Judge response unavailable; falling back to verifier reward: "
+                "task_id=%s iteration=%d error=%s",
+                candidate.task_id,
+                candidate.iteration,
+                exc,
+            )
+            record = _fallback_record(
+                candidate=candidate,
+                data_dir=data_dir,
+                judge_model=judge_model,
+                rubric_version=config.judge.rubric_version,
+                record_id=record_id,
+                error=str(exc),
+            )
+        else:
+            judge_reward, base_reward, applied_cap = compute_judge_reward(judge_response)
+            record = JudgeRewardRecord(
+                record_id=record_id,
+                task_id=candidate.task_id,
+                iteration=candidate.iteration,
+                run_id=candidate.run_id,
+                raw_reward=candidate.raw_reward,
+                judge_reward=judge_reward,
+                base_reward=base_reward,
+                applied_cap=applied_cap,
+                axis_scores=judge_response.axis_scores,
+                flags=judge_response.flags,
+                confidence=judge_response.confidence,
+                rationale=judge_response.rationale,
+                flag_evidence=judge_response.flag_evidence,
+                judge_model=judge_model,
+                rubric_version=config.judge.rubric_version,
+                trace_path=_relative_path(candidate.trace_path, data_dir),
+                metrics_path=_relative_path(candidate.metrics_path, data_dir),
+                verifier_status=candidate.verifier_status,
+                trace_status=candidate.trace_status,
+                total_tokens=candidate.total_tokens,
+                task_category=candidate.task_category,
+                task_difficulty=candidate.task_difficulty,
+                expected_reward_range=candidate.expected_reward_range,
+                verifier_type=candidate.verifier_type,
+            )
         records_by_id[record.record_id] = record
         new_records.append(record)
 
@@ -179,6 +202,66 @@ def compute_judge_reward(response: JudgeLLMResponse) -> tuple[float, float, str 
         reward = CAP_VALUES["unverifiable_outcome"]
         applied_cap = "unverifiable_outcome"
     return reward, base_reward, applied_cap
+
+
+def _fallback_record(
+    *,
+    candidate: _JudgeCandidate,
+    data_dir: Path,
+    judge_model: str,
+    rubric_version: str,
+    record_id: str,
+    error: str,
+) -> JudgeRewardRecord:
+    """Return a judge sidecar row using the verifier reward as fallback."""
+    fallback_task_outcome = candidate.raw_reward
+    if candidate.expected_reward_range is not None:
+        low, high = candidate.expected_reward_range
+        if high != low:
+            fallback_task_outcome = (candidate.raw_reward - low) / (high - low)
+    fallback_task_outcome = min(1.0, max(0.0, fallback_task_outcome))
+
+    return JudgeRewardRecord(
+        record_id=record_id,
+        task_id=candidate.task_id,
+        iteration=candidate.iteration,
+        run_id=candidate.run_id,
+        raw_reward=candidate.raw_reward,
+        judge_reward=candidate.raw_reward,
+        base_reward=candidate.raw_reward,
+        applied_cap=None,
+        axis_scores=JudgeAxisScores(
+            task_outcome=fallback_task_outcome,
+            evidence_quality=0.0,
+            skill_update_usefulness=0.0,
+            token_efficiency=0.0,
+            reflection_depth=0.0,
+        ),
+        flags=JudgeCapFlags(),
+        confidence=0.0,
+        rationale=(
+            "Judge reward was unavailable because the judge response could not be "
+            "parsed or validated; using verifier reward as fallback."
+        ),
+        flag_evidence={},
+        judge_model=judge_model,
+        rubric_version=rubric_version,
+        trace_path=_relative_path(candidate.trace_path, data_dir),
+        metrics_path=_relative_path(candidate.metrics_path, data_dir),
+        verifier_status=candidate.verifier_status,
+        trace_status=candidate.trace_status,
+        total_tokens=candidate.total_tokens,
+        task_category=candidate.task_category,
+        task_difficulty=candidate.task_difficulty,
+        expected_reward_range=candidate.expected_reward_range,
+        verifier_type=candidate.verifier_type,
+        metadata={
+            "judge_reward_fallback": True,
+            "fallback_source": "verifier_reward",
+            "fallback_reason": "invalid_judge_response",
+            "fallback_error": error,
+        },
+    )
 
 
 async def _judge_candidate(
