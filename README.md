@@ -1,197 +1,384 @@
-## Context-Aware Mediation for Multi-Agent Skill Co-Evolution
+# Mediated Co-Evolution
 
-### Problem
+Mediated Co-Evolution is an experiment runner for studying how agent skills
+change when execution feedback is routed through different context policies.
+It supports SkillsBench tasks through Harbor, SWE-bench tasks through the
+official SWE-bench/Modal harness, and mixed runs that include both task types.
 
-Current multi-agent systems either:
+The main CLI entrypoint is:
 
-1. Evolve in isolation — single-agent self-improvement ignores cross-agent knowledge (OpenSpace, EvolveR, Self-Consolidation)
-2. Share passively — dump everything into a shared repo or context, causing context bloat and attention degradation (Group Evolving Agents' `S = ∪ Tⱼ`, Spark: shared agentic memory, which is similar to naive note-taking for mutual use)
-3. Require weight-level updates — expensive and only works with homogeneous agents sharing parameters (MAE's REINFORCE++ on shared θ)
-
-### Core Idea
-
-Introduce a **Mediator Agent** — a context-aware orchestrator whose primary function is not task routing but **knowledge routing** between heterogeneous agents. The Mediator decides _what_ knowledge flows between agents, _when_, _in what form_, and _at what context budget_. It co-evolves with the planner agent through periodical reflection.
-
-### Advantages
-
-- Concise reflection context via continuous Mediator LLM call to compact feedback to store refined history
-- LLM choice can be cheap in skill training phase
-  - Only the planner needs smart model (idea borrowed from Claude Code Advisor pattern of Sonnet running + Opus Advising); Mediator only handles text reports/log/compact reports, so can use less powerful models, such as `gemini-3-flash`.
-  - Executor can be mediocre so it doesn't perform too well on the tasks, there can be more effective contrasive pairs.
-
-### Example Architecture
-
-```
-User → Claude (plans) ──── task goal (unmodified) ───► Gemini (executes)
-              ▲                                      │
-              │                                      │  traces, errors, task score
-              │  filtered reports                    │
-              │                                      ▼
-         ┌────────────────────────────────────────────────────────────┐
-         │                       Mediator Agent                       │
-         │                                                            │
-         │  Observes Gemini's execution outputs.                      │
-         │  Filters, compresses, and selects what to                  │
-         │  expose to Claude.                                         │
-         │  Does NOT modify tasks sent to Gemini.                     │
-         │  Does NOT update skills directly.                          │
-         │  Co-evolves its own mediation, and planning skill.         │
-         └────────────────────────────────────────────────────────────┘
+```bash
+uv run medcoevo --help
 ```
 
-1. Planner: constructs each run's task plan from the benchmark instruction, active Executor skills, and condition-selected prior context. Prior context is selected by `--condition`:
-   - `no_feedback`: no previous-run context.
-   - `full_traces`: compact summaries of recent same-task traces (LLM-compacted when stderr is long).
-   - `shared_notes`: configured shared notes from experiment config.
-   - `static_mediator` / `learned_mediator`: the previous non-withheld Mediator report for the same task.
-     Prior reports are task-keyed; cross-task context is opt-in via `experiment.allow_cross_task_feedback`.
-     For meta-skill reflection, the Planner consumes `MediatorSignal` / `PlannerSignal` payloads from `HistoryEntry`.
-2. Executor: containerized environment to run benchmark or well-defined tasks, output reward or score.
-3. Mediator: only runs for `static_mediator` and `learned_mediator`; processes usable execution traces into curated reports for the Planner.
-4. Planner + Mediator: Coevolve by querying contrastive pairs — pairs are formed by linking history entries (via stable entry IDs) to their delayed rewards from the next iteration of the same task.
+## Normal Experiment
 
-## Current Implementation
+For a normal short SkillsBench experiment, run:
 
-- Planner grounds each run in a real local benchmark instruction instead of planning from a bare `task_id`.
-- Executor routes each selected task to either the SkillsBench/Harbor runtime or
-  the SWE-bench patch-generation + Modal harness runtime, then normalizes the
-  result into `ExecutionTrace`.
-- The local benchmark task tree lives under `benchmarks/skillsbench/`. Selected tasks, including the curated `skillsbench-10` tasks, are cached under `benchmarks/skillsbench/tasks/`.
-- Missing SkillsBench tasks are fetched on demand from the configured SkillsBench archive by default; fetched tasks are cached under `benchmarks/skillsbench/tasks/`.
-- A curated `skillsbench-10` task set is available via `--skillsbench-task-set skillsbench-10` for broad early experiments across build, control, networking, logistics, documents, science, visualization, and parsing tasks. `--skillsbench-task-set skillsbench-all` dynamically discovers local and remote task IDs, then fetches each missing task lazily as it runs.
-- Experiment conditions selectable via `--condition` (`no_feedback` | `full_traces` | `shared_notes` | `static_mediator` | `learned_mediator`).
-- Skill update permissions are independently selectable via `--skill-updates` (`none` | `executor` | `planner` | `mediator` | `all`, comma-separated except for `none` and `all`). Invalid condition/update combinations fail before Harbor, LLM, directory, artifact, or benchmark side effects.
-- Previous-report state is task-keyed; cross-task feedback is opt-in via `experiment.allow_cross_task_feedback` (default `false`).
-- Skill directories require a canonical `SKILL.md` entrypoint, validated at startup by `SkillStore.validate()`.
-- History outcome tagging uses stable entry IDs so multi-task runs cannot attribute a reward to the wrong task's planner/mediator entry.
-
-## CLI Usage
-
-Use `uv run medcoevo --help` to see the top-level commands:
-
-```
-uv run medcoevo run --skillsbench-task fix-build-google-auto
-uv run medcoevo matrix
-uv run medcoevo inspect
-uv run medcoevo skillsbench sync
+```bash
+uv run medcoevo run \
+  --skillsbench-task fix-build-agentops \
+  --swebench-instance sympy__sympy-13915 \
+  --iterations 2 \
+  --skill-updates none \
+  --advisor-buffer-max 2 \
+  --coevo-interval 2 \
+  --run-id <suffix>
+  --no-skill-validation
 ```
 
-Top-level shell completion helpers are also available:
+This selects one SkillsBench task, runs two iterations, disables committed skill
+updates, sets the advisor and reflection cadence to two iterations, and skips
+executor skill candidate validation. The default condition is
+`learned_mediator`, so the Mediator still produces feedback reports unless you
+override `--condition`.
 
+Experiment outputs are written under:
+
+```text
+data/experiments/<timestamp>-<suffix>/
 ```
-uv run medcoevo --install-completion
-uv run medcoevo --show-completion
+
+Use `--run-id <suffix>` to choose the suffix while keeping the timestamp prefix:
+
+```bash
+uv run medcoevo run \
+  --skillsbench-task fix-build-agentops \
+  --iterations 2 \
+  --skill-updates none \
+  --run-id agentops-smoke
 ```
 
-## Reproducible Run
+## Setup
 
-Install the Python dependencies:
+Install project dependencies with `uv`:
 
-```
+```bash
 uv sync --dev
 ```
 
-Install Harbor and check the local container runtime:
+Export the model credential used by all LLM calls:
 
+```bash
+export OPENROUTER_API_KEY=...
 ```
+
+SkillsBench runs require Harbor and a local container runtime:
+
+```bash
 uv tool install harbor
 harbor --version
 docker --version
 docker compose version
 ```
 
-The project uses OpenRouter as the only supported model credential. Export an
-OpenRouter key before normal experiments:
+SWE-bench runs use Modal instead of local Docker. Configure Modal before running
+SWE-bench commands:
 
-```
-export OPENROUTER_API_KEY=...
-```
-
-Model names are routed through OpenRouter. If a configured model omits the
-`openrouter/` prefix, the CLI adds it before writing run configs.
-
-Run one selected task for one smoke iteration:
-
-```
-uv run medcoevo run --skillsbench-task fix-build-google-auto --iterations 1 --seed 42
+```bash
+modal token new
 ```
 
-Run one SkillsBench task and one SWE-bench instance in a shared evolution loop:
+## How It Works
 
-```
-uv run medcoevo run --skillsbench-task fix-build-google-auto --swebench-instance sympy__sympy-13915 --iterations 4 --advisor-buffer-max 2 --coevo-interval 1 --skill-validation
+```text
+Benchmark task
+    |
+    v
+Planner -------------- plan/instructions -------------> Executor
+   ^                                                     |
+   |                                                     | trace, logs, verifier reward
+   |                                                     v
+   |<---------------- curated feedback ------------- Mediator
+                                                         |
+                                                         | trace/report evidence
+                                                         v
+                                                       Judge
+                                                         |
+                                                         v
+                                             judge reward annotations
 ```
 
-Run the six-row baseline matrix on the curated multi-task set:
+The experiment loop has three agent roles:
 
-```
-uv run medcoevo matrix --task-set skillsbench-10 --iterations 1 --seed 42
-```
+- Planner: reads the benchmark instruction plus condition-selected prior
+  context, then produces an execution plan.
+- Executor: runs the task in the selected benchmark backend and returns a
+  normalized execution trace and reward.
+- Mediator: when the condition uses mediation, compresses and filters execution
+  feedback before it is exposed to later Planner iterations.
+- Judge: annotates completed traces and reports with rubric-based rewards for
+  analysis.
 
-Inspect experiment outputs:
+Two skill update paths can be enabled independently:
 
-```
+- Executor skill updates edit `skills/executor/SKILL.md` through proposal,
+  advisor review, and optional validation.
+- Planner and Mediator meta-skill updates edit `skills/planner/SKILL.md` and
+  `skills/mediator/SKILL.md` on the co-evolution interval using contrastive
+  history pairs.
+
+Runtime skill files are copied into each experiment directory before the run
+starts. Normal experiment runs do not edit the repo-level `skills/` directory.
+
+## CLI Overview
+
+Top-level commands:
+
+```bash
+uv run medcoevo run
+uv run medcoevo matrix
 uv run medcoevo inspect
+uv run medcoevo skillsbench sync
+uv run medcoevo swebench list-instances
+uv run medcoevo swebench smoke
+```
+
+Shell completion helpers:
+
+```bash
+uv run medcoevo --install-completion
+uv run medcoevo --show-completion
+```
+
+## `run`
+
+`run` executes one SkillsBench, SWE-bench, or mixed co-evolution experiment. It
+requires at least one task selector.
+
+SkillsBench selectors:
+
+- `--skillsbench-task <id>`: repeatable; comma-separated IDs are also accepted.
+- `--skillsbench-task-set skillsbench-10`: curated 10-task set.
+- `--skillsbench-task-set skillsbench-all`: discover all local and remote
+  SkillsBench tasks, then fetch missing tasks lazily.
+- `--tasks` and `--task-set`: legacy aliases for SkillsBench selection.
+
+SWE-bench selectors:
+
+- `--swebench-instance <id>`: repeatable; comma-separated IDs are also accepted.
+- `--swebench-limit <n>`: first `n` instances from the configured split.
+- `--swebench-eval-instance <id>`: optional frozen eval after evolution.
+- `--swebench-eval-limit <n>`: first `n` instances for frozen eval.
+
+Core run options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--iterations` | `30` | Number of experiment iterations. |
+| `--seed` | `42` | Random seed. |
+| `--condition` | `learned_mediator` | Feedback routing condition. |
+| `--skill-updates` | `all` | Which skill families may be committed. |
+| `--advisor-buffer-max` | config value | Executor proposal batch size override. |
+| `--coevo-interval` | config value | Planner/Mediator reflection interval override. |
+| `--skill-validation` / `--no-skill-validation` | config value | Enable or disable executor candidate validation. |
+| `--run-id` | generated | Timestamp-prefixed output directory suffix. |
+| `--config-dir` | `config/` | Directory containing `default.toml`. |
+| `--verbose`, `-v` | false | Enable debug logging. |
+
+Feedback conditions:
+
+- `no_feedback`: no prior feedback; cannot enable skill updates.
+- `full_traces`: Planner receives compact same-task trace summaries.
+- `shared_notes`: Planner receives configured shared notes configured in config file.
+- `static_mediator`: Mediator reports are used, but Mediator skill updates are
+  invalid.
+- `learned_mediator`: Mediator reports are used, and Mediator/Planner
+  co-evolution can be enabled.
+
+Skill update values:
+
+- `none`
+- `executor`
+- `planner`
+- `mediator`
+- `all`
+- comma-separated role combinations such as `executor,planner`
+
+`none` and `all` cannot be combined with other values.
+
+Examples:
+
+```bash
+uv run medcoevo run \
+  --skillsbench-task fix-build-google-auto \
+  --iterations 1 \
+  --seed 42
+```
+
+```bash
+uv run medcoevo run \
+  --skillsbench-task-set skillsbench-10 \
+  --condition learned_mediator \
+  --skill-updates executor,planner,mediator \
+  --iterations 4
+```
+
+```bash
+uv run medcoevo run \
+  --skillsbench-task fix-build-agentops \
+  --swebench-instance sympy__sympy-13915 \
+  --iterations 4 \
+  --advisor-buffer-max 2 \
+  --coevo-interval 1 \
+  --skill-validation
+```
+
+## `matrix`
+
+`matrix` runs the six baseline rows against the same SkillsBench task selection,
+seed, model config, and budget config. Matrix runs are SkillsBench-only.
+
+```bash
+uv run medcoevo matrix \
+  --task-set skillsbench-10 \
+  --iterations 1 \
+  --seed 42
+```
+
+Supported options include `--tasks`, `--task-set`, `--iterations`, `--seed`,
+`--coevo-interval`, `--advisor-buffer-max`,
+`--skill-validation` / `--no-skill-validation`, `--config-dir`, and
+`--verbose`.
+
+Baseline rows:
+
+| Preset | Condition | Skill updates |
+| --- | --- | --- |
+| `no_feedback` | `no_feedback` | `none` |
+| `full_trace_same_task` | `full_traces` | `none` |
+| `static_mediator_same_task` | `static_mediator` | `none` |
+| `planner_only_skill_evolution` | `learned_mediator` | `planner` |
+| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator` |
+| `full_coevolution` | `learned_mediator` | `executor,planner,mediator` |
+
+Each row gets an isolated copy of the skill tree under its experiment
+directory.
+
+## `inspect`
+
+Inspect the newest experiment:
+
+```bash
+uv run medcoevo inspect
+```
+
+Inspect a specific experiment:
+
+```bash
 uv run medcoevo inspect data/experiments/<run-dir>
+```
+
+Emit machine-readable JSON:
+
+```bash
 uv run medcoevo inspect --json
 ```
 
-### SWE-bench Eval CLI
+`inspect` understands both single-run directories and baseline matrix
+directories.
 
-SWE-bench instance IDs are selected from a dataset split; they are not
-user-created task names. List a few valid IDs before running an evaluation:
+## `skillsbench sync`
 
+SkillsBench tasks are cached under `benchmarks/skillsbench/tasks/`. Missing
+tasks are fetched on demand when `executor_runtime.remote_fetch = true`.
+
+Pre-cache selected tasks:
+
+```bash
+uv run medcoevo skillsbench sync \
+  --tasks fix-build-agentops,dialogue-parser
 ```
+
+Pre-cache the curated set:
+
+```bash
+uv run medcoevo skillsbench sync \
+  --task-set skillsbench-10
+```
+
+`skillsbench sync` intentionally does not support `skillsbench-all`, because
+syncing every remote task can be expensive.
+
+The task archive is configured in `config/default.toml`:
+
+```toml
+[executor_runtime]
+remote_fetch = true
+archive_url = "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
+# archive_sha256 = "<64 hex chars>"
+```
+
+For reproducible experiments, pin `archive_url` to a commit or tag archive and
+set `archive_sha256`.
+
+## `swebench`
+
+List valid SWE-bench Lite instance IDs:
+
+```bash
 uv run medcoevo swebench list-instances --limit 20
 ```
 
-For SWE-bench-only co-evolution, use the unified `run` command:
+Filter by repository substring:
 
+```bash
+uv run medcoevo swebench list-instances \
+  --repo-filter django \
+  --limit 20
 ```
-uv run medcoevo run --swebench-instance django__django-11910 --iterations 4 --run-id swebench-django-evolve
+
+Run the standalone SWE-bench smoke command:
+
+```bash
+uv run medcoevo swebench smoke
 ```
 
-`--run-id` is treated as a suffix. The actual output directory/run ID is
-prefixed with the current timestamp, for example
-`20260515-173012-swebench-django-evolve`.
+The smoke command defaults to the SWE-bench Lite `test` split and the
+`sympy__sympy-20590` instance when no `--instance-id` is provided.
 
-Add a held-out frozen eval phase to the same unified command with
-`--swebench-eval-instance`:
+For SWE-bench co-evolution, use the unified `run` command:
 
+```bash
+uv run medcoevo run \
+  --swebench-instance django__django-11910 \
+  --iterations 4 \
+  --run-id swebench-django
 ```
+
+Add a frozen eval phase:
+
+```bash
 uv run medcoevo run \
   --swebench-instance django__django-11910 \
   --swebench-eval-instance django__django-11099 \
   --run-id swebench-django
 ```
 
-Run a small discovered evolution slice with an explicit held-out eval instance:
+SWE-bench options for `run`:
 
-```
-uv run medcoevo run \
-  --swebench-limit 5 \
-  --swebench-eval-instance django__django-11099 \
-  --run-id swebench-lite-5
-```
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--swebench-dataset-name` | `SWE-bench/SWE-bench_Lite` | Dataset name or local dataset path. |
+| `--swebench-split` | `test` | Dataset split. |
+| `--timeout` | `1800` | Per-instance test timeout in seconds. |
+| `--max-workers` | `1` | Modal harness worker count. |
 
-`swebench smoke` remains available as a one-instance convenience command using
-the SWE-bench Lite test split, gold patches, and the `sympy__sympy-20590`
-default instance. SWE-bench commands always run via Modal, so configure Modal
-credentials with `modal token new` before running them.
-
-The raw SWE-bench harness logs and aggregate report are kept under
-`data/swebench-evals/<run-id>/raw/`. The command also writes normalized
-project-facing outputs under
-`data/swebench-evals/<run-id>/summary.json` and
-`data/swebench-evals/<run-id>/traces.jsonl`, mapping SWE-bench `resolved`
-to reward `1.0` and unresolved reports to reward `0.0`.
-
-Typical single-run outputs have this shape:
+Standalone SWE-bench smoke outputs are written under:
 
 ```text
-data/experiments/<timestamp>-42-learned_mediator/
+data/swebench-evals/<timestamp>-<run-id>/
+```
+
+## Outputs
+
+Typical single-run output:
+
+```text
+data/experiments/<timestamp>-<suffix>/
 |-- config.toml
 |-- metrics.jsonl
+|-- summary.json
 |-- artifacts/
 |   |-- reports/
 |   |-- traces/
@@ -200,250 +387,142 @@ data/experiments/<timestamp>-42-learned_mediator/
 |   |-- history.jsonl
 |   `-- rejected_proposals.jsonl
 |-- jobs/
+|-- skills/
 `-- skills_snapshots/
 ```
 
-Matrix outputs use one directory per row under
-`data/experiments/<timestamp>-42-baseline-matrix/`.
+Important files:
 
-Potential Troubleshooting Procedures:
+- `config.toml`: resolved config after CLI overrides.
+- `metrics.jsonl`: per-iteration records.
+- `summary.json`: aggregate rewards, bootstrap confidence interval, token
+  totals, per-task summaries, and environment failure count.
+- `artifacts/traces/`: normalized task execution traces.
+- `artifacts/reports/`: Mediator reports.
+- `artifacts/validation/`: executor skill validation evidence when enabled.
+- `history/history.jsonl`: feedback history entries used for later context and
+  contrastive reflection.
+- `history/rejected_proposals.jsonl`: rejected advisor batches or validation
+  failures.
+- `skills/`: run-local skill copy.
+- `skills_snapshots/`: committed skill snapshots.
 
-- `harbor CLI not found on PATH`: run `uv tool install harbor`, then confirm `harbor --version`. For CI-only orchestrator checks that intentionally do not call Harbor, set `executor_runtime.harbor_required = false` in `config/default.toml`.
-- Docker or Compose errors in SkillsBench/Harbor runs: start Docker Desktop or Colima, then confirm `docker --version` and `docker compose version`. SWE-bench runs use Modal instead of local Docker.
-- Model credential errors: export `OPENROUTER_API_KEY`. Model IDs are normalized to `openrouter/...`; other provider-specific credential variables are not used.
-- Missing benchmark task: pre-cache selected tasks with `uv run medcoevo skillsbench sync --tasks <task-id>` or `uv run medcoevo skillsbench sync --task-set skillsbench-10`. If `executor_runtime.remote_fetch = false`, the task must already exist under `benchmarks/skillsbench/tasks/`.
+Matrix outputs use one subdirectory per preset:
 
-### Task Selection
-
-`run` requires at least one SkillsBench or SWE-bench selector:
-
-- `--skillsbench-task task-a --skillsbench-task task-b`: runs explicit SkillsBench task IDs. Comma-separated values are also accepted.
-- `--skillsbench-task-set skillsbench-10`: runs the curated 10-task subset.
-- `--skillsbench-task-set skillsbench-all`: dynamically discovers all local and remote SkillsBench task IDs, then fetches missing task contents lazily as each task runs.
-- `--swebench-instance django__django-11910`: runs explicit SWE-bench instances. Comma-separated values are also accepted.
-- `--swebench-limit N`: selects the first `N` instances from the configured SWE-bench dataset split.
-
-Legacy `--tasks` and `--task-set` remain as aliases for SkillsBench selection.
-Explicit task IDs override task sets within the same benchmark. Missing local
-SkillsBench tasks are fetched on demand from the provided archive by default. If
-the local copy is missing and the network/archive fetch fails, the command fails
-explicitly instead of silently skipping the task.
-
-Pre-cache selected tasks before running:
-
-```
-uv run medcoevo skillsbench sync --tasks fix-build-agentops,dialogue-parser
-uv run medcoevo skillsbench sync --task-set skillsbench-10
+```text
+data/experiments/<timestamp>-42-baseline-matrix/
+|-- no_feedback/
+|-- full_trace_same_task/
+|-- static_mediator_same_task/
+|-- planner_only_skill_evolution/
+|-- mediator_only_protocol_evolution/
+`-- full_coevolution/
 ```
 
-`skillsbench sync` intentionally does not support `skillsbench-all`, because syncing every task can be costly. It is for selected task IDs or the curated 10-task preset only.
+## Configuration
 
-To disable on-demand fetching, override `remote_fetch` in `config/default.toml`:
+Default configuration lives in:
 
-```
-[executor_runtime]
-remote_fetch = false
-```
-
-The SkillsBench archive source is configured by `executor_runtime.archive_url`.
-For reproducible experiment evidence, pin `archive_url` to an immutable commit
-or tag archive and set `executor_runtime.archive_sha256` to the archive's
-64-character SHA-256 digest. The default `refs/heads/main.zip` archive is a
-moving development convenience only; it is not a reproducibility pin. Local
-filesystem archive paths are supported, and relative paths in CLI config resolve
-from the project root.
-
-### Run Command
-
-`run` executes one configured experiment condition:
-
-```
-uv run medcoevo run --skillsbench-task fix-build-google-auto --iterations 30 --seed 42
+```text
+config/default.toml
 ```
 
-Useful options:
+The current config controls:
 
-- `--condition`: `no_feedback`, `full_traces`, `shared_notes`, `static_mediator`, or `learned_mediator`; default is `learned_mediator`.
-- `--skill-updates`: `none`, `executor`, `planner`, `mediator`, or `all`; comma-separated combinations such as `executor,planner,mediator` are allowed, except with `none` or `all`.
-- `--iterations`: number of iterations; default is `30`.
-- `--seed`: random seed; default is `42`.
-- `--config-dir`: directory containing `default.toml`; defaults to this repo's `config/`.
-- `--verbose` / `-v`: enables debug logging.
+- model IDs for Planner, Executor, Mediator, and Judge;
+- prompt and completion token budgets;
+- default iteration cadence;
+- skill update and validation defaults;
+- local output and benchmark paths;
+- Harbor runtime settings;
+- SkillsBench remote archive settings.
 
-Example custom row:
+CLI options override the loaded config for a single run. The resolved config is
+persisted in the experiment directory as `config.toml`.
 
-```
-uv run medcoevo run --skillsbench-task-set skillsbench-10 --condition learned_mediator --skill-updates executor,planner,mediator
-```
+Current config defaults include:
 
-### Matrix Command
+- `experiment.num_iterations = 30`
+- `experiment.coevo_interval = 3`
+- `experiment.advisor_buffer_max = 3`
+- `experiment.seed = 42`
+- `experiment.allow_cross_task_feedback = true`
+- `experiment.skill_validation.enabled = true`
+- `executor_runtime.agent_name = "hermes"`
+- `executor_runtime.harbor_timeout_sec = 1800`
 
-`matrix` runs all six baseline rows with the same tasks, seed, model config, budgets, and isolated per-row skill copies:
-
-```
-uv run medcoevo matrix --task-set skillsbench-10 --iterations 30 --seed 42
-```
-
-`matrix` supports the SkillsBench `--tasks`, `--task-set`, `--iterations`,
-`--seed`, `--coevo-interval`, `--advisor-buffer-max`, `--skill-validation` /
-`--no-skill-validation`, `--config-dir`, and `--verbose` options. Unlike
-unified `run`, matrix rows remain SkillsBench-only.
-The command copies the configured `skills/` tree into each row's experiment
-directory before that row starts, so rows cannot write to repo-level skills or
-contaminate one another.
-
-### Baseline Matrix
-
-The six baseline rows separate two axes:
-
-1. Feedback routing, controlled by `--condition` and responsible for Planner prior context plus Mediator calls.
-2. Skill-update permission, controlled by `--skill-updates` or by a matrix preset and responsible only for whether committed skill edits are allowed.
-
-Matrix rows:
-
-| Preset                             | Feedback condition | Skill updates               |
-| ---------------------------------- | ------------------ | --------------------------- |
-| `no_feedback`                      | `no_feedback`      | `none`                      |
-| `full_trace_same_task`             | `full_traces`      | `none`                      |
-| `static_mediator_same_task`        | `static_mediator`  | `none`                      |
-| `planner_only_skill_evolution`     | `learned_mediator` | `planner`                   |
-| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator`                  |
-| `full_coevolution`                 | `learned_mediator` | `executor,planner,mediator` |
-
-Assumptions encoded in the presets:
-
-- `static_mediator_same_task` uses Mediator reports without allowing skill evolution.
-- `planner_only_skill_evolution` uses learned Mediator reports, but only the Planner meta-skill evolves.
-- `mediator_only_protocol_evolution` disables Executor skill updates and allows only Mediator protocol evolution.
-- `full_coevolution` is the only baseline row that permits Executor, Planner, and Mediator skill commits together.
-
-Proposal feedback for Executor skill edits is also condition-driven:
-
-- `no_feedback` and `shared_notes` produce no Executor proposal feedback.
-- `full_traces` can use the current usable same-task trace summary.
-- `static_mediator` and `learned_mediator` can use exposed Mediator report content.
-- Withheld Mediator reports and unusable traces produce no proposal feedback.
-
-Validation rejects contradictory designs before runtime side effects. In
-particular, `no_feedback` cannot enable any skill updates, Mediator skill
-updates require `learned_mediator`, `shared_notes` cannot enable Executor
-updates, and `static_mediator` cannot evolve the Mediator protocol.
-
-Diffusion/network experiments are gated on the baseline-stability smoke record
-in `docs/smoke-baseline-stability.md`. That smoke table is operational smoke
-validation only, not scientific evidence of superiority.
-
-Metrics persist `baseline_preset` when present and `skill_update_policy` for every row. The existing `skill_updates` metrics field remains the list of committed co-evolution skill updates.
+To use the agent configured (for Skillsbench tasks), pre-installation of respective tools, such as CLI, is required.
 
 ## Testing
 
-This project uses `uv` as the single supported test and run entrypoint. Use `uv run ...` commands rather than invoking Python from an environment path directly.
-
-Install/sync dependencies:
-
-```
-uv sync --dev
-```
-
 Run the default unit suite:
 
-```
+```bash
 uv run pytest
+```
+
+Run one test file:
+
+```bash
+uv run pytest tests/test_skillsbench.py
 ```
 
 Run the opt-in Harbor integration test:
 
-```
+```bash
 uv run pytest tests/test_skillsbench_integration.py -m integration -v -s
 ```
 
-The integration test uses Harbor's `opencode` agent with
-`openrouter/google/<model>` by default. Source the shell
-environment that exports `OPENROUTER_API_KEY` before running it, or override
-with `MEDIATED_COEVO_INTEGRATION_AGENT` and an OpenRouter-routed
-`MEDIATED_COEVO_INTEGRATION_MODEL`.
+The project config excludes integration tests from the default pytest run.
 
-### Two Distinct Skill Update Flows
+## Troubleshooting
 
-**Flow 1 — Executor skill gating (count-triggered)**
+`OPENROUTER_API_KEY is required`
 
-Updates `skills/executor/SKILL.md` — what the Executor knows how to do.
-Enabled only when `skill_updates.executor = true`.
+Export `OPENROUTER_API_KEY` before running experiments.
 
-```
-Each iteration:
-  Planner proposes a SkillProposal (based on Mediator feedback) → buffered
+`harbor CLI not found on PATH`
 
-When buffer hits advisor_buffer_max (default 10):
-  SkillAdvisor reviews the full batch → approve / reject
-  Buffer is cleared regardless of outcome
-  If rejected: the reviewed proposals are stored in history/rejected_proposals.jsonl
-             → no skill file is changed
-  If approved: Planner drafts a new SkillUpdate (based on Advisor's aggregated feedback)
-             → candidate is validated against the current skill on buffered tasks
-             → written to skills/executor/SKILL.md with AdvisorBatchProvenance only if empirical validation accepts it
+Install Harbor with `uv tool install harbor`, then confirm `harbor --version`.
+For orchestrator-only checks that should not call Harbor, set
+`executor_runtime.harbor_required = false` in `config/default.toml`.
+
+Docker or Compose failures in SkillsBench runs
+
+Start Docker Desktop or Colima, then confirm:
+
+```bash
+docker --version
+docker compose version
 ```
 
-Executor validation is validate-before-apply: the candidate skill is injected
-into controlled executor-only SkillsBench runs and compared against the current
-executor skill on the same buffered task IDs. The candidate is adopted only when
-its mean reward is not worse and no validation task regresses; rejected
-candidates are dropped and validation evidence is written under
-`artifacts/validation/`. Rejected advisor batches and validation-rejected
-candidate batches are stored under `history/rejected_proposals.jsonl` for later
-analysis/reflection, but they are not recorded as committed skill updates.
+Missing SkillsBench task
 
-**Flow 2 — Agent meta-skill co-evolution (iteration-triggered)**
+Sync selected tasks with `skillsbench sync`, or keep
+`executor_runtime.remote_fetch = true` so the runner can fetch missing tasks on
+demand.
 
-Updates `skills/mediator/SKILL.md` and `skills/planner/SKILL.md` — _how_ each agent behaves, not what the Executor executes.
-Mediator reflection requires `skill_updates.mediator = true`; Planner reflection requires `skill_updates.planner = true`.
+SWE-bench Modal credential failure
 
-```
-Every coevo_interval iterations (default 5):
-  Reflector queries HistoryStore for contrastive pairs
-  (pairs are formed from entries tagged with delayed rewards from the next iteration)
+Run `modal token new` before SWE-bench commands.
 
-  Mediator reflection → rewrites skills/mediator/SKILL.md
-    (coordination-protocol: how to curate and present feedback)
-    → loaded into MediatorAgent immediately
-    → recorded with ContrastiveReflectionProvenance
+Invalid experiment design
 
-  Planner reflection → rewrites skills/planner/SKILL.md
-    (skill-refiner: how to decide when and how to edit executor skills)
-    → injected into Planner context at the next iteration start
-    → recorded with ContrastiveReflectionProvenance
-```
+The CLI validates contradictory condition/update combinations before starting
+runtime side effects. Examples:
 
-`SkillProposal` and `SkillUpdate` share a `SkillEdit` base (`old_content`, `new_content`, `reasoning`). Rejected proposal batches are written to `HistoryStore`'s `rejected_proposals.jsonl` sidecar; committed updates are serialized in `metrics.jsonl`. Executor updates use `IterationRecord.skill_update`; co-evolution checkpoints can record mediator/planner updates in `IterationRecord.skill_updates`. Provenance is intentionally concise and points back to proposal IDs, `HistoryStore` entry IDs, rewards, hashes, and skill snapshots instead of duplicating full evidence.
+- `no_feedback` cannot enable any skill updates.
+- Mediator skill updates require `learned_mediator`.
+- `shared_notes` cannot enable Executor updates.
+- `static_mediator` cannot enable Mediator updates.
 
-## Status
+## Related Work
 
-Current status: P0 correctness and baseline-experiment plumbing are implemented
-through the current CLI. The repo has task-keyed feedback/history state,
-entry-ID outcome tagging, canonical skill store validation, configurable
-feedback conditions, a six-row baseline matrix, Harbor/SkillsBench failure-mode
-coverage, and validate-before-apply Executor skill updates.
-
-Smoke evidence: `docs/smoke-baseline-stability.md` records a completed one-task,
-one-iteration six-row matrix with scored traces and zero environment failures.
-That record is operational smoke evidence only, not scientific performance
-evidence.
-
-Open work: network diffusion remains intentionally gated. Keep the reproducible
-setup/run instructions and smoke evidence current as defaults or environment
-requirements change.
-
-## Further Direction
-
-1. Overall flow of the information, who sees what?
-2. Conditions that trigger co-evolution
-3. Refine the task definition and output score, as some Skillsbench task outputs binary score so little variation can be used. The performace (hence the score) can be evaluate based on the output of the model, including clarity or formatting.
-
-## Related Work & Papers
-
-1. Anthropic: Claude API Advisor (beta): https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool (Proof that a reference model is useful in guidance of a weaker model)
-2. Spark — Shared Agentic Memory: https://arxiv.org/abs/2511.08301
-3. Multi-Agent Evolve (MAE): https://arxiv.org/abs/2510.23595
-4. OpenSpace: https://github.com/HKUDS/OpenSpace
-5. Group-Evolving Agents (GEA): https://arxiv.org/abs/2602.04837
-6. Self-Evolving Coordination Protocol (SECP): https://arxiv.org/abs/2602.02170
+- Claude API Advisor: https://platform.anthropic.com/docs/en/agents-and-tools/tool-use/advisor-tool
+- Spark - Shared Agentic Memory: https://arxiv.org/abs/2511.08301
+- Multi-Agent Evolve (MAE): https://arxiv.org/abs/2510.23595
+- OpenSpace: https://github.com/HKUDS/OpenSpace
+- Group-Evolving Agents (GEA): https://arxiv.org/abs/2602.04837
+- Self-Evolving Coordination Protocol (SECP): https://arxiv.org/abs/2602.02170
+- Rubric as Reward: https://arxiv.org/pdf/2507.17746
+- Skill Collective Evolution: https://github.com/AMAP-ML/SkillClaw
