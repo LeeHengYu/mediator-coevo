@@ -516,6 +516,20 @@ runtime side effects. Examples:
 - `shared_notes` cannot enable Executor updates.
 - `static_mediator` cannot enable Mediator updates.
 
+## Progress
+
+1. Skillsbench and SWE-bench datasets integrated, but SWE-bench evaluation is set to be run on Modal (cloud)
+2. Experimental LLM Judge layer is added, run after each task run by evaluating the traces and logs. The judge reward is a weighted average of a few rubrics and the verifier score takes 50% of the judge reward. Certain flags are used to cap the judge reward for inquality source. 
+
+### Further Experiment 
+
+1. Larger scale experiment (5+ tasks across two bench, 2hr+ time)
+  - Lack of device resource (memory, storage, cloud computation for SWE-bench verifier)
+2. GRPO framework application
+3. LLM-as-judge design
+  - Pass 2-3 traces, so the reward is relative
+  - Few shot examples
+
 ## Related Work
 
 - Claude API Advisor: https://platform.anthropic.com/docs/en/agents-and-tools/tool-use/advisor-tool
@@ -526,3 +540,4 @@ runtime side effects. Examples:
 - Self-Evolving Coordination Protocol (SECP): https://arxiv.org/abs/2602.02170
 - Rubric as Reward: https://arxiv.org/pdf/2507.17746
 - Skill Collective Evolution: https://github.com/AMAP-ML/SkillClaw
+- LLM-as-Judge guide(23 Jun): https://arxiv.org/pdf/2306.05685
