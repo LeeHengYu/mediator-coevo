@@ -752,12 +752,201 @@ class _NoCallExecutor:
         raise AssertionError(f"executor should not be called: {name}")
 
 
+class _PlannerReflectionLLM:
+    model = "test-model"
+
+    async def complete(self, *args, **kwargs) -> dict:
+        return {
+            "content": (
+                '{"candidates": ['
+                '{"candidate_id": "low", "update_kind": "narrow_clarification", '
+                '"hypothesis": "low reward candidate", "risk": "low", '
+                '"audit_score": 0.6, "new_content": "# Candidate Low", '
+                '"reasoning": "low"}, '
+                '{"candidate_id": "high", "update_kind": "narrow_clarification", '
+                '"hypothesis": "high reward candidate", "risk": "low", '
+                '"audit_score": 0.7, "new_content": "# Candidate High", '
+                '"reasoning": "high"}'
+                "]}"
+            ),
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "model": self.model,
+            "raw": {},
+        }
+
+    def drain_token_events(self) -> list[TokenBudgetEvent]:
+        return []
+
+
+class _PlannerReflectionPlanner:
+    def __init__(self) -> None:
+        self.llm_client = _PlannerReflectionLLM()
+        self.skill_refiner = ""
+
+    def set_skill_context(
+        self,
+        executor_skills: str,
+        skill_refiner: str | None = None,
+    ) -> None:
+        self.skill_refiner = skill_refiner or ""
+
+    async def plan_task(
+        self,
+        task_id: str,
+        base_instruction: str,
+        prior_context: str | None = None,
+        current_skills: list[str] | None = None,
+        iteration: int = 0,
+    ) -> TaskSpec:
+        instruction = self.skill_refiner or base_instruction
+        return TaskSpec(task_id=task_id, instruction=instruction, iteration=iteration)
+
+
+class _PlannerReflectionExecutor:
+    def __init__(self, rewards: dict[str, float]) -> None:
+        self.rewards = rewards
+
+    async def execute_task(
+        self,
+        task_spec: TaskSpec,
+        skill_texts: list[str],
+    ) -> ExecutionTrace:
+        return ExecutionTrace(
+            task_id=task_spec.task_id,
+            iteration=task_spec.iteration,
+            status="ok",
+            reward=self.rewards[task_spec.instruction],
+        )
+
+
+class _PlannerReflectionSkillStore:
+    def __init__(self) -> None:
+        self.skills = {
+            "executor": "# Executor\n",
+            "planner": "# Current Planner\n",
+        }
+        self.writes: list[tuple[str, str]] = []
+
+    def read_skill(self, skill_name: str) -> str | None:
+        return self.skills.get(skill_name)
+
+    def write_skill(self, skill_name: str, content: str) -> None:
+        self.writes.append((skill_name, content))
+        self.skills[skill_name] = content
+
+    def skill_hashes(self) -> dict[str, str]:
+        return {
+            skill_name: SkillStore.content_hash(content)
+            for skill_name, content in self.skills.items()
+        }
+
+
 class _EmptySkillStore:
     def read_skill(self, skill_name: str) -> str | None:
         return None
 
     def skill_hashes(self) -> dict[str, str]:
         return {}
+
+
+def _planner_reflection_orchestrator(
+    tmp_path: Path,
+    *,
+    rewards: dict[str, float],
+) -> Orchestrator:
+    orch: Any = Orchestrator.__new__(Orchestrator)
+    orch.planner = _PlannerReflectionPlanner()
+    orch.executor = _PlannerReflectionExecutor(rewards)
+    orch.mediator = _NoCallMediator()
+    orch.skill_store = _PlannerReflectionSkillStore()
+    orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    orch.history_store = HistoryStore(history_dir=tmp_path / "history")
+    orch.benchmark_repo = _AnyTaskRepo()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        }
+    )
+    orch.config.experiment.skill_updates.executor = False
+    orch.config.experiment.skill_updates.mediator = False
+    orch.config.experiment.skill_updates.planner = True
+    orch.config.experiment.skill_validation.skillsbench_tasks = ["task-V"]
+    orch.config.experiment.skill_validation.sample_size = 1
+    orch.experiment_dir = tmp_path
+    orch.skill_advisor = _NoCallAdvisor()
+    orch.judge_llm_client = None
+    orch._proposal_buffer = []
+    orch._previous_report_by_task = {}
+    orch._previous_reward_by_task = {}
+    _attach_executor_skill_gate(orch)
+    return orch
+
+
+def _seed_planner_reflection_history(orch: Orchestrator) -> None:
+    orch.history_store.add(HistoryEntry(
+        iteration=0,
+        agent_role="planner",
+        payload=PlannerSignal(reasoning="worse edit"),
+        reward=0.2,
+        metadata={"task_id": "task-A"},
+    ))
+    orch.history_store.add(HistoryEntry(
+        iteration=1,
+        agent_role="planner",
+        payload=PlannerSignal(reasoning="better edit"),
+        reward=0.8,
+        metadata={"task_id": "task-A"},
+    ))
+
+
+@pytest.mark.asyncio
+async def test_planner_coevolution_validates_candidates_and_commits_best(tmp_path):
+    orch = _planner_reflection_orchestrator(
+        tmp_path,
+        rewards={
+            "# Current Planner\n": 0.5,
+            "# Candidate Low": 0.6,
+            "# Candidate High": 0.9,
+        },
+    )
+    _seed_planner_reflection_history(orch)
+
+    record = await orch._coevolve(3, "learned_mediator")
+
+    assert record is not None
+    assert len(record.skill_updates) == 1
+    update = record.skill_updates[0]
+    assert update.skill_id == "planner"
+    assert update.new_content == "# Candidate High"
+    assert orch.skill_store.writes == [("planner", "# Candidate High")]
+    assert update.provenance is not None
+    assert update.provenance.selected_candidate_id == "high"
+    assert update.provenance.validation is not None
+    assert update.provenance.validation.decision == "accepted"
+    assert update.provenance.validation.current_mean_reward == pytest.approx(0.5)
+    assert update.provenance.validation.candidate_mean_reward == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_planner_coevolution_rejects_when_validation_does_not_improve(tmp_path):
+    orch = _planner_reflection_orchestrator(
+        tmp_path,
+        rewards={
+            "# Current Planner\n": 0.9,
+            "# Candidate Low": 0.6,
+            "# Candidate High": 0.8,
+        },
+    )
+    _seed_planner_reflection_history(orch)
+
+    record = await orch._coevolve(3, "learned_mediator")
+
+    assert record is None
+    assert orch.skill_store.writes == []
 
 
 class _MissingTaskRepo:

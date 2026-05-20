@@ -95,6 +95,23 @@ class ArtifactStore:
         logger.debug("Stored validation result: %s", path)
         return path
 
+    def store_validation_variant_result(
+        self,
+        validation_id: str,
+        variant: str,
+        result: BaseModel,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """Persist validation summary evidence for one candidate variant."""
+        path = self._validation_dir / validation_id / variant / "result.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Validation result already exists: {path}")
+        path.write_text(result.model_dump_json(indent=2))
+        logger.debug("Stored validation variant result: %s", path)
+        return path
+
     def store_candidate_batch(
         self,
         batch: SkillUpdateCandidateBatch,

@@ -92,6 +92,7 @@ def build_candidate_batch(
     current_skill: str,
     candidates: list[SkillUpdateCandidate],
     selection_seed: int | None,
+    select_candidate: bool = True,
 ) -> SkillUpdateCandidateBatch:
     """Audit candidates and select one from the top quartile."""
     audited = [
@@ -112,10 +113,11 @@ def build_candidate_batch(
         selection_policy=SELECTION_POLICY_RANDOM_TOP_QUARTILE,
         candidates=audited,
     )
-    selected = select_top_quartile_candidate(batch)
-    if selected is not None:
-        selected.selected = True
-        batch.selected_candidate_id = selected.candidate_id
+    if select_candidate:
+        selected = select_top_quartile_candidate(batch)
+        if selected is not None:
+            selected.selected = True
+            batch.selected_candidate_id = selected.candidate_id
     return batch
 
 

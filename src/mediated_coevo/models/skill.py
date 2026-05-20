@@ -185,6 +185,7 @@ class ContrastiveReflectionProvenance(SkillUpdateProvenance):
 
     kind: Literal["contrastive_reflection"] = "contrastive_reflection"
     contrastive_pair_refs: list[ContrastivePairRef] = Field(default_factory=list)
+    validation: SkillValidationResult | None = None
     max_pairs: int = 0
     selection_seed: int | None = None
 

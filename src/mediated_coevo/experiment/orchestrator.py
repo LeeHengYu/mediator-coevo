@@ -10,6 +10,7 @@ import json
 import logging
 import random
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
-from mediated_coevo.evolution.reflector import Reflector
+from mediated_coevo.evolution.reflector import ReflectionDraft, Reflector
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.conditions import (
     ConditionName,
@@ -51,6 +52,9 @@ from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import (
     SkillProposal,
     SkillUpdate,
+    SkillUpdateCandidate,
+    SkillValidationResult,
+    SkillValidationTaskResult,
 )
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.runtime.token_budget import TokenBudgetEvent
@@ -59,6 +63,17 @@ from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PlannerValidationRun:
+    reward: float | None
+    reward_source: str | None
+    verifier_reward: float | None
+    judge_reward: float | None
+    status: str
+    trace_path: str | None
+    usable: bool
 
 
 class Orchestrator:
@@ -543,17 +558,13 @@ class Orchestrator:
             logger.info("Mediator skill evolution skipped (skill updates disabled).")
 
         if self.config.experiment.skill_updates.planner:
-            planner_result = await reflector.reflect(
-                "planner",
-                self.planner.llm_client,
+            planner_update = await self._reflect_and_validate_planner(
+                reflector,
                 iteration=iteration,
                 selection_seed=reflection_seed + 1,
             )
-            if planner_result:
-                planner_result.provenance.rollback_snapshot = rollback_snapshot(
-                    iteration
-                )
-                skill_updates.append(skill_update_from_reflection(planner_result))
+            if planner_update is not None:
+                skill_updates.append(planner_update)
         else:
             logger.info("Planner skill evolution skipped (skill updates disabled).")
         llm_token_events = self._drain_llm_token_events()
@@ -567,6 +578,275 @@ class Orchestrator:
             skill_updates=skill_updates,
             config=self.config,
             skill_hashes=self._current_skill_hashes(),
+        )
+
+    async def _reflect_and_validate_planner(
+        self,
+        reflector: Reflector,
+        *,
+        iteration: int,
+        selection_seed: int,
+    ) -> SkillUpdate | None:
+        """Reflect Planner skill candidates and commit the best validated one."""
+        draft = await reflector.draft_reflection(
+            agent_role="planner",
+            llm_client=self.planner.llm_client,
+            iteration=iteration,
+            selection_seed=selection_seed,
+            candidate_count=2,
+            select_candidate=False,
+        )
+        if draft is None:
+            return None
+
+        selected = await self._validate_planner_reflection(
+            draft,
+            iteration=iteration,
+        )
+        if selected is None:
+            return None
+
+        selected_candidate_id, validation = selected
+        planner_result = reflector.commit_draft(
+            draft,
+            selected_candidate_id=selected_candidate_id,
+            validation=validation,
+        )
+        if planner_result is None:
+            return None
+        planner_result.provenance.rollback_snapshot = rollback_snapshot(iteration)
+        return skill_update_from_reflection(planner_result)
+
+    async def _validate_planner_reflection(
+        self,
+        draft: ReflectionDraft,
+        *,
+        iteration: int,
+    ) -> tuple[str, SkillValidationResult] | None:
+        """Empirically select the best Planner reflection candidate."""
+        candidates = _valid_planner_reflection_candidates(
+            draft.candidate_batch.candidates,
+        )
+        if not candidates:
+            return None
+
+        validation_config = self.config.experiment.skill_validation
+        validation_id = f"{draft.candidate_batch.batch_id}-planner-validation"
+        if not validation_config.enabled:
+            best = max(
+                candidates,
+                key=lambda candidate: (candidate.audit_score, candidate.candidate_id),
+            )
+            return best.candidate_id, SkillValidationResult(
+                validation_id=validation_id,
+                task_ids=[],
+                decision="accepted",
+                reason="validation_disabled",
+                min_mean_delta=validation_config.min_mean_delta,
+                reward_tolerance=validation_config.reward_tolerance,
+            )
+
+        task_ids = self.executor_skill_gate._select_validation_task_ids(
+            contributing_tasks=draft.candidate_batch.task_ids,
+            iteration=iteration,
+            batch_id=validation_id,
+        )
+        executor_skill = self.skill_store.read_skill("executor") or ""
+        current_runs: dict[str, _PlannerValidationRun] = {}
+        try:
+            for task_id in task_ids:
+                current_runs[task_id] = await self._run_planner_validation_task(
+                    validation_id=validation_id,
+                    variant="current",
+                    task_id=task_id,
+                    iteration=iteration,
+                    planner_skill=draft.old_content,
+                    executor_skill=executor_skill,
+                )
+
+            candidate_results = [
+                await self._validate_planner_candidate(
+                    validation_id=validation_id,
+                    iteration=iteration,
+                    candidate=candidate,
+                    task_ids=task_ids,
+                    current_runs=current_runs,
+                    executor_skill=executor_skill,
+                )
+                for candidate in candidates
+            ]
+        finally:
+            self.planner.set_skill_context(
+                executor_skills=executor_skill,
+                skill_refiner=draft.old_content,
+            )
+
+        accepted = [
+            (candidate, result)
+            for candidate, result in zip(candidates, candidate_results, strict=True)
+            if result.decision == "accepted" and result.candidate_mean_reward is not None
+        ]
+        if not accepted:
+            logger.info("Planner reflection validation rejected all candidates.")
+            if candidate_results:
+                best_rejected = max(
+                    candidate_results,
+                    key=lambda result: result.candidate_mean_reward
+                    if result.candidate_mean_reward is not None
+                    else float("-inf"),
+                )
+                self.artifact_store.store_validation_result(
+                    validation_id,
+                    best_rejected,
+                    overwrite=True,
+                )
+            return None
+
+        best_candidate, best_result = max(
+            accepted,
+            key=lambda item: (
+                item[1].candidate_mean_reward
+                if item[1].candidate_mean_reward is not None
+                else float("-inf"),
+                item[1].mean_delta if item[1].mean_delta is not None else float("-inf"),
+                item[0].audit_score,
+                item[0].candidate_id,
+            ),
+        )
+        self.artifact_store.store_validation_result(
+            validation_id,
+            best_result,
+            overwrite=True,
+        )
+        return best_candidate.candidate_id, best_result
+
+    async def _validate_planner_candidate(
+        self,
+        *,
+        validation_id: str,
+        iteration: int,
+        candidate: SkillUpdateCandidate,
+        task_ids: list[str],
+        current_runs: dict[str, _PlannerValidationRun],
+        executor_skill: str,
+    ) -> SkillValidationResult:
+        task_results = []
+        variant = f"candidate-{candidate.candidate_id}"
+        for task_id in task_ids:
+            current = current_runs[task_id]
+            candidate_run = await self._run_planner_validation_task(
+                validation_id=validation_id,
+                variant=variant,
+                task_id=task_id,
+                iteration=iteration,
+                planner_skill=candidate.new_content,
+                executor_skill=executor_skill,
+            )
+            usable = current.usable and candidate_run.usable
+            regressed = (
+                usable
+                and current.reward is not None
+                and candidate_run.reward is not None
+                and candidate_run.reward
+                < current.reward - self.config.experiment.skill_validation.reward_tolerance
+            )
+            task_results.append(
+                SkillValidationTaskResult(
+                    task_id=task_id,
+                    current_reward=current.reward,
+                    candidate_reward=candidate_run.reward,
+                    current_reward_source=current.reward_source,
+                    candidate_reward_source=candidate_run.reward_source,
+                    current_verifier_reward=current.verifier_reward,
+                    candidate_verifier_reward=candidate_run.verifier_reward,
+                    current_judge_reward=current.judge_reward,
+                    candidate_judge_reward=candidate_run.judge_reward,
+                    current_status=current.status,
+                    candidate_status=candidate_run.status,
+                    current_trace_path=current.trace_path,
+                    candidate_trace_path=candidate_run.trace_path,
+                    usable=usable,
+                    regressed=regressed,
+                )
+            )
+
+        result = self.executor_skill_gate._validation_decision(
+            validation_id=f"{validation_id}-{candidate.candidate_id}",
+            task_ids=task_ids,
+            task_results=task_results,
+        )
+        self.artifact_store.store_validation_variant_result(
+            validation_id,
+            variant,
+            result,
+            overwrite=True,
+        )
+        return result
+
+    async def _run_planner_validation_task(
+        self,
+        *,
+        validation_id: str,
+        variant: str,
+        task_id: str,
+        iteration: int,
+        planner_skill: str,
+        executor_skill: str,
+    ) -> _PlannerValidationRun:
+        task_metadata = task_metadata_fields(task_id=task_id, task_config=None)
+        try:
+            benchmark_task = self.benchmark_repo.resolve(task_id)
+            task_metadata = task_metadata_fields(
+                task_id=task_id,
+                task_config=benchmark_task.task_config,
+            )
+            self.planner.set_skill_context(
+                executor_skills=executor_skill,
+                skill_refiner=planner_skill,
+            )
+            skill_texts = [executor_skill] if executor_skill else []
+            task_spec = await self.planner.plan_task(
+                task_id=task_id,
+                base_instruction=benchmark_task.instruction,
+                prior_context=None,
+                current_skills=skill_texts,
+                iteration=iteration,
+            )
+            trace = await self.executor.execute_task(task_spec, skill_texts)
+        except FileNotFoundError as e:
+            trace = ExecutionTrace(
+                task_id=task_id,
+                iteration=iteration,
+                status="env_failure",
+                error_kind="task_not_found",
+                error_detail=str(e),
+            )
+
+        trace_path = self.artifact_store.store_validation_trace(
+            validation_id,
+            variant,
+            trace,
+            overwrite=True,
+        )
+        judge_record = None
+        if trace.is_usable_feedback_signal:
+            judge_record = await self._judge_evolution_reward(
+                trace=trace,
+                task_metadata=task_metadata,
+                trace_path=trace_path,
+            )
+        reward, reward_source, judge_reward = _validation_reward(
+            trace,
+            judge_record,
+        )
+        return _PlannerValidationRun(
+            reward=reward,
+            reward_source=reward_source,
+            verifier_reward=trace.reward,
+            judge_reward=judge_reward,
+            status=trace.status,
+            trace_path=str(trace_path),
+            usable=trace.is_usable_feedback_signal,
         )
 
     def _write_metric(self, record: IterationRecord) -> None:
@@ -608,3 +888,28 @@ class Orchestrator:
             if llm_client is not None and hasattr(llm_client, "drain_token_events"):
                 events.extend(llm_client.drain_token_events())
         return events
+
+
+def _valid_planner_reflection_candidates(
+    candidates: list[SkillUpdateCandidate],
+) -> list[SkillUpdateCandidate]:
+    return [
+        candidate
+        for candidate in candidates
+        if not candidate.rejection_reason and candidate.update_kind != "no_update"
+    ]
+
+
+def _validation_reward(
+    trace: ExecutionTrace,
+    judge_record: JudgeRewardRecord | None,
+) -> tuple[float | None, str | None, float | None]:
+    if judge_record is None:
+        reward_source = "verifier" if trace.reward is not None else None
+        return trace.reward, reward_source, None
+    metadata = judge_reward_metadata(judge_record)
+    return (
+        judge_record.judge_reward,
+        str(metadata["reward_source"]),
+        judge_record.judge_reward,
+    )

@@ -32,6 +32,7 @@ from mediated_coevo.models.skill import (
     ContrastiveReflectionProvenance,
     SkillUpdateCandidate,
     SkillUpdateCandidateBatch,
+    SkillValidationResult,
 )
 from mediated_coevo.stores.skill_store import SkillStore
 
@@ -60,6 +61,21 @@ class ReflectionResult:
     old_content: str
     new_content: str
     provenance: ContrastiveReflectionProvenance
+
+
+@dataclass(frozen=True)
+class ReflectionDraft:
+    """Uncommitted reflection candidate batch plus evidence context."""
+
+    agent_role: str
+    old_content: str
+    base_skill_hash: str
+    pairs: list[ContrastivePair]
+    candidate_batch: SkillUpdateCandidateBatch
+    candidate_batch_path: str | None
+    iteration: int
+    max_pairs: int
+    selection_seed: int | None
 
 
 class Reflector:
@@ -95,6 +111,29 @@ class Reflector:
 
         Returns the committed reflection result, or None if no update was made.
         """
+        draft = await self.draft_reflection(
+            agent_role=agent_role,
+            llm_client=llm_client,
+            iteration=iteration,
+            max_pairs=max_pairs,
+            selection_seed=selection_seed,
+        )
+        if draft is None:
+            return None
+        return self.commit_draft(draft)
+
+    async def draft_reflection(
+        self,
+        *,
+        agent_role: str,
+        llm_client: LLMClient,
+        iteration: int = 0,
+        max_pairs: int = 5,
+        selection_seed: int | None = None,
+        candidate_count: int | None = None,
+        select_candidate: bool = True,
+    ) -> ReflectionDraft | None:
+        """Build an audited reflection candidate batch without committing it."""
         pairs = self._history_store.contrastive_pairs(
             agent_role,
             max_pairs=max_pairs,
@@ -116,6 +155,7 @@ class Reflector:
             current_skill,
             pairs,
             model=llm_client.model,
+            candidate_count=candidate_count,
         )
 
         try:
@@ -124,13 +164,21 @@ class Reflector:
                 llm_client=llm_client,
                 messages=messages,
             )
-            candidate_batch = self._build_candidate_batch(
+            candidates = _parse_reflection_candidates(
                 agent_role=agent_role,
                 current_skill=current_skill,
                 raw_content=raw_content,
+            )
+            if candidate_count is not None:
+                candidates = candidates[:candidate_count]
+            candidate_batch = self._build_candidate_batch(
+                agent_role=agent_role,
+                current_skill=current_skill,
+                candidates=candidates,
                 iteration=iteration,
                 pairs=pairs,
                 selection_seed=selection_seed,
+                select_candidate=select_candidate,
             )
             candidate_batch_path = None
             if self._artifact_store is not None:
@@ -141,30 +189,9 @@ class Reflector:
                 candidate_batch_path = candidate_batch_artifact_path(
                     candidate_batch.batch_id
                 )
-            selected = selected_candidate(candidate_batch)
-            if selected is None:
-                return None
-            if current_skill and _is_semantically_similar(
-                current_skill,
-                selected.new_content,
-                self._similarity_threshold,
-            ):
-                logger.info(
-                    "%s reflection: selected candidate too similar to current "
-                    "(threshold=%.2f); skipping.",
-                    agent_role,
-                    self._similarity_threshold,
-                )
-                return None
-
-            self._skill_store.write_skill(agent_role, selected.new_content)
-            logger.info(
-                "%s skill updated via reflection (%d chars).",
-                agent_role,
-                len(selected.new_content),
-            )
-            provenance = self._build_reflection_provenance(
+            return ReflectionDraft(
                 agent_role=agent_role,
+                old_content=current_skill,
                 base_skill_hash=base_skill_hash,
                 pairs=pairs,
                 candidate_batch=candidate_batch,
@@ -173,25 +200,78 @@ class Reflector:
                 max_pairs=max_pairs,
                 selection_seed=selection_seed,
             )
-            return ReflectionResult(
-                skill_id=agent_role,
-                old_content=current_skill,
-                new_content=selected.new_content,
-                provenance=provenance,
-            )
         except Exception as e:
             logger.error("Failed to reflect for %s: %s", agent_role, e)
             return None
+
+    def commit_draft(
+        self,
+        draft: ReflectionDraft,
+        *,
+        selected_candidate_id: str | None = None,
+        validation: SkillValidationResult | None = None,
+    ) -> ReflectionResult | None:
+        """Write a selected reflection candidate and return committed provenance."""
+        if selected_candidate_id is not None:
+            for candidate in draft.candidate_batch.candidates:
+                candidate.selected = candidate.candidate_id == selected_candidate_id
+            draft.candidate_batch.selected_candidate_id = selected_candidate_id
+
+        selected = selected_candidate(draft.candidate_batch)
+        if selected is None:
+            return None
+        if draft.old_content and _is_semantically_similar(
+            draft.old_content,
+            selected.new_content,
+            self._similarity_threshold,
+        ):
+            logger.info(
+                "%s reflection: selected candidate too similar to current "
+                "(threshold=%.2f); skipping.",
+                draft.agent_role,
+                self._similarity_threshold,
+            )
+            return None
+
+        if self._artifact_store is not None:
+            self._artifact_store.store_candidate_batch(
+                draft.candidate_batch,
+                overwrite=True,
+            )
+        self._skill_store.write_skill(draft.agent_role, selected.new_content)
+        logger.info(
+            "%s skill updated via reflection (%d chars).",
+            draft.agent_role,
+            len(selected.new_content),
+        )
+        provenance = self._build_reflection_provenance(
+            agent_role=draft.agent_role,
+            base_skill_hash=draft.base_skill_hash,
+            pairs=draft.pairs,
+            candidate_batch=draft.candidate_batch,
+            candidate_batch_path=draft.candidate_batch_path,
+            iteration=draft.iteration,
+            max_pairs=draft.max_pairs,
+            selection_seed=draft.selection_seed,
+            validation=validation,
+        )
+        return ReflectionResult(
+            skill_id=draft.agent_role,
+            old_content=draft.old_content,
+            new_content=selected.new_content,
+            provenance=provenance,
+        )
 
     def _build_candidate_batch(
         self,
         *,
         agent_role: str,
         current_skill: str,
-        raw_content: str,
+        candidates: list[SkillUpdateCandidate],
         iteration: int,
         pairs: list[ContrastivePair],
         selection_seed: int | None,
+        select_candidate: bool = True,
     ) -> SkillUpdateCandidateBatch:
         batch_id = f"reflect-{agent_role}-iter-{iteration:04d}"
         batch_seed = stable_selection_seed(
@@ -209,12 +289,9 @@ class Reflector:
             agent_role=agent_role,
             task_ids=_task_ids_from_pairs(pairs),
             current_skill=current_skill,
-            candidates=_parse_reflection_candidates(
-                agent_role=agent_role,
-                current_skill=current_skill,
-                raw_content=raw_content,
-            ),
+            candidates=candidates,
             selection_seed=batch_seed,
+            select_candidate=select_candidate,
         )
 
     def _build_reflection_prompt(
@@ -224,6 +301,7 @@ class Reflector:
         pairs: list[ContrastivePair],
         *,
         model: str = "",
+        candidate_count: int | None = None,
     ) -> list[dict[str, Any]]:
         if agent_role == "mediator":
             return self._build_mediator_prompt(
@@ -237,6 +315,7 @@ class Reflector:
             pairs,
             model=model,
             budgets=self._budgets,
+            candidate_count=candidate_count,
         )
 
     async def _complete_reflection(
@@ -275,6 +354,7 @@ class Reflector:
         iteration: int,
         max_pairs: int,
         selection_seed: int | None,
+        validation: SkillValidationResult | None = None,
     ) -> ContrastiveReflectionProvenance:
         pair_refs = _contrastive_pair_refs(pairs)
         task_ids = sorted({ref.task_id for ref in pair_refs if ref.task_id})
@@ -291,6 +371,7 @@ class Reflector:
                 f"selected {selected.update_kind if selected else 'none'} candidate."
             ),
             contrastive_pair_refs=pair_refs,
+            validation=validation,
             max_pairs=max_pairs,
             selection_seed=selection_seed,
             candidate_batch_id=candidate_batch.batch_id,
@@ -436,7 +517,14 @@ class Reflector:
         *,
         model: str = "",
         budgets: BudgetsConfig | None = None,
+        candidate_count: int | None = None,
     ) -> list[dict[str, str]]:
+        candidate_instruction = (
+            f"return JSON with exactly {candidate_count} candidate "
+            "skill-refiner updates"
+            if candidate_count is not None
+            else "return JSON with 2-3 candidate skill-refiner updates"
+        )
         return Reflector._build_contrastive_prompt(
             system_text=(
                 "You are reflecting on your performance as a Planner agent. "
@@ -446,8 +534,8 @@ class Reflector:
                 "your editing strategy.\n\n"
                 "If you believe the current guidelines already capture the "
                 "lessons from the evidence, include a no_update candidate. "
-                "Otherwise, return JSON with 2-3 candidate skill-refiner "
-                "updates. Each candidate must include candidate_id, update_kind, "
+                f"Otherwise, {candidate_instruction}. Each candidate must include "
+                "candidate_id, update_kind, "
                 "hypothesis, risk, audit_score, new_content, and reasoning. "
                 "new_content must be the complete updated Markdown skill: "
                 "integrate changes into existing sections, resolve duplicate "

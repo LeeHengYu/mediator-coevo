@@ -432,6 +432,10 @@ async def test_planner_and_mediator_reflection_are_independently_gated(monkeypat
             calls.append(agent_role)
             return None
 
+        async def draft_reflection(self, *, agent_role, **kwargs):
+            calls.append(agent_role)
+            return None
+
     import mediated_coevo.experiment.orchestrator as orchestrator_module
 
     monkeypatch.setattr(orchestrator_module, "Reflector", _RecordingReflector)
