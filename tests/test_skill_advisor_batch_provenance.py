@@ -125,7 +125,7 @@ async def test_advisor_rejection_clears_buffer_without_skill_update(tmp_path):
     assert len(rejections) == 1
     rejection = rejections[0]
     assert gate.last_rejection_id == rejection.rejection_id
-    assert rejection.batch_id == "coevo-iter-0003"
+    assert rejection.batch_id.startswith("coevo-iter-0003-batch-")
     assert rejection.iteration == 3
     assert rejection.skill_id == "executor"
     assert rejection.task_ids == ["task-A", "task-B"]

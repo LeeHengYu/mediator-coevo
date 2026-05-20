@@ -72,9 +72,15 @@ class SkillValidationConfig(BaseModel):
     """Empirical gate settings for executor skill candidates."""
 
     enabled: bool = True
-    min_mean_delta: float = 0.0
+    min_mean_delta: float = 0.01
     reward_tolerance: float = 1e-9
     require_all_tasks_usable: bool = True
+    sample_size: int = 3
+    skillsbench_tasks: list[str] = Field(default_factory=list)
+    swebench_instances: list[str] = Field(default_factory=list)
+    allow_contributing_fallback: bool = True
+    min_skillsbench_tag_overlap: int = 1
+    allow_swebench_replacement_for_skillsbench: bool = False
 
 
 class BenchmarkSelectionConfig(BaseModel):

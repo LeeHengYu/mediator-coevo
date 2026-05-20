@@ -107,6 +107,12 @@ class Orchestrator:
         if num_iterations is None:
             num_iterations = self.config.experiment.num_iterations
         records: list[IterationRecord] = []
+        selection = self.config.experiment.benchmark_selection
+        self.executor_skill_gate.validation_task_pool = [
+            *selection.skillsbench_tasks,
+            *selection.swebench_instances,
+            *task_ids,
+        ]
 
         for iteration in range(num_iterations):
             iteration_records: list[IterationRecord] = []

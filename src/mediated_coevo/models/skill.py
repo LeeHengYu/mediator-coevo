@@ -99,7 +99,7 @@ class SkillValidationResult(BaseModel):
     current_mean_reward: float | None = None
     candidate_mean_reward: float | None = None
     mean_delta: float | None = None
-    min_mean_delta: float = 0.0
+    min_mean_delta: float = 0.01
     reward_tolerance: float = 1e-9
     task_results: list[SkillValidationTaskResult] = Field(default_factory=list)
 

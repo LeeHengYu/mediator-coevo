@@ -751,13 +751,35 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
 
 
 class _ResolvedTask:
-    instruction = "base instruction"
-    task_config: dict = {}
+    def __init__(
+        self,
+        *,
+        benchmark_kind: str = "skillsbench",
+        category: str = "Compilation & Build",
+        tags: list[str] | None = None,
+        repo: str = "example/project",
+    ) -> None:
+        self.instruction = "base instruction"
+        self.benchmark_kind = benchmark_kind
+        self.task_config = {
+            "metadata": {
+                "category": category,
+                "tags": tags or ["software", "build", "debugging"],
+            }
+        }
+        if benchmark_kind == "swebench":
+            self.repo = repo
+            self.base_commit = "base"
+            self.task_config["metadata"]["repo"] = repo
 
 
 class _AnyTaskRepo:
+    def __init__(self, task_profiles: dict[str, dict] | None = None) -> None:
+        self.task_profiles = task_profiles or {}
+
     def resolve(self, task_id: str):
-        return _ResolvedTask()
+        profile = self.task_profiles.get(task_id, {})
+        return _ResolvedTask(**profile)
 
 
 class _ValidationExecutor:
@@ -1114,6 +1136,10 @@ def _advisor_validation_orchestrator(
     candidate_rewards: dict[str, float | None],
     proposal_task_ids: list[str],
     planner: object | None = None,
+    validation_task_pool: list[str] | None = None,
+    task_profiles: dict[str, dict] | None = None,
+    allow_contributing_fallback: bool = True,
+    allow_swebench_replacement_for_skillsbench: bool = False,
 ) -> Orchestrator:
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = Config(
@@ -1125,10 +1151,16 @@ def _advisor_validation_orchestrator(
         }
     )
     orch.config.experiment.advisor_buffer_max = len(proposal_task_ids)
+    orch.config.experiment.skill_validation.allow_contributing_fallback = (
+        allow_contributing_fallback
+    )
+    orch.config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = (
+        allow_swebench_replacement_for_skillsbench
+    )
     orch.skill_store = _MemorySkillStore()
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
-    orch.benchmark_repo = _AnyTaskRepo()
+    orch.benchmark_repo = _AnyTaskRepo(task_profiles)
     orch.executor = _ValidationExecutor(
         current_rewards=current_rewards,
         candidate_rewards=candidate_rewards,
@@ -1136,6 +1168,8 @@ def _advisor_validation_orchestrator(
     orch.skill_advisor = _ApprovingAdvisor()
     orch.planner = planner or _PatchPlanner()
     _attach_executor_skill_gate(orch)
+    if validation_task_pool is not None:
+        orch.executor_skill_gate.validation_task_pool = validation_task_pool
     orch._proposal_buffer = [
         SkillProposal(
             iteration=0,
@@ -1149,14 +1183,13 @@ def _advisor_validation_orchestrator(
 
 
 def _validation_result_json(tmp_path: Path) -> dict:
-    result_path = (
-        tmp_path
-        / "artifacts"
-        / "validation"
-        / "coevo-iter-0003"
-        / "result.json"
+    result_paths = sorted(
+        (tmp_path / "artifacts" / "validation").glob(
+            "coevo-iter-0003-batch-*/result.json"
+        )
     )
-    return json.loads(result_path.read_text())
+    assert len(result_paths) == 1
+    return json.loads(result_paths[0].read_text())
 
 
 @pytest.mark.asyncio
@@ -1186,7 +1219,7 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
     assert update.new_skill_hash == SkillStore.content_hash("new")
     assert update.provenance is not None
     assert update.provenance.kind == "advisor_batch"
-    assert update.provenance.batch_id == "coevo-iter-0003"
+    assert update.provenance.batch_id.startswith("coevo-iter-0003-batch-")
     assert update.provenance.task_ids == ["task-A", "task-B"]
     assert update.provenance.base_skill_hash == SkillStore.content_hash("old")
     assert update.provenance.reason == "approved"
@@ -1248,19 +1281,23 @@ async def test_advisor_patch_selects_from_candidate_batch_and_persists_artifact(
     assert update.provenance is not None
     assert update.provenance.selected_candidate_id == "targeted"
     assert update.provenance.selected_update_kind == "narrow_clarification"
-    assert update.provenance.candidate_batch_id == "coevo-iter-0003-executor-candidates"
+    assert update.provenance.candidate_batch_id is not None
+    assert update.provenance.candidate_batch_id.startswith(
+        "coevo-iter-0003-batch-"
+    )
+    assert update.provenance.candidate_batch_id.endswith("-executor-candidates")
     assert [ref.candidate_id for ref in update.provenance.candidate_refs] == [
         "broad",
         "targeted",
     ]
 
-    artifact_path = (
-        tmp_path
-        / "artifacts"
-        / "candidate_batches"
-        / "coevo-iter-0003-executor-candidates.json"
+    artifact_paths = sorted(
+        (tmp_path / "artifacts" / "candidate_batches").glob(
+            "coevo-iter-0003-batch-*-executor-candidates.json"
+        )
     )
-    artifact = json.loads(artifact_path.read_text())
+    assert len(artifact_paths) == 1
+    artifact = json.loads(artifact_paths[0].read_text())
     assert artifact["selected_candidate_id"] == "targeted"
     assert [candidate["new_content"] for candidate in artifact["candidates"]] == [
         "broad",
@@ -1301,7 +1338,7 @@ async def test_advisor_patch_rejected_when_validation_task_regresses(tmp_path):
     assert len(rejections) == 1
     rejection = rejections[0]
     assert gate.last_rejection_id == rejection.rejection_id
-    assert rejection.batch_id == "coevo-iter-0003"
+    assert rejection.batch_id.startswith("coevo-iter-0003-batch-")
     assert rejection.reason == "validation: task_regression"
     assert rejection.advisor_feedback == "approved"
     assert rejection.validation is not None
@@ -1340,3 +1377,169 @@ async def test_advisor_patch_rejected_when_validation_trace_unusable(tmp_path):
     rejections = orch.history_store.query_rejected_proposals()
     assert len(rejections) == 1
     assert gate.last_rejection_id == rejections[0].rejection_id
+
+
+@pytest.mark.asyncio
+async def test_advisor_validation_uses_holdout_pool_excluding_contributors(tmp_path):
+    task_profiles = {
+        "build-A": {
+            "benchmark_kind": "skillsbench",
+            "category": "Compilation & Build",
+            "tags": ["software", "build", "python"],
+        },
+        "build-B": {
+            "benchmark_kind": "skillsbench",
+            "category": "Compilation & Build",
+            "tags": ["software", "build", "java"],
+        },
+        "game-C": {
+            "benchmark_kind": "skillsbench",
+            "category": "game",
+            "tags": ["game development", "parsing"],
+        },
+    }
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"build-B": 0.4},
+        candidate_rewards={"build-B": 0.8},
+        proposal_task_ids=["build-A"],
+        validation_task_pool=["build-A", "build-B", "game-C"],
+        task_profiles=task_profiles,
+    )
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is not None
+    assert update.provenance is not None
+    assert update.provenance.task_ids == ["build-A"]
+    assert update.provenance.validation is not None
+    assert update.provenance.validation.task_ids == ["build-B"]
+    assert orch.executor.calls == [
+        ("build-B", "old"),
+        ("build-B", "new"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_advisor_validation_can_use_swebench_replacement_for_swe_task(tmp_path):
+    task_profiles = {
+        "fix-build-agentops": {
+            "benchmark_kind": "skillsbench",
+            "category": "Compilation & Build",
+            "tags": ["software", "build", "python", "ci"],
+        },
+        "django__django-11099": {
+            "benchmark_kind": "swebench",
+            "category": "software",
+            "tags": ["software", "swebench"],
+            "repo": "django/django",
+        },
+    }
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"django__django-11099": 0.4},
+        candidate_rewards={"django__django-11099": 0.8},
+        proposal_task_ids=["fix-build-agentops"],
+        validation_task_pool=["django__django-11099"],
+        task_profiles=task_profiles,
+        allow_swebench_replacement_for_skillsbench=True,
+    )
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is not None
+    assert update.provenance is not None
+    assert update.provenance.validation is not None
+    assert update.provenance.validation.task_ids == ["django__django-11099"]
+
+
+@pytest.mark.asyncio
+async def test_advisor_validation_rejects_without_holdout_when_fallback_disabled(
+    tmp_path,
+):
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={},
+        candidate_rewards={},
+        proposal_task_ids=["task-A"],
+        validation_task_pool=["task-A"],
+        allow_contributing_fallback=False,
+    )
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is None
+    assert orch.executor.calls == []
+    result = _validation_result_json(tmp_path)
+    assert result["decision"] == "rejected"
+    assert result["reason"] == "no_validation_tasks"
+
+
+@pytest.mark.asyncio
+async def test_advisor_validation_requires_positive_mean_delta_by_default(tmp_path):
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.8},
+        candidate_rewards={"task-A": 0.8},
+        proposal_task_ids=["task-A"],
+    )
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is None
+    result = _validation_result_json(tmp_path)
+    assert result["decision"] == "rejected"
+    assert result["reason"] == "mean_not_improved"
+    assert result["min_mean_delta"] == pytest.approx(0.01)
+
+
+@pytest.mark.asyncio
+async def test_advisor_batches_in_same_iteration_keep_separate_artifacts(tmp_path):
+    first_orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.4},
+        candidate_rewards={"task-A": 0.8},
+        proposal_task_ids=["task-A"],
+        planner=_BatchPatchPlanner(),
+    )
+    second_orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-B": 0.4},
+        candidate_rewards={"task-B": 0.8},
+        proposal_task_ids=["task-B"],
+        planner=_BatchPatchPlanner(),
+    )
+
+    first = await first_orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=first_orch._proposal_buffer,
+    )
+    second = await second_orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=second_orch._proposal_buffer,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.provenance is not None
+    assert second.provenance is not None
+    assert first.provenance.candidate_batch_id != second.provenance.candidate_batch_id
+    assert len(
+        list(
+            (tmp_path / "artifacts" / "candidate_batches").glob(
+                "coevo-iter-0003-batch-*-executor-candidates.json"
+            )
+        )
+    ) == 2

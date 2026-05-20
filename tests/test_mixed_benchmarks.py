@@ -86,6 +86,55 @@ def test_mixed_repository_routes_selected_tasks_to_backend_repos():
         repo.resolve("missing")
 
 
+def test_runtime_routing_includes_validation_only_swebench_when_enabled():
+    selection = build_benchmark_task_selection(
+        skillsbench_task_ids=["skills-task"],
+        swebench_instance_ids=[],
+    )
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        }
+    )
+    config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
+    config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = True
+
+    routing = main_module._runtime_benchmark_by_task_id(selection, config)
+
+    assert routing == {
+        "skills-task": "skillsbench",
+        "django__django-11099": "swebench",
+    }
+    assert main_module._needs_runtime_swebench(selection, config) is True
+
+
+def test_runtime_routing_ignores_validation_only_swebench_when_disabled():
+    selection = build_benchmark_task_selection(
+        skillsbench_task_ids=["skills-task"],
+        swebench_instance_ids=[],
+    )
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        }
+    )
+    config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
+    config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = (
+        False
+    )
+
+    routing = main_module._runtime_benchmark_by_task_id(selection, config)
+
+    assert routing == {"skills-task": "skillsbench"}
+    assert main_module._needs_runtime_swebench(selection, config) is False
+
+
 @pytest.mark.asyncio
 async def test_routed_executor_routes_selected_tasks_to_backend_executors():
     selection = build_benchmark_task_selection(

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import random
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.planner import PlannerAgent
@@ -39,6 +41,29 @@ from mediated_coevo.stores.skill_store import SkillStore
 
 logger = logging.getLogger(__name__)
 
+_SWE_LIKE_TAGS = {
+    "bugfix",
+    "build",
+    "ci",
+    "compilation",
+    "debugging",
+    "github actions",
+    "java",
+    "maven",
+    "python",
+    "pytest",
+    "software",
+    "swebench",
+}
+
+
+@dataclass(frozen=True)
+class _TaskProfile:
+    task_id: str
+    benchmark_kind: str
+    category: str
+    tags: frozenset[str]
+
 
 @dataclass
 class ExecutorSkillGate:
@@ -56,6 +81,7 @@ class ExecutorSkillGate:
     last_advisor_reason: str | None = None
     last_proposal_ids: list[str] = field(default_factory=list)
     last_rejection_id: str | None = None
+    validation_task_pool: list[str] = field(default_factory=list)
 
     async def review_and_patch(
         self,
@@ -87,7 +113,10 @@ class ExecutorSkillGate:
         self.last_proposal_ids = [
             proposal.proposal_id for proposal in buffered_proposals
         ]
-        batch_id = f"coevo-iter-{iteration:04d}"
+        batch_id = (
+            f"coevo-iter-{iteration:04d}-batch-"
+            f"{_proposal_batch_fingerprint(buffered_proposals)}"
+        )
         advisor_feedback = await self.skill_advisor.review(
             current_skill=current_skill,
             proposals=buffered_proposals,
@@ -115,6 +144,11 @@ class ExecutorSkillGate:
         self.last_advisor_reason = advisor_feedback
         contributing_tasks = sorted(
             {p.task_id for p in buffered_proposals if p.task_id}
+        )
+        validation_task_ids = self._select_validation_task_ids(
+            contributing_tasks=contributing_tasks,
+            iteration=iteration,
+            batch_id=batch_id,
         )
         contributing_task_ids = ",".join(contributing_tasks)
         edit_history = self.history_store.query(
@@ -163,7 +197,7 @@ class ExecutorSkillGate:
             candidates=candidates,
             selection_seed=selection_seed,
         )
-        self.artifact_store.store_candidate_batch(candidate_batch, overwrite=True)
+        self.artifact_store.store_candidate_batch(candidate_batch)
         candidate_batch_path = candidate_batch_artifact_path(candidate_batch.batch_id)
         selected = selected_candidate(candidate_batch)
         if selected is None:
@@ -183,7 +217,7 @@ class ExecutorSkillGate:
         validation = await self._validate_candidate(
             validation_id=batch_id,
             iteration=iteration,
-            task_ids=contributing_tasks,
+            task_ids=validation_task_ids,
             current_skill=current_skill,
             candidate_skill=selected.new_content,
         )
@@ -290,6 +324,72 @@ class ExecutorSkillGate:
         )
         return self.history_store.record_rejected_proposals(rejected_batch)
 
+    def _select_validation_task_ids(
+        self,
+        *,
+        contributing_tasks: list[str],
+        iteration: int,
+        batch_id: str,
+    ) -> list[str]:
+        """Select holdout validation tasks compatible with proposal provenance."""
+        validation_config = self.config.experiment.skill_validation
+        configured_pool = [
+            *validation_config.skillsbench_tasks,
+            *validation_config.swebench_instances,
+        ]
+        pool = _dedupe_task_ids([*configured_pool, *self.validation_task_pool])
+        excluded = set(contributing_tasks)
+        contributor_profiles = [
+            profile
+            for task_id in contributing_tasks
+            if (profile := self._resolve_task_profile(task_id)) is not None
+        ]
+        eligible: list[str] = []
+        for task_id in pool:
+            if task_id in excluded:
+                continue
+            candidate_profile = self._resolve_task_profile(task_id)
+            if candidate_profile is None:
+                continue
+            if not contributor_profiles or any(
+                _compatible_validation_profile(
+                    contributor,
+                    candidate_profile,
+                    min_skillsbench_tag_overlap=(
+                        validation_config.min_skillsbench_tag_overlap
+                    ),
+                    allow_swebench_replacement=(
+                        validation_config.allow_swebench_replacement_for_skillsbench
+                    ),
+                )
+                for contributor in contributor_profiles
+            ):
+                eligible.append(task_id)
+
+        if eligible:
+            selection_seed = stable_selection_seed(
+                base_seed=self.config.experiment.seed,
+                iteration=iteration,
+                skill_id="executor",
+                batch_id=f"{batch_id}-validation-tasks",
+            )
+            rng = random.Random(selection_seed)
+            shuffled = sorted(_dedupe_task_ids(eligible))
+            rng.shuffle(shuffled)
+            sample_size = max(1, validation_config.sample_size)
+            return sorted(shuffled[:sample_size])
+
+        if validation_config.allow_contributing_fallback:
+            return sorted(contributing_tasks)
+        return []
+
+    def _resolve_task_profile(self, task_id: str) -> _TaskProfile | None:
+        try:
+            task = self.benchmark_repo.resolve(task_id)
+        except FileNotFoundError:
+            return None
+        return _task_profile_from_task(task_id, task)
+
     async def _validate_candidate(
         self,
         *,
@@ -329,7 +429,6 @@ class ExecutorSkillGate:
         self.artifact_store.store_validation_result(
             validation_id,
             result,
-            overwrite=True,
         )
         return result
 
@@ -376,13 +475,11 @@ class ExecutorSkillGate:
             validation_id,
             "current",
             current_trace,
-            overwrite=True,
         )
         candidate_path = self.artifact_store.store_validation_trace(
             validation_id,
             "candidate",
             candidate_trace,
-            overwrite=True,
         )
         usable = (
             current_trace.is_usable_feedback_signal
@@ -462,6 +559,136 @@ class ExecutorSkillGate:
             reward_tolerance=validation_config.reward_tolerance,
             task_results=task_results,
         )
+
+
+def _proposal_batch_fingerprint(proposals: list[SkillProposal]) -> str:
+    """Return a stable short id for a buffered proposal batch."""
+    parts = [
+        "|".join(
+            [
+                proposal.proposal_id,
+                str(proposal.iteration),
+                proposal.task_id,
+                SkillStore.content_hash(proposal.old_content)[:12],
+                SkillStore.content_hash(proposal.new_content)[:12],
+            ]
+        )
+        for proposal in sorted(
+            proposals,
+            key=lambda item: (item.iteration, item.task_id, item.proposal_id),
+        )
+    ]
+    return SkillStore.content_hash("\n".join(parts))[:10]
+
+
+def _dedupe_task_ids(task_ids: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for task_id in task_ids:
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        deduped.append(task_id)
+    return deduped
+
+
+def _task_profile_from_task(task_id: str, task: Any) -> _TaskProfile:
+    task_config = getattr(task, "task_config", None) or {}
+    metadata = task_config.get("metadata") or {}
+    benchmark_kind = _benchmark_kind(task_id, task)
+    category = _normalize_token(metadata.get("category"))
+    tags = set(_normalized_tags(metadata.get("tags")))
+    if benchmark_kind == "swebench":
+        category = category or "software"
+        tags.update({"software", "swebench"})
+    return _TaskProfile(
+        task_id=task_id,
+        benchmark_kind=benchmark_kind,
+        category=category,
+        tags=frozenset(tags),
+    )
+
+
+def _benchmark_kind(task_id: str, task: Any) -> str:
+    explicit_kind = getattr(task, "benchmark_kind", None)
+    if explicit_kind:
+        return str(explicit_kind)
+    benchmark_by_task_id = getattr(task, "benchmark_by_task_id", None)
+    if isinstance(benchmark_by_task_id, dict):
+        kind = benchmark_by_task_id.get(task_id)
+        if kind:
+            return str(kind)
+    if hasattr(task, "task_dir"):
+        return "skillsbench"
+    if hasattr(task, "repo") and hasattr(task, "base_commit"):
+        return "swebench"
+    return "unknown"
+
+
+def _compatible_validation_profile(
+    contributor: _TaskProfile,
+    candidate: _TaskProfile,
+    *,
+    min_skillsbench_tag_overlap: int,
+    allow_swebench_replacement: bool,
+) -> bool:
+    if candidate.task_id == contributor.task_id:
+        return False
+
+    if contributor.benchmark_kind != candidate.benchmark_kind:
+        return (
+            allow_swebench_replacement
+            and contributor.benchmark_kind == "skillsbench"
+            and candidate.benchmark_kind == "swebench"
+            and _is_swe_like_profile(contributor)
+        )
+
+    if contributor.benchmark_kind == "skillsbench":
+        return _similar_skillsbench_profile(
+            contributor,
+            candidate,
+            min_skillsbench_tag_overlap=min_skillsbench_tag_overlap,
+        )
+    if contributor.benchmark_kind == "swebench":
+        return True
+    if contributor.category and contributor.category == candidate.category:
+        return True
+    return len(contributor.tags & candidate.tags) >= min_skillsbench_tag_overlap
+
+
+def _similar_skillsbench_profile(
+    contributor: _TaskProfile,
+    candidate: _TaskProfile,
+    *,
+    min_skillsbench_tag_overlap: int,
+) -> bool:
+    if contributor.category and contributor.category == candidate.category:
+        return True
+    return len(contributor.tags & candidate.tags) >= min_skillsbench_tag_overlap
+
+
+def _is_swe_like_profile(profile: _TaskProfile) -> bool:
+    if profile.benchmark_kind == "swebench":
+        return True
+    category = profile.category
+    category_is_swe = any(token in category for token in ("build", "software"))
+    return category_is_swe or bool(profile.tags & _SWE_LIKE_TAGS)
+
+
+def _normalized_tags(raw_tags: Any) -> set[str]:
+    if not isinstance(raw_tags, list):
+        return set()
+    return {
+        tag
+        for tag in (_normalize_token(raw_tag) for raw_tag in raw_tags)
+        if tag
+    }
+
+
+def _normalize_token(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().lower().split())
 
 
 def _validation_env_failure(

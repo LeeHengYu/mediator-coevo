@@ -47,7 +47,11 @@ UPDATE_BATCH_RESPONSE_SCHEMA = (
     '"hypothesis": "...", "risk": "...", "audit_score": 0.0, '
     '"new_content": "...", "reasoning": "..."}'
     "]}\n"
-    "Use update_kind=no_update with current content when no edit is warranted."
+    "Use update_kind=no_update with current content when no edit is warranted. "
+    "For every non-no_update candidate, new_content must be a complete, "
+    "semantically integrated rewrite of the current Markdown skill: merge the "
+    "new guidance into the existing structure, resolve duplicate or conflicting "
+    "rules, and do not append an addendum unless a new section is clearly needed."
 )
 
 

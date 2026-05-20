@@ -400,7 +400,10 @@ class Reflector:
                 "Otherwise, return JSON with 2-3 candidate protocol updates. "
                 "Each candidate must include candidate_id, update_kind, "
                 "hypothesis, risk, audit_score, new_content, and reasoning. "
-                "new_content must be the complete updated Markdown protocol."
+                "new_content must be the complete updated Markdown protocol: "
+                "integrate changes into existing sections, resolve duplicate "
+                "or conflicting rules, and avoid appended addenda unless a new "
+                "section is clearly needed."
             ),
             current_skill_heading="Current Coordination Protocol",
             current_skill=current_skill,
@@ -446,7 +449,10 @@ class Reflector:
                 "Otherwise, return JSON with 2-3 candidate skill-refiner "
                 "updates. Each candidate must include candidate_id, update_kind, "
                 "hypothesis, risk, audit_score, new_content, and reasoning. "
-                "new_content must be the complete updated Markdown skill."
+                "new_content must be the complete updated Markdown skill: "
+                "integrate changes into existing sections, resolve duplicate "
+                "or conflicting rules, and avoid appended addenda unless a new "
+                "section is clearly needed."
             ),
             current_skill_heading="Current Skill-Refiner Guidelines",
             current_skill=current_skill,

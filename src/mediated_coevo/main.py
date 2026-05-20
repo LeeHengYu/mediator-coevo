@@ -45,6 +45,7 @@ from mediated_coevo.benchmarks import (
     SkillsBenchRepository,
 )
 from mediated_coevo.benchmarks.mixed import (
+    BenchmarkKind,
     BenchmarkTaskSelection,
     MixedBenchmarkRepository,
     build_benchmark_task_selection,
@@ -1039,6 +1040,63 @@ def _prepare_unified_experiment_root(
     return experiment_dir, runtime_skills_dir
 
 
+def _runtime_benchmark_by_task_id(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> dict[str, BenchmarkKind]:
+    """Include validation-only tasks in runtime routing without evolving on them."""
+    mapping = dict(selection.benchmark_by_task_id)
+    if _needs_validation_skillsbench(selection, config):
+        for task_id in config.experiment.skill_validation.skillsbench_tasks:
+            mapping.setdefault(task_id, "skillsbench")
+    if _needs_validation_swebench(selection, config):
+        for task_id in config.experiment.skill_validation.swebench_instances:
+            mapping.setdefault(task_id, "swebench")
+    return mapping
+
+
+def _needs_runtime_skillsbench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    return selection.has_skillsbench or _needs_validation_skillsbench(
+        selection,
+        config,
+    )
+
+
+def _needs_runtime_swebench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    return selection.has_swebench or _needs_validation_swebench(selection, config)
+
+
+def _needs_validation_skillsbench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    return (
+        bool(config.experiment.skill_validation.skillsbench_tasks)
+        and selection.has_skillsbench
+    )
+
+
+def _needs_validation_swebench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    validation = config.experiment.skill_validation
+    if not validation.swebench_instances:
+        return False
+    if selection.has_swebench:
+        return True
+    return (
+        selection.has_skillsbench
+        and validation.allow_swebench_replacement_for_skillsbench
+    )
+
+
 def _build_unified_runtime(
     *,
     config: Config,
@@ -1064,24 +1122,27 @@ def _build_unified_runtime(
     artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
     history_store = HistoryStore(history_dir=experiment_dir / "history")
 
+    needs_skillsbench = _needs_runtime_skillsbench(selection, config)
+    needs_swebench = _needs_runtime_swebench(selection, config)
     skillsbench_repo = (
         _build_benchmark_repo(PROJECT_ROOT, config)
-        if selection.has_skillsbench
+        if needs_skillsbench
         else None
     )
     swebench_repo = (
         swebench_helpers.SWEbenchRepository(dataset_name=dataset_name, split=split)
-        if selection.has_swebench
+        if needs_swebench
         else None
     )
+    runtime_benchmark_by_task_id = _runtime_benchmark_by_task_id(selection, config)
     benchmark_repo = MixedBenchmarkRepository(
-        benchmark_by_task_id=selection.benchmark_by_task_id,
+        benchmark_by_task_id=runtime_benchmark_by_task_id,
         skillsbench_repo=skillsbench_repo,
         swebench_repo=swebench_repo,
     )
 
     skillsbench_executor = None
-    if selection.has_skillsbench:
+    if needs_skillsbench:
         assert skillsbench_repo is not None
         skillsbench_executor = ExecutorAgent(
             model=config.models.executor,
@@ -1096,7 +1157,7 @@ def _build_unified_runtime(
         )
 
     swebench_executor = None
-    if selection.has_swebench:
+    if needs_swebench:
         assert swebench_repo is not None
         swebench_executor = _build_swebench_executor(
             config=config,
@@ -1113,7 +1174,7 @@ def _build_unified_runtime(
         condition_name=config.experiment.condition_name,
     )
     executor = RoutedExecutorAgent(
-        benchmark_by_task_id=selection.benchmark_by_task_id,
+        benchmark_by_task_id=runtime_benchmark_by_task_id,
         skillsbench_executor=skillsbench_executor,
         swebench_executor=swebench_executor,
     )
@@ -1184,9 +1245,9 @@ def _run_unified_experiment(
     )
 
     _prepare_llm_credentials_or_exit(config)
-    if selection.has_skillsbench:
+    if _needs_runtime_skillsbench(selection, config):
         _ensure_harbor_available(config)
-    if selection.has_swebench:
+    if _needs_runtime_swebench(selection, config):
         try:
             swebench_helpers.validate_modal_credentials()
         except RuntimeError as exc:
