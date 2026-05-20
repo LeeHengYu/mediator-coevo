@@ -5,6 +5,132 @@ change when execution feedback is routed through different context policies.
 It supports SkillsBench tasks through Harbor, SWE-bench tasks through the
 official SWE-bench/Modal harness, and mixed runs that include both task types.
 
+## How It Works: GRPO-Like Skill Evolution
+
+Mediated Co-Evolution studies skill files as runtime policies. It uses a
+GRPO-like loop at the level of reward-relative skill editing: completed task
+traces produce rewards, same-task history forms group-relative evidence, and LLM
+reflection rewrites Markdown skills. It does not train model weights.
+
+```text
+Benchmark task
+    |
+    v
+Planner -------------- plan/instructions -------------> Executor
+   ^                                                     |
+   |                                                     | trace, logs, verifier reward
+   |                                                     v
+   |<---------------- curated feedback ------------- Mediator
+                                                         |
+                                                         | trace/report evidence
+                                                         v
+                                                       Judge
+                                                         |
+                                                         v
+                                             judge reward annotations
+```
+
+### Runtime Roles And Policies
+
+The experiment loop has four roles:
+
+- Planner: reads the benchmark instruction plus condition-selected prior
+  context, then produces an execution plan.
+- Executor: runs the task in the selected benchmark backend and returns a
+  normalized execution trace and verifier reward.
+- Mediator: when the condition uses mediation, compresses and filters execution
+  feedback before it is exposed to later Planner iterations.
+- Judge: annotates completed traces and reports with rubric-based rewards.
+
+The mutable runtime policies are:
+
+- `skills/executor/SKILL.md`: task execution behavior.
+- `skills/planner/SKILL.md`: planning and executor-skill-refinement behavior.
+- `skills/mediator/SKILL.md`: feedback filtering and reporting behavior.
+
+Runtime skill files are copied into each experiment directory before the run
+starts. Normal experiment runs do not edit the repo-level `skills/` directory.
+
+### Reward Sources And Tagging
+
+The main online evolution reward is the Judge reward. The verifier reward is
+kept as provenance and used as fallback when Judge scoring is unavailable.
+
+After a usable task run finishes, the Judge-scored evolution reward is assigned
+to pending same-task history entries from the prior iteration. This delayed
+tagging matches the loop timing: a Mediator report, Planner edit, or buffered
+Executor proposal produced at iteration `N` can only affect the downstream task
+run at iteration `N + 1`.
+
+History entries keep:
+
+- `reward`: the evolution reward used for ranking and reflection.
+- `metadata.verifier_reward`: the raw verifier score from the benchmark.
+- `metadata.reward_source`: `judge`, `verifier_fallback`, or `verifier`.
+
+### Group-Relative Contrastive Evidence
+
+Co-evolution reflection builds same-role, same-task contrastive pairs from
+tagged history. For each task and role, the history store computes:
+
+```text
+relative_reward = entry.reward - task_mean_reward
+```
+
+It then takes bottom and top reward buckets, forms worse/better pairs, and sorts
+them by relative reward gap. This is the GRPO-like step: behavior is judged
+relative to other attempts in the same task group rather than by a global scalar
+alone.
+
+### Skill Update Paths
+
+Two skill update paths can be enabled independently.
+
+Executor skill evolution is advisor-gated:
+
+```text
+Planner proposals -> proposal buffer -> SkillAdvisor batch review
+                  -> Planner candidate rewrites -> candidate audit
+                  -> empirical validation -> Executor skill commit
+```
+
+The SkillAdvisor evaluates the proposal batch against the current Executor
+skill, including proposal reasoning, diffs, evolution rewards, and reward
+sources. If the advisor approves, the Planner drafts candidate Executor skill
+rewrites, and the selected candidate is validated before commit.
+
+Planner and Mediator meta-skill evolution runs at the co-evolution interval:
+
+```text
+same-task history -> group-relative pairs -> LLM reflection prompt
+                  -> candidate skill rewrites -> skill commit gate
+```
+
+The reflection prompt shows each worse/better pair with its evolution reward and
+task-relative delta. Mediator reflection currently commits after candidate audit
+and similarity checking. Planner reflection asks for two candidate skill
+rewrites, validates both empirically, and commits the accepted candidate with
+the higher validation reward.
+
+The validation task pool comes from `experiment.skill_validation`. Validation
+compares current and candidate skill behavior on the same selected tasks and
+accepts only when the candidate improves by at least `min_mean_delta` without
+violating configured regression or usability rules.
+
+### What Is Not GRPO
+
+The framework is GRPO-like only at the skill-editing layer. It does not:
+
+- update LLM weights;
+- compute token-level policy gradients;
+- use a learned value model;
+- treat one reward tag as causal proof.
+
+The reward tags are noisy downstream labels. The intended signal comes from
+repeated same-task, group-relative comparisons over many iterations.
+
+## Quick Start
+
 The main CLI entrypoint is:
 
 ```bash
@@ -23,13 +149,13 @@ uv run medcoevo run \
   --skill-updates none \
   --advisor-buffer-max 2 \
   --coevo-interval 2 \
-  --run-id <suffix>
+  --run-id <suffix> \
   --no-skill-validation
 ```
 
 This selects one SkillsBench task, runs two iterations, disables committed skill
 updates, sets the advisor and reflection cadence to two iterations, and skips
-executor skill candidate validation. The default condition is
+skill validation gates. The default condition is
 `learned_mediator`, so the Mediator still produces feedback reports unless you
 override `--condition`.
 
@@ -79,48 +205,6 @@ SWE-bench commands:
 modal token new
 ```
 
-## How It Works
-
-```text
-Benchmark task
-    |
-    v
-Planner -------------- plan/instructions -------------> Executor
-   ^                                                     |
-   |                                                     | trace, logs, verifier reward
-   |                                                     v
-   |<---------------- curated feedback ------------- Mediator
-                                                         |
-                                                         | trace/report evidence
-                                                         v
-                                                       Judge
-                                                         |
-                                                         v
-                                             judge reward annotations
-```
-
-The experiment loop has three agent roles:
-
-- Planner: reads the benchmark instruction plus condition-selected prior
-  context, then produces an execution plan.
-- Executor: runs the task in the selected benchmark backend and returns a
-  normalized execution trace and reward.
-- Mediator: when the condition uses mediation, compresses and filters execution
-  feedback before it is exposed to later Planner iterations.
-- Judge: annotates completed traces and reports with rubric-based rewards for
-  analysis.
-
-Two skill update paths can be enabled independently:
-
-- Executor skill updates edit `skills/executor/SKILL.md` through proposal,
-  advisor review, and optional validation.
-- Planner and Mediator meta-skill updates edit `skills/planner/SKILL.md` and
-  `skills/mediator/SKILL.md` on the co-evolution interval using contrastive
-  history pairs.
-
-Runtime skill files are copied into each experiment directory before the run
-starts. Normal experiment runs do not edit the repo-level `skills/` directory.
-
 ## CLI Overview
 
 Top-level commands:
@@ -163,18 +247,18 @@ SWE-bench selectors:
 
 Core run options:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--iterations` | `30` | Number of experiment iterations. |
-| `--seed` | `42` | Random seed. |
-| `--condition` | `learned_mediator` | Feedback routing condition. |
-| `--skill-updates` | `all` | Which skill families may be committed. |
-| `--advisor-buffer-max` | config value | Executor proposal batch size override. |
-| `--coevo-interval` | config value | Planner/Mediator reflection interval override. |
-| `--skill-validation` / `--no-skill-validation` | config value | Enable or disable executor candidate validation. |
-| `--run-id` | generated | Timestamp-prefixed output directory suffix. |
-| `--config-dir` | `config/` | Directory containing `default.toml`. |
-| `--verbose`, `-v` | false | Enable debug logging. |
+| Option                                         | Default            | Meaning                                                                 |
+| ---------------------------------------------- | ------------------ | ----------------------------------------------------------------------- |
+| `--iterations`                                 | `30`               | Number of experiment iterations.                                        |
+| `--seed`                                       | `42`               | Random seed.                                                            |
+| `--condition`                                  | `learned_mediator` | Feedback routing condition.                                             |
+| `--skill-updates`                              | `all`              | Which skill families may be committed.                                  |
+| `--advisor-buffer-max`                         | config value       | Executor proposal batch size override.                                  |
+| `--coevo-interval`                             | config value       | Planner/Mediator reflection interval override.                          |
+| `--skill-validation` / `--no-skill-validation` | config value       | Enable or disable Executor candidate and Planner reflection validation. |
+| `--run-id`                                     | generated          | Timestamp-prefixed output directory suffix.                             |
+| `--config-dir`                                 | `config/`          | Directory containing `default.toml`.                                    |
+| `--verbose`, `-v`                              | false              | Enable debug logging.                                                   |
 
 Feedback conditions:
 
@@ -197,33 +281,6 @@ Skill update values:
 
 `none` and `all` cannot be combined with other values.
 
-Examples:
-
-```bash
-uv run medcoevo run \
-  --skillsbench-task fix-build-google-auto \
-  --iterations 1 \
-  --seed 42
-```
-
-```bash
-uv run medcoevo run \
-  --skillsbench-task-set skillsbench-10 \
-  --condition learned_mediator \
-  --skill-updates executor,planner,mediator \
-  --iterations 4
-```
-
-```bash
-uv run medcoevo run \
-  --skillsbench-task fix-build-agentops \
-  --swebench-instance sympy__sympy-13915 \
-  --iterations 4 \
-  --advisor-buffer-max 2 \
-  --coevo-interval 1 \
-  --skill-validation
-```
-
 ## `matrix`
 
 `matrix` runs the six baseline rows against the same SkillsBench task selection,
@@ -243,14 +300,14 @@ Supported options include `--tasks`, `--task-set`, `--iterations`, `--seed`,
 
 Baseline rows:
 
-| Preset | Condition | Skill updates |
-| --- | --- | --- |
-| `no_feedback` | `no_feedback` | `none` |
-| `full_trace_same_task` | `full_traces` | `none` |
-| `static_mediator_same_task` | `static_mediator` | `none` |
-| `planner_only_skill_evolution` | `learned_mediator` | `planner` |
-| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator` |
-| `full_coevolution` | `learned_mediator` | `executor,planner,mediator` |
+| Preset                             | Condition          | Skill updates               |
+| ---------------------------------- | ------------------ | --------------------------- |
+| `no_feedback`                      | `no_feedback`      | `none`                      |
+| `full_trace_same_task`             | `full_traces`      | `none`                      |
+| `static_mediator_same_task`        | `static_mediator`  | `none`                      |
+| `planner_only_skill_evolution`     | `learned_mediator` | `planner`                   |
+| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator`                  |
+| `full_coevolution`                 | `learned_mediator` | `executor,planner,mediator` |
 
 Each row gets an isolated copy of the skill tree under its experiment
 directory.
@@ -357,12 +414,12 @@ uv run medcoevo run \
 
 SWE-bench options for `run`:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--swebench-dataset-name` | `SWE-bench/SWE-bench_Lite` | Dataset name or local dataset path. |
-| `--swebench-split` | `test` | Dataset split. |
-| `--timeout` | `1800` | Per-instance test timeout in seconds. |
-| `--max-workers` | `1` | Modal harness worker count. |
+| Option                    | Default                    | Meaning                               |
+| ------------------------- | -------------------------- | ------------------------------------- |
+| `--swebench-dataset-name` | `SWE-bench/SWE-bench_Lite` | Dataset name or local dataset path.   |
+| `--swebench-split`        | `test`                     | Dataset split.                        |
+| `--timeout`               | `1800`                     | Per-instance test timeout in seconds. |
+| `--max-workers`           | `1`                        | Modal harness worker count.           |
 
 Standalone SWE-bench smoke outputs are written under:
 
@@ -399,7 +456,8 @@ Important files:
   totals, per-task summaries, and environment failure count.
 - `artifacts/traces/`: normalized task execution traces.
 - `artifacts/reports/`: Mediator reports.
-- `artifacts/validation/`: executor skill validation evidence when enabled.
+- `artifacts/validation/`: Executor skill and Planner reflection validation
+  evidence when enabled.
 - `history/history.jsonl`: feedback history entries used for later context and
   contrastive reflection.
 - `history/rejected_proposals.jsonl`: rejected advisor batches or validation
@@ -518,8 +576,10 @@ runtime side effects. Examples:
 
 ## Progress
 
-1. Skillsbench and SWE-bench datasets integrated, but SWE-bench evaluation is set to be run on Modal (cloud)
-2. Experimental LLM Judge layer is added, run after each task run by evaluating the traces and logs. The judge reward is a weighted average of a few rubrics and the verifier score takes 50% of the judge reward. Certain flags are used to cap the judge reward for inquality source. 
+1. SkillsBench and SWE-bench datasets are integrated; SWE-bench evaluation runs
+   on Modal.
+2. The experimental LLM Judge layer runs after each task and scores traces,
+   logs, verifier reward, and quality flags.
 
 ### Further Experiment 
 
