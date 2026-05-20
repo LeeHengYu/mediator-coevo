@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,7 +36,7 @@ from mediated_coevo.models.skill import (
 )
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
-from mediated_coevo.core.config import Config
+from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
@@ -64,6 +65,7 @@ def _attach_executor_skill_gate(orch: Orchestrator) -> None:
         executor=orch.executor,
         benchmark_repo=orch.benchmark_repo,
         artifact_store=orch.artifact_store,
+        judge_llm_client=getattr(orch, "judge_llm_client", None),
     )
 
 
@@ -264,6 +266,54 @@ class _DrainClient:
         events = list(self.events)
         self.events.clear()
         return events
+
+
+class _JudgeClient:
+    model = "test-judge"
+
+    def __init__(self, score: float) -> None:
+        self.score = score
+
+    async def complete(self, *args, **kwargs) -> dict:
+        return {
+            "content": json.dumps(
+                {
+                    "axis_scores": {
+                        "task_outcome": self.score,
+                        "evidence_quality": self.score,
+                        "skill_update_usefulness": self.score,
+                        "token_efficiency": self.score,
+                        "reflection_depth": self.score,
+                    },
+                    "flags": {
+                        "benchmark_gaming_or_obscured_failure": False,
+                        "no_meaningful_progress": False,
+                        "brittle_or_one_off_patch": False,
+                        "unverifiable_outcome": False,
+                    },
+                    "confidence": 0.8,
+                    "rationale": "online judge score",
+                    "flag_evidence": {},
+                }
+            ),
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "model": self.model,
+            "raw": {},
+        }
+
+    def drain_token_events(self) -> list[TokenBudgetEvent]:
+        return []
+
+
+class _SequencedJudgeClient(_JudgeClient):
+    def __init__(self, scores: list[float]) -> None:
+        super().__init__(scores[0])
+        self.scores = list(scores)
+
+    async def complete(self, *args, **kwargs) -> dict:
+        self.score = self.scores.pop(0)
+        return await super().complete(*args, **kwargs)
 
 
 class _LLMBackedComponent:
@@ -1049,6 +1099,64 @@ async def test_run_iteration_logs_advisor_rejection_in_metrics_record(tmp_path):
     assert row["proposal_ids"] == record.proposal_ids
 
 
+@pytest.mark.asyncio
+async def test_run_iteration_tags_pending_history_with_judge_reward(tmp_path):
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.planner = _ProposalPlanner()
+    orch.executor = _RewardExecutor()
+    orch.mediator = _ExposedMediator()
+    orch.skill_store = _RunIterationSkillStore()
+    orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    orch.history_store = HistoryStore(history_dir=tmp_path / "history")
+    orch.benchmark_repo = _AnyTaskRepo()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        }
+    )
+    orch.config.experiment.skill_updates.executor = False
+    orch.experiment_dir = tmp_path
+    orch.skill_advisor = _RejectingAdvisor()
+    orch.judge_llm_client = _JudgeClient(0.73)
+    orch._proposal_buffer = []
+    orch._previous_report_by_task = {}
+    orch._previous_reward_by_task = {}
+    _attach_executor_skill_gate(orch)
+    entry_id = orch.history_store.add(
+        HistoryEntry(
+            iteration=0,
+            agent_role="mediator",
+            payload=MediatorSignal(headline="previous report"),
+            metadata={"task_id": "task-A"},
+        )
+    )
+    orch.history_store.remember_pending_outcome(
+        "task-A",
+        mediator_entry_id=entry_id,
+    )
+
+    record = await orch._run_iteration("task-A", 1)
+
+    entry = next(
+        item for item in orch.history_store._entries if item.entry_id == entry_id
+    )
+    assert record.reward == pytest.approx(0.5)
+    assert entry.reward == pytest.approx(0.73)
+    assert entry.metadata["reward_source"] == "judge"
+    assert entry.metadata["verifier_reward"] == pytest.approx(0.5)
+    assert entry.metadata["judge_reward"] == pytest.approx(0.73)
+    sidecar_rows = [
+        json.loads(line)
+        for line in (tmp_path / "artifacts" / "judge_rewards.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert sidecar_rows[0]["judge_reward"] == pytest.approx(0.73)
+
+
 class _MemorySkillStore:
     def __init__(self) -> None:
         self.content = "old"
@@ -1141,14 +1249,14 @@ def _advisor_validation_orchestrator(
     allow_contributing_fallback: bool = True,
     allow_swebench_replacement_for_skillsbench: bool = False,
 ) -> Orchestrator:
-    orch = Orchestrator.__new__(Orchestrator)
+    orch: Any = Orchestrator.__new__(Orchestrator)
     orch.config = Config(
-        models={
-            "planner": "test-planner",
-            "executor": "test-executor",
-            "mediator": "test-mediator",
-            "judge": "test-judge",
-        }
+        models=ModelsConfig(
+            planner="test-planner",
+            executor="test-executor",
+            mediator="test-mediator",
+            judge="test-judge",
+        )
     )
     orch.config.experiment.advisor_buffer_max = len(proposal_task_ids)
     orch.config.experiment.skill_validation.allow_contributing_fallback = (
@@ -1349,6 +1457,34 @@ async def test_advisor_patch_rejected_when_validation_task_regresses(tmp_path):
         "task-B",
     ]
     assert rejection.base_skill_hash == SkillStore.content_hash("old")
+
+
+@pytest.mark.asyncio
+async def test_advisor_validation_uses_judge_reward_as_driver(tmp_path):
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.0},
+        candidate_rewards={"task-A": 1.0},
+        proposal_task_ids=["task-A"],
+    )
+    orch.executor_skill_gate.judge_llm_client = _SequencedJudgeClient([0.8, 0.7])
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is None
+    result = _validation_result_json(tmp_path)
+    assert result["decision"] == "rejected"
+    assert result["reason"] == "task_regression"
+    task_result = result["task_results"][0]
+    assert task_result["current_reward"] == pytest.approx(0.8)
+    assert task_result["candidate_reward"] == pytest.approx(0.7)
+    assert task_result["current_reward_source"] == "judge"
+    assert task_result["candidate_reward_source"] == "judge"
+    assert task_result["current_verifier_reward"] == pytest.approx(0.0)
+    assert task_result["candidate_verifier_reward"] == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio

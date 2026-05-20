@@ -7,13 +7,21 @@ import pytest
 
 from mediated_coevo.analysis.judge_rewards import (
     annotate_judge_rewards,
+    append_judge_reward_record,
     compute_judge_reward,
+    judge_reward_for_trace,
+    judge_reward_metadata,
 )
 from mediated_coevo.analysis.reporting import build_score_summary, write_score_summary
-from mediated_coevo.core.config import Config
+from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.models.judge import JudgeAxisScores, JudgeCapFlags, JudgeLLMResponse
+from mediated_coevo.models.judge import (
+    JudgeAxisScores,
+    JudgeCapFlags,
+    JudgeLLMResponse,
+    JudgeRewardRecord,
+)
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 
@@ -57,12 +65,12 @@ class _FakeJudgeClient:
 
 def _config() -> Config:
     return Config(
-        models={
-            "planner": "openrouter/test/planner",
-            "executor": "openrouter/test/executor",
-            "mediator": "openrouter/test/mediator",
-            "judge": "openrouter/test/judge",
-        }
+        models=ModelsConfig(
+            planner="openrouter/test/planner",
+            executor="openrouter/test/executor",
+            mediator="openrouter/test/mediator",
+            judge="openrouter/test/judge",
+        )
     )
 
 
@@ -74,6 +82,30 @@ def _trace(task_id: str = "task-a", iteration: int = 1) -> ExecutionTrace:
         status="ok",
         stdout="passed two checks",
         stderr="",
+    )
+
+
+def _fallback_record_for_test(record_id: str = "record") -> JudgeRewardRecord:
+    return JudgeRewardRecord(
+        record_id=record_id,
+        task_id="task-a",
+        iteration=1,
+        raw_reward=0.5,
+        judge_reward=0.5,
+        base_reward=0.5,
+        axis_scores=JudgeAxisScores(
+            task_outcome=0.5,
+            evidence_quality=0.0,
+            skill_update_usefulness=0.0,
+            token_efficiency=0.0,
+            reflection_depth=0.0,
+        ),
+        flags=JudgeCapFlags(),
+        confidence=0.0,
+        rationale="fallback",
+        judge_model="openrouter/test/judge",
+        rubric_version="rar-v1",
+        metadata={"judge_reward_fallback": True},
     )
 
 
@@ -200,7 +232,70 @@ def test_true_flag_requires_evidence():
 
 
 @pytest.mark.asyncio
-async def test_annotate_judge_rewards_writes_sidecar_summary_and_history(tmp_path):
+async def test_live_judge_reward_returns_evolution_metadata(tmp_path):
+    trace = _trace()
+
+    record = await judge_reward_for_trace(
+        trace=trace,
+        config=_config(),
+        llm_client=_FakeJudgeClient(),
+        trace_path=tmp_path / "trace.json",
+        task_category="skillsbench",
+        task_difficulty="medium",
+        expected_reward_range=(0.0, 1.0),
+        verifier_type="pytest",
+        verifier_status="ok",
+    )
+
+    assert record is not None
+    assert record.raw_reward == pytest.approx(0.5)
+    assert record.judge_reward == pytest.approx(0.63)
+    assert record.task_category == "skillsbench"
+    metadata = judge_reward_metadata(record)
+    assert metadata["reward_source"] == "judge"
+    assert metadata["verifier_reward"] == pytest.approx(0.5)
+    assert metadata["judge_reward"] == pytest.approx(0.63)
+    assert metadata["judge_base_reward"] == pytest.approx(0.63)
+    assert metadata["judge_reward_record_id"] == record.record_id
+    assert metadata["judge_rubric_version"] == "rar-v1"
+    assert metadata["judge_confidence"] == pytest.approx(0.9)
+    assert metadata["judge_applied_cap"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_judge_reward_falls_back_without_client():
+    record = await judge_reward_for_trace(
+        trace=_trace(),
+        config=_config(),
+        llm_client=None,
+    )
+
+    assert record is not None
+    assert record.judge_reward == pytest.approx(0.5)
+    assert record.metadata["judge_reward_fallback"] is True
+    assert record.metadata["fallback_reason"] == "judge_client_unavailable"
+    assert judge_reward_metadata(record)["reward_source"] == "verifier_fallback"
+
+
+def test_append_judge_reward_record_is_idempotent(tmp_path):
+    record = _fallback_record_for_test(record_id="same-record")
+
+    assert append_judge_reward_record(tmp_path, record) is True
+    assert append_judge_reward_record(tmp_path, record) is False
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "artifacts" / "judge_rewards.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["record_id"] for row in rows] == ["same-record"]
+
+
+@pytest.mark.asyncio
+async def test_posthoc_judge_rewards_write_sidecar_summary_and_promote_history(
+    tmp_path,
+):
     run_dir, history, source_entry_id = _scored_run_with_history(tmp_path)
 
     records = await annotate_judge_rewards(
@@ -228,13 +323,14 @@ async def test_annotate_judge_rewards_writes_sidecar_summary_and_history(tmp_pat
     entries = history.query(recent=10)
     assert len(entries) == 1
     assert entries[0].entry_id == source_entry_id
-    assert entries[0].reward == pytest.approx(0.5)
+    assert entries[0].reward == pytest.approx(0.63)
+    assert entries[0].metadata["reward_source"] == "judge"
+    assert entries[0].metadata["verifier_reward"] == pytest.approx(0.5)
     assert entries[0].metadata["judge_reward"] == pytest.approx(0.63)
     assert entries[0].metadata["judge_reward_record_id"] == records[0].record_id
     assert entries[0].metadata["judge_rubric_version"] == "rar-v1"
     assert entries[0].metadata["judge_confidence"] == pytest.approx(0.9)
     assert entries[0].metadata["judge_applied_cap"] is None
-    assert "reward_source" not in entries[0].metadata
 
 
 @pytest.mark.asyncio

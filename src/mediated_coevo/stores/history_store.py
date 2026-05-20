@@ -181,15 +181,17 @@ class HistoryStore:
         trace: ExecutionTrace,
         *,
         proposals: list[SkillProposal] | None = None,
+        outcome_reward: float | None = None,
+        outcome_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Tag pending role entries with this trace's reward, when usable."""
+        """Tag pending role entries with this trace's evolution reward."""
         if trace.iteration <= 0:
             return
 
         mediator_entry_id = self._pending_mediator_entry_id_by_task.pop(task_id, None)
         planner_entry_id = self._pending_planner_entry_id_by_task.pop(task_id, None)
 
-        reward = trace.reward
+        reward = trace.reward if outcome_reward is None else outcome_reward
         if not trace.is_usable_feedback_signal or reward is None:
             if mediator_entry_id or planner_entry_id:
                 logger.info(
@@ -201,27 +203,27 @@ class HistoryStore:
                 )
             return
 
+        metadata: dict[str, Any] = {
+            "verifier_reward": trace.reward,
+            "reward_source": "verifier",
+            "outcome_task_id": task_id,
+            "outcome_iteration": trace.iteration,
+            "trace_status": trace.status,
+        }
+        if outcome_metadata:
+            metadata.update(outcome_metadata)
+
         if mediator_entry_id:
             self.tag_outcome_by_id(
                 mediator_entry_id,
                 reward=reward,
-                metadata={
-                    "verifier_reward": reward,
-                    "outcome_task_id": task_id,
-                    "outcome_iteration": trace.iteration,
-                    "trace_status": trace.status,
-                },
+                metadata=metadata,
             )
         if planner_entry_id:
             self.tag_outcome_by_id(
                 planner_entry_id,
                 reward=reward,
-                metadata={
-                    "verifier_reward": reward,
-                    "outcome_task_id": task_id,
-                    "outcome_iteration": trace.iteration,
-                    "trace_status": trace.status,
-                },
+                metadata=metadata,
             )
         for proposal in proposals or []:
             if (
@@ -229,6 +231,12 @@ class HistoryStore:
                 and proposal.task_id == task_id
             ):
                 proposal.reward = reward
+                reward_source = metadata.get("reward_source")
+                proposal.reward_source = (
+                    reward_source if isinstance(reward_source, str) else None
+                )
+                proposal.verifier_reward = trace.reward
+                proposal.judge_reward = _float_metadata(metadata.get("judge_reward"))
 
     def tag_outcome_by_id(
         self,
@@ -257,8 +265,9 @@ class HistoryStore:
         rubric_version: str,
         confidence: float,
         applied_cap: str | None,
+        reward_source: str = "judge",
     ) -> int:
-        """Attach judge reward metadata to verifier-tagged history entries."""
+        """Promote judge reward onto verifier-tagged history entries."""
         updated = 0
         for entry in self._entries:
             if (
@@ -267,8 +276,11 @@ class HistoryStore:
                 or entry.metadata.get("outcome_iteration") != iteration
             ):
                 continue
+            entry.metadata.setdefault("verifier_reward", entry.reward)
+            entry.reward = judge_reward
             entry.metadata.update(
                 {
+                    "reward_source": reward_source,
                     "judge_reward": judge_reward,
                     "judge_reward_record_id": judge_reward_record_id,
                     "judge_rubric_version": rubric_version,
@@ -320,11 +332,11 @@ class HistoryStore:
 
         For each task with at least two tagged entries, compute same-role,
         same-task relative scores as ``reward - task_mean_reward``. Then sort
-        by raw reward and take the bottom ``bot_frac`` and top ``top_frac`` as
-        disjoint buckets. Build all cross-bucket candidates with a strict raw
+        by evolution reward and take the bottom ``bot_frac`` and top ``top_frac`` as
+        disjoint buckets. Build all cross-bucket candidates with a strict
         reward gap, pool them across tasks, and return up to ``max_pairs``
         pairs ordered by descending relative-score gap. The persisted verifier
-        rewards are not changed.
+        rewards are kept in metadata when an alternate reward source is used.
 
         Args:
             agent_role: Role to filter entries by.
@@ -407,3 +419,11 @@ class HistoryStore:
 
         pool.sort(key=lambda pair: pair.relative_reward_gap, reverse=True)
         return pool[:max_pairs]
+
+
+def _float_metadata(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None

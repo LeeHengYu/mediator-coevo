@@ -409,10 +409,10 @@ class Reflector:
             current_skill=current_skill,
             evidence_intro=(
                 "Below are pairs of your past reports. In each pair, one report "
-                "led to a WORSE downstream reward and the other to a BETTER one "
+                "led to a WORSE downstream evolution reward and the other to a BETTER one "
                 "relative to the same task's average outcome. "
                 "Each entry shows the mediator's headline, decision, abstraction "
-                "level, raw reward, task-relative delta, and a diagnostic excerpt "
+                "level, evolution reward, task-relative delta, and a diagnostic excerpt "
                 "of the report."
             ),
             instructions=(
@@ -458,9 +458,9 @@ class Reflector:
             current_skill=current_skill,
             evidence_intro=(
                 "Below are pairs of your past skill edits. In each pair, one "
-                "edit led to a WORSE downstream reward and the other to a "
+                "edit led to a WORSE downstream evolution reward and the other to a "
                 "BETTER one relative to the same task's average outcome. Each "
-                "entry shows your full reasoning, raw reward, task-relative "
+                "entry shows your full reasoning, evolution reward, task-relative "
                 "delta, the diff size, and a head+tail excerpt of the diff itself."
             ),
             instructions=(
@@ -575,7 +575,7 @@ def _format_reward_context(reward: float, relative_reward: float) -> str:
     else:
         position = "at task average"
     return (
-        f"raw reward: {reward:.2f}; "
+        f"evolution reward: {reward:.2f}; "
         f"relative task delta: {relative_reward:+.2f} {position}"
     )
 

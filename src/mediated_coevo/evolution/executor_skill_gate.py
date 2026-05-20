@@ -10,6 +10,10 @@ from typing import Any
 
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.analysis.judge_rewards import (
+    judge_reward_for_trace,
+    judge_reward_metadata,
+)
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.candidates import (
@@ -21,7 +25,7 @@ from mediated_coevo.evolution.candidates import (
     stable_selection_seed,
 )
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
-from mediated_coevo.experiment.records import rollback_snapshot
+from mediated_coevo.experiment.records import rollback_snapshot, task_metadata_fields
 from mediated_coevo.models.skill import (
     AdvisorBatchProvenance,
     ProposalRef,
@@ -33,6 +37,7 @@ from mediated_coevo.models.skill import (
     SkillValidationResult,
     SkillValidationTaskResult,
 )
+from mediated_coevo.models.judge import JudgeRewardRecord
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.artifact_store import ArtifactStore
@@ -77,6 +82,7 @@ class ExecutorSkillGate:
     executor: ExecutorAgent
     benchmark_repo: SkillsBenchRepository
     artifact_store: ArtifactStore
+    judge_llm_client: Any | None = None
     last_advisor_decision: str | None = None
     last_advisor_reason: str | None = None
     last_proposal_ids: list[str] = field(default_factory=list)
@@ -260,6 +266,9 @@ class ExecutorSkillGate:
                     task_id=proposal.task_id,
                     iteration=proposal.iteration,
                     reward=proposal.reward,
+                    reward_source=proposal.reward_source,
+                    verifier_reward=proposal.verifier_reward,
+                    judge_reward=proposal.judge_reward,
                 )
                 for proposal in buffered_proposals
             ],
@@ -313,6 +322,9 @@ class ExecutorSkillGate:
                     iteration=proposal.iteration,
                     task_id=proposal.task_id,
                     reward=proposal.reward,
+                    reward_source=proposal.reward_source,
+                    verifier_reward=proposal.verifier_reward,
+                    judge_reward=proposal.judge_reward,
                     old_content=proposal.old_content,
                     new_content=proposal.new_content,
                     reasoning=proposal.reasoning,
@@ -442,8 +454,13 @@ class ExecutorSkillGate:
         candidate_skill: str,
     ) -> SkillValidationTaskResult:
         validation_config = self.config.experiment.skill_validation
+        task_metadata = task_metadata_fields(task_id=task_id, task_config=None)
         try:
             benchmark_task = self.benchmark_repo.resolve(task_id)
+            task_metadata = task_metadata_fields(
+                task_id=task_id,
+                task_config=benchmark_task.task_config,
+            )
             task_spec = TaskSpec(
                 task_id=task_id,
                 instruction=benchmark_task.instruction,
@@ -485,8 +502,39 @@ class ExecutorSkillGate:
             current_trace.is_usable_feedback_signal
             and candidate_trace.is_usable_feedback_signal
         )
-        current_reward = current_trace.reward
-        candidate_reward = candidate_trace.reward
+        current_judge_record = None
+        candidate_judge_record = None
+        if usable:
+            current_judge_record = await judge_reward_for_trace(
+                trace=current_trace,
+                config=self.config,
+                llm_client=self.judge_llm_client,
+                trace_path=current_path,
+                task_category=task_metadata.get("task_category"),
+                task_difficulty=task_metadata.get("task_difficulty"),
+                expected_reward_range=task_metadata.get("expected_reward_range"),
+                verifier_type=task_metadata.get("verifier_type"),
+                verifier_status=current_trace.status,
+            )
+            candidate_judge_record = await judge_reward_for_trace(
+                trace=candidate_trace,
+                config=self.config,
+                llm_client=self.judge_llm_client,
+                trace_path=candidate_path,
+                task_category=task_metadata.get("task_category"),
+                task_difficulty=task_metadata.get("task_difficulty"),
+                expected_reward_range=task_metadata.get("expected_reward_range"),
+                verifier_type=task_metadata.get("verifier_type"),
+                verifier_status=candidate_trace.status,
+            )
+        current_reward, current_source = _evolution_reward(
+            current_trace,
+            current_judge_record,
+        )
+        candidate_reward, candidate_source = _evolution_reward(
+            candidate_trace,
+            candidate_judge_record,
+        )
         regressed = (
             usable
             and candidate_reward is not None
@@ -497,6 +545,20 @@ class ExecutorSkillGate:
             task_id=task_id,
             current_reward=current_reward,
             candidate_reward=candidate_reward,
+            current_reward_source=current_source,
+            candidate_reward_source=candidate_source,
+            current_verifier_reward=current_trace.reward,
+            candidate_verifier_reward=candidate_trace.reward,
+            current_judge_reward=(
+                current_judge_record.judge_reward
+                if current_judge_record is not None
+                else None
+            ),
+            candidate_judge_reward=(
+                candidate_judge_record.judge_reward
+                if candidate_judge_record is not None
+                else None
+            ),
             current_status=current_trace.status,
             candidate_status=candidate_trace.status,
             current_trace_path=str(current_path),
@@ -705,6 +767,16 @@ def _validation_env_failure(
         error_kind=error_kind,
         error_detail=str(exc),
     )
+
+
+def _evolution_reward(
+    trace: ExecutionTrace,
+    judge_record: JudgeRewardRecord | None,
+) -> tuple[float | None, str | None]:
+    if judge_record is None:
+        return trace.reward, "verifier" if trace.reward is not None else None
+    metadata = judge_reward_metadata(judge_record)
+    return judge_record.judge_reward, metadata["reward_source"]
 
 
 def _mean_reward(rewards: Iterable[float | None]) -> float | None:

@@ -21,8 +21,9 @@ logger = logging.getLogger(__name__)
 _SYSTEM = """\
 You are a Skill Advisor in a multi-agent co-evolution system.
 Review a batch of proposed edits to the Executor's skill file.
-Each proposal includes the Planner's reasoning, a diff, and a reward
-(the task score from the iteration AFTER the proposal; "n/a" if not yet known).
+Each proposal includes the Planner's reasoning, a diff, and an evolution reward
+(normally judge-derived from the iteration AFTER the proposal; "n/a" if not yet
+known).
 
 Approve if the proposals show a consistent, well-reasoned direction.
 Reject if proposals contradict each other, lack supporting evidence, or the
@@ -98,6 +99,7 @@ class SkillAdvisorPrompt:
         from mediated_coevo.runtime.token_budget import fit_text_to_tokens
 
         reward_str = f"{proposal.reward:.3f}" if proposal.reward is not None else "n/a"
+        reward_source = proposal.reward_source or "unknown"
         added, removed, excerpt = _diff_parts(
             proposal.old_content,
             proposal.new_content,
@@ -110,7 +112,8 @@ class SkillAdvisorPrompt:
             )
         return (
             f"### Proposal {index} — iter={proposal.iteration} "
-            f"task={proposal.task_id} reward={reward_str}\n"
+            f"task={proposal.task_id} reward={reward_str} "
+            f"reward_source={reward_source}\n"
             f"**Reasoning**: {proposal.reasoning}\n"
             f"**Diff**: +{added}/-{removed} lines\n"
             f"```diff\n{excerpt}```\n"

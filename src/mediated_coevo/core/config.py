@@ -20,13 +20,32 @@ class ModelConfigError(ValueError):
     """Raised when configured model names are invalid."""
 
 
-def _normalize_openrouter_model_name(model: str) -> str:
-    model = model.strip()
-    if not model:
+def normalize_openrouter_model_name(model: str) -> str:
+    """Return a model ID with exactly one OpenRouter prefix."""
+    return f"{OPENROUTER_MODEL_PREFIX}{_provider_model_name(model)}"
+
+
+def normalize_harbor_model_name(model: str) -> str:
+    """Return a provider/model ID without the OpenRouter routing prefix."""
+    return _provider_model_name(model)
+
+
+def _provider_model_name(model: str) -> str:
+    """Return the provider/model suffix after removing OpenRouter prefixes."""
+    normalized = model.strip()
+    if not normalized:
         raise ModelConfigError("model names must be non-empty OpenRouter model IDs")
-    if model.startswith(OPENROUTER_MODEL_PREFIX):
-        return model
-    return f"{OPENROUTER_MODEL_PREFIX}{model}"
+
+    while normalized.startswith(OPENROUTER_MODEL_PREFIX):
+        normalized = normalized.removeprefix(OPENROUTER_MODEL_PREFIX)
+
+    parts = normalized.split("/")
+    if len(parts) < 2 or any(not part for part in parts):
+        raise ModelConfigError(
+            "model names must include provider and model, for example "
+            "'openrouter/openai/gpt-5.5'"
+        )
+    return normalized
 
 
 class ModelsConfig(BaseModel):
@@ -149,11 +168,11 @@ class Config(BaseModel):
     def normalize_models(self) -> Self:
         """Normalize every configured model name in-place."""
         for field_name, model in self.models:
-            model_str = _normalize_openrouter_model_name(model)
-            if field_name != 'executor':
-                setattr(self.models, field_name, model_str)
-            else: 
-                setattr(self.models, field_name, '/'.join(model_str.split('/')[1:]))
+            if field_name == "executor":
+                normalized = normalize_harbor_model_name(model)
+            else:
+                normalized = normalize_openrouter_model_name(model)
+            setattr(self.models, field_name, normalized)
         return self
 
 

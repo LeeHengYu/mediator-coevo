@@ -58,9 +58,9 @@ from mediated_coevo.benchmarks.task_sets import (
 )
 from mediated_coevo.core.config import (
     Config,
-    OPENROUTER_MODEL_PREFIX,
     SkillUpdateConfig,
     load_config,
+    normalize_openrouter_model_name,
 )
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.baselines import (
@@ -191,6 +191,7 @@ class ExperimentFactory:
             config.budgets,
             condition_name=config.experiment.condition_name,
         )
+        judge_client = LLMClient(model=config.models.judge)
 
         return ExperimentRuntime(
             experiment_dir=experiment_dir,
@@ -205,6 +206,7 @@ class ExperimentFactory:
                 config=config,
                 experiment_dir=experiment_dir,
                 skill_advisor=skill_advisor,
+                judge_llm_client=judge_client,
             ),
         )
 
@@ -1013,10 +1015,7 @@ def _build_swebench_executor(
 
 def _openrouter_model_for_llm(model: str) -> str:
     """Return a LiteLLM/OpenRouter model id from a Harbor-ready model id."""
-    model = model.strip()
-    if model.startswith(OPENROUTER_MODEL_PREFIX):
-        return model
-    return f"{OPENROUTER_MODEL_PREFIX}{model}"
+    return normalize_openrouter_model_name(model)
 
 
 def _prepare_unified_experiment_root(
@@ -1194,6 +1193,7 @@ def _build_unified_runtime(
         config.budgets,
         condition_name=config.experiment.condition_name,
     )
+    judge_client = LLMClient(model=config.models.judge)
 
     return ExperimentRuntime(
         experiment_dir=experiment_dir,
@@ -1208,6 +1208,7 @@ def _build_unified_runtime(
             config=config,
             experiment_dir=experiment_dir,
             skill_advisor=skill_advisor,
+            judge_llm_client=judge_client,
         ),
     )
 

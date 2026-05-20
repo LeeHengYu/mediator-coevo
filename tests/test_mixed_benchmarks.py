@@ -17,7 +17,7 @@ from mediated_coevo.benchmarks.mixed import (
 from mediated_coevo.core.config import Config
 from mediated_coevo.main import ExperimentRuntime, MatrixRuntime, app
 from mediated_coevo.models.task import TaskSpec
-from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
 
 
 @dataclass
@@ -44,7 +44,7 @@ class _Repo:
 
 
 class _Executor:
-    def __init__(self, status: str) -> None:
+    def __init__(self, status: TraceStatus) -> None:
         self.status = status
         self.calls: list[str] = []
 
@@ -203,7 +203,7 @@ def test_swebench_executor_uses_openrouter_model_for_llm_patch_generation(
     assert executor._model == "google/gemini-3-flash-preview"
     assert (
         main_module._openrouter_model_for_llm(
-            "openrouter/google/gemini-3-flash-preview"
+            "openrouter/openrouter/google/gemini-3-flash-preview"
         )
         == "openrouter/google/gemini-3-flash-preview"
     )

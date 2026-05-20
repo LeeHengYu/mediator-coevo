@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from mediated_coevo.models.history_signals import PlannerSignal
+from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 
 
@@ -30,6 +31,15 @@ def _reward_gap(pair: tuple[HistoryEntry, HistoryEntry]) -> float:
     assert worse.reward is not None
     assert better.reward is not None
     return better.reward - worse.reward
+
+
+def _trace(task_id: str, *, iteration: int, reward: float) -> ExecutionTrace:
+    return ExecutionTrace(
+        task_id=task_id,
+        iteration=iteration,
+        reward=reward,
+        status="ok",
+    )
 
 
 def test_contrastive_pairs_are_same_task_and_sorted_by_gap(tmp_path):
@@ -74,6 +84,37 @@ def test_contrastive_pairs_ignore_unusable_entries(tmp_path):
     _add_entry(store, task_id="untagged", reward=None, iteration=5)
 
     assert store.contrastive_pairs("planner", max_pairs=10) == []
+
+
+def test_contrastive_pairs_use_judge_evolution_reward_over_verifier_metadata(
+    tmp_path,
+):
+    store = HistoryStore(history_dir=tmp_path / "history")
+    first = _add_entry(store, task_id="task-A", reward=None, iteration=0)
+    store.remember_pending_outcome("task-A", planner_entry_id=first)
+    store.tag_pending_outcome(
+        "task-A",
+        _trace("task-A", iteration=1, reward=0.0),
+        outcome_reward=0.7,
+        outcome_metadata={"reward_source": "judge", "judge_reward": 0.7},
+    )
+    second = _add_entry(store, task_id="task-A", reward=None, iteration=1)
+    store.remember_pending_outcome("task-A", planner_entry_id=second)
+    store.tag_pending_outcome(
+        "task-A",
+        _trace("task-A", iteration=2, reward=1.0),
+        outcome_reward=0.4,
+        outcome_metadata={"reward_source": "judge", "judge_reward": 0.4},
+    )
+
+    pairs = store.contrastive_pairs("planner", max_pairs=10)
+
+    assert [(worse.entry_id, better.entry_id) for worse, better in pairs] == [
+        (second, first)
+    ]
+    assert pairs[0].worse.metadata["verifier_reward"] == pytest.approx(1.0)
+    assert pairs[0].better.metadata["verifier_reward"] == pytest.approx(0.0)
+    assert _reward_gap(pairs[0]) == pytest.approx(0.3)
 
 
 def test_contrastive_pair_sampling_is_seeded_bounded_and_sorted(tmp_path):

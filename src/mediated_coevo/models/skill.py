@@ -27,6 +27,9 @@ class SkillProposal(SkillEdit):
     iteration: int
     task_id: str
     reward: float | None = None
+    reward_source: str | None = None
+    verifier_reward: float | None = None
+    judge_reward: float | None = None
 
 
 class SkillUpdateCandidate(SkillEdit):
@@ -73,6 +76,9 @@ class ProposalRef(BaseModel):
     task_id: str
     iteration: int
     reward: float | None = None
+    reward_source: str | None = None
+    verifier_reward: float | None = None
+    judge_reward: float | None = None
 
 
 class SkillValidationTaskResult(BaseModel):
@@ -81,6 +87,12 @@ class SkillValidationTaskResult(BaseModel):
     task_id: str
     current_reward: float | None = None
     candidate_reward: float | None = None
+    current_reward_source: str | None = None
+    candidate_reward_source: str | None = None
+    current_verifier_reward: float | None = None
+    candidate_verifier_reward: float | None = None
+    current_judge_reward: float | None = None
+    candidate_judge_reward: float | None = None
     current_status: str
     candidate_status: str
     current_trace_path: str | None = None

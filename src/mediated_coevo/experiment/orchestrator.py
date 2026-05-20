@@ -11,10 +11,16 @@ import logging
 import random
 import time
 from pathlib import Path
+from typing import Any
 
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.analysis.judge_rewards import (
+    append_judge_reward_record,
+    judge_reward_for_trace,
+    judge_reward_metadata,
+)
 from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
@@ -33,12 +39,14 @@ from mediated_coevo.experiment.records import (
     build_coevolution_record,
     build_iteration_record,
     build_missing_task_record,
+    TaskMetadataFields,
     rollback_snapshot,
     skill_update_from_reflection,
     skill_version,
     task_metadata_fields,
 )
 from mediated_coevo.models.iteration import IterationRecord
+from mediated_coevo.models.judge import JudgeRewardRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import (
     SkillProposal,
@@ -68,6 +76,7 @@ class Orchestrator:
         config: Config,
         experiment_dir: Path,
         skill_advisor: SkillAdvisor,
+        judge_llm_client: Any | None = None,
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -79,6 +88,7 @@ class Orchestrator:
         self.config = config
         self.experiment_dir = experiment_dir
         self.skill_advisor = skill_advisor
+        self.judge_llm_client = judge_llm_client
         self._proposal_buffer: list[SkillProposal] = []
         self.executor_skill_gate = ExecutorSkillGate(
             config=config,
@@ -89,6 +99,7 @@ class Orchestrator:
             executor=executor,
             benchmark_repo=benchmark_repo,
             artifact_store=artifact_store,
+            judge_llm_client=judge_llm_client,
         )
 
         self._snapshots_dir = experiment_dir / "skills_snapshots"
@@ -200,12 +211,27 @@ class Orchestrator:
         trace = await self.executor.execute_task(task_spec, skill_texts)
 
         report = None
+        trace_path = None
         try:
             report = await self.mediator.mediate_trace(condition, trace, task_spec)
             if report is not None:
                 self.artifact_store.store_report(report)
         finally:
-            self.artifact_store.store_trace(trace)
+            trace_path = self.artifact_store.store_trace(trace)
+
+        outcome_reward = None
+        outcome_metadata = None
+        if trace.iteration > 0 and trace.is_usable_feedback_signal:
+            judge_record = await self._judge_evolution_reward(
+                trace=trace,
+                task_metadata=task_metadata,
+                trace_path=trace_path,
+            )
+            if judge_record is not None:
+                if not judge_record.metadata.get("judge_reward_fallback"):
+                    append_judge_reward_record(self.experiment_dir, judge_record)
+                outcome_reward = judge_record.judge_reward
+                outcome_metadata = judge_reward_metadata(judge_record)
 
         proposal_feedback = await get_executor_proposal_feedback(
             condition=condition,
@@ -229,6 +255,8 @@ class Orchestrator:
             task_id,
             trace,
             proposals=self._proposal_buffer,
+            outcome_reward=outcome_reward,
+            outcome_metadata=outcome_metadata,
         )
 
         skill_update = await self.executor_skill_gate.review_and_patch(
@@ -280,6 +308,26 @@ class Orchestrator:
             duration,
         )
         return record
+
+    async def _judge_evolution_reward(
+        self,
+        *,
+        trace: ExecutionTrace,
+        task_metadata: TaskMetadataFields,
+        trace_path: Path | None,
+    ) -> JudgeRewardRecord | None:
+        """Score a usable trace for evolution, preserving verifier reward in metadata."""
+        return await judge_reward_for_trace(
+            trace=trace,
+            config=self.config,
+            llm_client=getattr(self, "judge_llm_client", None),
+            trace_path=trace_path,
+            task_category=task_metadata.get("task_category"),
+            task_difficulty=task_metadata.get("task_difficulty"),
+            expected_reward_range=task_metadata.get("expected_reward_range"),
+            verifier_type=task_metadata.get("verifier_type"),
+            verifier_status=trace.status,
+        )
 
     def _record_missing_task(
         self,
@@ -555,6 +603,8 @@ class Orchestrator:
             self.planner.llm_client,
             self.mediator.llm_client,
             self.skill_advisor.llm_client,
+            getattr(self, "judge_llm_client", None),
         ):
-            events.extend(llm_client.drain_token_events())
+            if llm_client is not None and hasattr(llm_client, "drain_token_events"):
+                events.extend(llm_client.drain_token_events())
         return events
