@@ -18,17 +18,32 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mediated_coevo.evolution.candidates import (
+    build_candidate_batch,
+    candidate_batch_artifact_path,
+    candidate_from_mapping,
+    candidate_refs,
+    selected_candidate,
+    stable_selection_seed,
+)
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 from mediated_coevo.models.skill import (
     ContrastivePairRef,
     ContrastiveReflectionProvenance,
+    SkillUpdateCandidate,
+    SkillUpdateCandidateBatch,
 )
 from mediated_coevo.stores.skill_store import SkillStore
 
 if TYPE_CHECKING:
     from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
-    from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
+    from mediated_coevo.stores.artifact_store import ArtifactStore
+    from mediated_coevo.stores.history_store import (
+        ContrastivePair,
+        HistoryEntry,
+        HistoryStore,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +72,16 @@ class Reflector:
         similarity_threshold: float = _SIMILARITY_THRESHOLD,
         budgets: BudgetsConfig | None = None,
         condition_name: str | None = None,
+        artifact_store: ArtifactStore | None = None,
+        base_seed: int | None = None,
     ) -> None:
         self._history_store = history_store
         self._skill_store = skill_store
         self._similarity_threshold = similarity_threshold
         self._budgets = budgets
         self._condition_name = condition_name
+        self._artifact_store = artifact_store
+        self._base_seed = base_seed
 
     async def reflect(
         self,
@@ -105,24 +124,51 @@ class Reflector:
                 llm_client=llm_client,
                 messages=messages,
             )
-            new_content = self._parse_reflected_skill(
+            candidate_batch = self._build_candidate_batch(
                 agent_role=agent_role,
                 current_skill=current_skill,
                 raw_content=raw_content,
+                iteration=iteration,
+                pairs=pairs,
+                selection_seed=selection_seed,
             )
-            if new_content is None:
+            candidate_batch_path = None
+            if self._artifact_store is not None:
+                self._artifact_store.store_candidate_batch(
+                    candidate_batch,
+                    overwrite=True,
+                )
+                candidate_batch_path = candidate_batch_artifact_path(
+                    candidate_batch.batch_id
+                )
+            selected = selected_candidate(candidate_batch)
+            if selected is None:
+                return None
+            if current_skill and _is_semantically_similar(
+                current_skill,
+                selected.new_content,
+                self._similarity_threshold,
+            ):
+                logger.info(
+                    "%s reflection: selected candidate too similar to current "
+                    "(threshold=%.2f); skipping.",
+                    agent_role,
+                    self._similarity_threshold,
+                )
                 return None
 
-            self._skill_store.write_skill(agent_role, new_content)
+            self._skill_store.write_skill(agent_role, selected.new_content)
             logger.info(
                 "%s skill updated via reflection (%d chars).",
                 agent_role,
-                len(new_content),
+                len(selected.new_content),
             )
             provenance = self._build_reflection_provenance(
                 agent_role=agent_role,
                 base_skill_hash=base_skill_hash,
                 pairs=pairs,
+                candidate_batch=candidate_batch,
+                candidate_batch_path=candidate_batch_path,
                 iteration=iteration,
                 max_pairs=max_pairs,
                 selection_seed=selection_seed,
@@ -130,18 +176,52 @@ class Reflector:
             return ReflectionResult(
                 skill_id=agent_role,
                 old_content=current_skill,
-                new_content=new_content,
+                new_content=selected.new_content,
                 provenance=provenance,
             )
         except Exception as e:
             logger.error("Failed to reflect for %s: %s", agent_role, e)
             return None
 
+    def _build_candidate_batch(
+        self,
+        *,
+        agent_role: str,
+        current_skill: str,
+        raw_content: str,
+        iteration: int,
+        pairs: list[ContrastivePair],
+        selection_seed: int | None,
+    ) -> SkillUpdateCandidateBatch:
+        batch_id = f"reflect-{agent_role}-iter-{iteration:04d}"
+        batch_seed = stable_selection_seed(
+            base_seed=self._base_seed,
+            iteration=iteration,
+            skill_id=agent_role,
+            batch_id=batch_id,
+        )
+        if selection_seed is not None:
+            batch_seed ^= selection_seed
+        return build_candidate_batch(
+            batch_id=batch_id,
+            iteration=iteration,
+            skill_id=agent_role,
+            agent_role=agent_role,
+            task_ids=_task_ids_from_pairs(pairs),
+            current_skill=current_skill,
+            candidates=_parse_reflection_candidates(
+                agent_role=agent_role,
+                current_skill=current_skill,
+                raw_content=raw_content,
+            ),
+            selection_seed=batch_seed,
+        )
+
     def _build_reflection_prompt(
         self,
         agent_role: str,
         current_skill: str,
-        pairs: list[tuple[HistoryEntry, HistoryEntry]],
+        pairs: list[ContrastivePair],
         *,
         model: str = "",
     ) -> list[dict[str, Any]]:
@@ -184,48 +264,21 @@ class Reflector:
             )
         return response["content"].strip()
 
-    def _parse_reflected_skill(
-        self,
-        *,
-        agent_role: str,
-        current_skill: str,
-        raw_content: str,
-    ) -> str | None:
-        if raw_content == _NO_CHANGE_SENTINEL:
-            logger.info(
-                "%s reflection: LLM explicitly signalled no change.", agent_role
-            )
-            return None
-
-        new_content = _parse_skill_content(raw_content)
-        if not new_content:
-            logger.info("%s reflection produced no parseable content.", agent_role)
-            return None
-
-        if current_skill and _is_semantically_similar(
-            current_skill, new_content, self._similarity_threshold
-        ):
-            logger.info(
-                "%s reflection: new content too similar to current (threshold=%.2f); skipping.",
-                agent_role,
-                self._similarity_threshold,
-            )
-            return None
-
-        return new_content
-
     @staticmethod
     def _build_reflection_provenance(
         *,
         agent_role: str,
         base_skill_hash: str,
-        pairs: list[tuple[HistoryEntry, HistoryEntry]],
+        pairs: list[ContrastivePair],
+        candidate_batch: SkillUpdateCandidateBatch,
+        candidate_batch_path: str | None,
         iteration: int,
         max_pairs: int,
         selection_seed: int | None,
     ) -> ContrastiveReflectionProvenance:
         pair_refs = _contrastive_pair_refs(pairs)
         task_ids = sorted({ref.task_id for ref in pair_refs if ref.task_id})
+        selected = selected_candidate(candidate_batch)
         return ContrastiveReflectionProvenance(
             batch_id=f"reflect-{agent_role}-iter-{iteration:04d}",
             iteration=iteration,
@@ -233,10 +286,22 @@ class Reflector:
             task_ids=task_ids,
             base_skill_hash=base_skill_hash,
             decision="committed",
-            reason=f"Updated via {len(pair_refs)} contrastive history pair(s).",
+            reason=(
+                f"Updated via {len(pair_refs)} contrastive history pair(s); "
+                f"selected {selected.update_kind if selected else 'none'} candidate."
+            ),
             contrastive_pair_refs=pair_refs,
             max_pairs=max_pairs,
             selection_seed=selection_seed,
+            candidate_batch_id=candidate_batch.batch_id,
+            candidate_batch_path=candidate_batch_path,
+            selected_candidate_id=(
+                candidate_batch.selected_candidate_id
+                if selected is not None
+                else None
+            ),
+            selected_update_kind=selected.update_kind if selected is not None else None,
+            candidate_refs=candidate_refs(candidate_batch),
         )
 
     # ── Prompt Builders ──
@@ -249,20 +314,29 @@ class Reflector:
         current_skill: str,
         evidence_intro: str,
         instructions: str,
-        pairs: list[tuple[HistoryEntry, HistoryEntry]],
+        pairs: list[ContrastivePair],
         formatter: Callable[[HistoryEntry], str],
         model: str = "",
         budgets: BudgetsConfig | None = None,
     ) -> list[dict[str, str]]:
         """Shared builder for contrastive reflection prompts."""
         contrastive_parts: list[str] = []
-        for i, (worse, better) in enumerate(pairs, 1):
+        for i, pair in enumerate(pairs, 1):
+            task_id = pair.worse.metadata.get("task_id", "?")
+            worse_context = _format_reward_context(
+                pair.worse_reward,
+                pair.worse_relative_reward,
+            )
+            better_context = _format_reward_context(
+                pair.better_reward,
+                pair.better_relative_reward,
+            )
             contrastive_parts.append(
-                f"### Pair {i} — task `{worse.metadata.get('task_id', '?')}`\n"
-                f"**Worse outcome** (reward: {worse.reward:.2f}):\n"
-                f"{formatter(worse)}\n\n"
-                f"**Better outcome** (reward: {better.reward:.2f}):\n"
-                f"{formatter(better)}"
+                f"### Pair {i} — task `{task_id}`\n"
+                f"**Worse outcome** ({worse_context}):\n"
+                f"{formatter(pair.worse)}\n\n"
+                f"**Better outcome** ({better_context}):\n"
+                f"{formatter(pair.better)}"
             )
 
         user_content = (
@@ -309,7 +383,7 @@ class Reflector:
     @staticmethod
     def _build_mediator_prompt(
         current_skill: str,
-        pairs: list[tuple[HistoryEntry, HistoryEntry]],
+        pairs: list[ContrastivePair],
         *,
         model: str = "",
         budgets: BudgetsConfig | None = None,
@@ -322,19 +396,21 @@ class Reflector:
                 "pairs: cases where your reporting led to better vs. worse "
                 "downstream outcomes. Use these to revise your protocol.\n\n"
                 "If you believe the current protocol already captures the "
-                "lessons from the evidence and no meaningful change is needed, "
-                "output ONLY the word NO_CHANGE (nothing else).\n\n"
-                "Otherwise, output ONLY the updated coordination protocol as "
-                "Markdown, enclosed in ```markdown ... ``` fences. Do not "
-                "include explanation outside the fences."
+                "lessons from the evidence, include a no_update candidate. "
+                "Otherwise, return JSON with 2-3 candidate protocol updates. "
+                "Each candidate must include candidate_id, update_kind, "
+                "hypothesis, risk, audit_score, new_content, and reasoning. "
+                "new_content must be the complete updated Markdown protocol."
             ),
             current_skill_heading="Current Coordination Protocol",
             current_skill=current_skill,
             evidence_intro=(
                 "Below are pairs of your past reports. In each pair, one report "
-                "led to a WORSE downstream reward and the other to a BETTER one. "
+                "led to a WORSE downstream reward and the other to a BETTER one "
+                "relative to the same task's average outcome. "
                 "Each entry shows the mediator's headline, decision, abstraction "
-                "level, and a diagnostic excerpt of the report."
+                "level, raw reward, task-relative delta, and a diagnostic excerpt "
+                "of the report."
             ),
             instructions=(
                 "Revise your coordination protocol based on the patterns above. "
@@ -353,7 +429,7 @@ class Reflector:
     @staticmethod
     def _build_planner_prompt(
         current_skill: str,
-        pairs: list[tuple[HistoryEntry, HistoryEntry]],
+        pairs: list[ContrastivePair],
         *,
         model: str = "",
         budgets: BudgetsConfig | None = None,
@@ -366,19 +442,20 @@ class Reflector:
                 "that led to better vs. worse outcomes. Use these to revise "
                 "your editing strategy.\n\n"
                 "If you believe the current guidelines already capture the "
-                "lessons from the evidence and no meaningful change is needed, "
-                "output ONLY the word NO_CHANGE (nothing else).\n\n"
-                "Otherwise, output ONLY the updated skill-refiner as "
-                "Markdown, enclosed in ```markdown ... ``` fences. Do not "
-                "include explanation outside the fences."
+                "lessons from the evidence, include a no_update candidate. "
+                "Otherwise, return JSON with 2-3 candidate skill-refiner "
+                "updates. Each candidate must include candidate_id, update_kind, "
+                "hypothesis, risk, audit_score, new_content, and reasoning. "
+                "new_content must be the complete updated Markdown skill."
             ),
             current_skill_heading="Current Skill-Refiner Guidelines",
             current_skill=current_skill,
             evidence_intro=(
                 "Below are pairs of your past skill edits. In each pair, one "
                 "edit led to a WORSE downstream reward and the other to a "
-                "BETTER one. Each entry shows your full reasoning, the diff "
-                "size, and a head+tail excerpt of the diff itself."
+                "BETTER one relative to the same task's average outcome. Each "
+                "entry shows your full reasoning, raw reward, task-relative "
+                "delta, the diff size, and a head+tail excerpt of the diff itself."
             ),
             instructions=(
                 "Revise your skill-refiner guidelines based on the patterns "
@@ -396,13 +473,13 @@ class Reflector:
 
 
 def _contrastive_pair_refs(
-    pairs: list[tuple[HistoryEntry, HistoryEntry]],
+    pairs: list[ContrastivePair],
 ) -> list[ContrastivePairRef]:
     """Convert selected history pairs into compact persisted references."""
     refs: list[ContrastivePairRef] = []
-    for worse, better in pairs:
-        worse_reward = 0.0 if worse.reward is None else worse.reward
-        better_reward = 0.0 if better.reward is None else better.reward
+    for pair in pairs:
+        worse = pair.worse
+        better = pair.better
         task_id = str(
             worse.metadata.get("task_id") or better.metadata.get("task_id") or ""
         )
@@ -411,12 +488,90 @@ def _contrastive_pair_refs(
                 worse_entry_id=worse.entry_id,
                 better_entry_id=better.entry_id,
                 task_id=task_id,
-                worse_reward=worse_reward,
-                better_reward=better_reward,
-                reward_gap=better_reward - worse_reward,
+                worse_reward=pair.worse_reward,
+                better_reward=pair.better_reward,
+                reward_gap=pair.reward_gap,
             )
         )
     return refs
+
+
+def _parse_reflection_candidates(
+    *,
+    agent_role: str,
+    current_skill: str,
+    raw_content: str,
+) -> list[SkillUpdateCandidate]:
+    """Parse a reflection response into candidate updates."""
+    if raw_content == _NO_CHANGE_SENTINEL:
+        return [
+            SkillUpdateCandidate(
+                skill_id=agent_role,
+                update_kind="no_update",
+                hypothesis="Current skill already captures the evidence.",
+                old_content=current_skill,
+                new_content=current_skill,
+                reasoning="The reflector explicitly signalled no change.",
+                audit_score=1.0,
+            )
+        ]
+
+    from mediated_coevo.core.utils import parse_json_object
+
+    parsed = parse_json_object(raw_content)
+    raw_candidates = parsed.get("candidates")
+    if isinstance(raw_candidates, list):
+        candidates = []
+        for raw_candidate in raw_candidates:
+            candidate = candidate_from_mapping(
+                raw_candidate,
+                skill_id=agent_role,
+                current_skill=current_skill,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        return candidates
+
+    new_content = _parse_skill_content(raw_content)
+    if new_content is None:
+        return []
+    return [
+        SkillUpdateCandidate(
+            skill_id=agent_role,
+            update_kind="legacy_reflection",
+            hypothesis="Single reflected update from legacy Markdown response.",
+            old_content=current_skill,
+            new_content=new_content,
+            reasoning="Parsed from the reflector's legacy Markdown response.",
+            audit_score=1.0,
+        )
+    ]
+
+
+def _task_ids_from_pairs(pairs: list[ContrastivePair]) -> list[str]:
+    return sorted(
+        {
+            str(
+                pair.worse.metadata.get("task_id")
+                or pair.better.metadata.get("task_id")
+            )
+            for pair in pairs
+            if pair.worse.metadata.get("task_id") or pair.better.metadata.get("task_id")
+        }
+    )
+
+
+def _format_reward_context(reward: float, relative_reward: float) -> str:
+    if relative_reward > 0:
+        position = "above task average"
+    elif relative_reward < 0:
+        position = "below task average"
+    else:
+        position = "at task average"
+    return (
+        f"raw reward: {reward:.2f}; "
+        f"relative task delta: {relative_reward:+.2f} {position}"
+    )
 
 
 def _is_semantically_similar(old: str, new: str, threshold: float) -> bool:

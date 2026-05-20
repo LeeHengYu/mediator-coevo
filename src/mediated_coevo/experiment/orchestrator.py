@@ -466,6 +466,8 @@ class Orchestrator:
             self.skill_store,
             budgets=self.config.budgets,
             condition_name=condition,
+            artifact_store=getattr(self, "artifact_store", None),
+            base_seed=self.config.experiment.seed,
         )
         skill_updates: list[SkillUpdate] = []
         reflection_seed = random.randrange(1 << 32)

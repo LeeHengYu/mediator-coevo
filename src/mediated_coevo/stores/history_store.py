@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import random
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
@@ -54,6 +55,32 @@ class _RewardedEntry:
 
     entry: HistoryEntry
     reward: float
+    relative_reward: float = 0.0
+
+
+@dataclass(frozen=True)
+class ContrastivePair:
+    """Same-task contrastive pair with transient group-relative scores."""
+
+    worse: HistoryEntry
+    better: HistoryEntry
+    worse_reward: float
+    better_reward: float
+    worse_relative_reward: float
+    better_relative_reward: float
+
+    def __iter__(self) -> Iterator[HistoryEntry]:
+        """Allow existing tuple-unpacking call sites to keep working."""
+        yield self.worse
+        yield self.better
+
+    @property
+    def reward_gap(self) -> float:
+        return self.better_reward - self.worse_reward
+
+    @property
+    def relative_reward_gap(self) -> float:
+        return self.better_relative_reward - self.worse_relative_reward
 
 
 class HistoryStore:
@@ -288,14 +315,16 @@ class HistoryStore:
         top_frac: float = 0.3,
         bot_frac: float = 0.3,
         selection_seed: int | None = None,
-    ) -> list[tuple[HistoryEntry, HistoryEntry]]:
+    ) -> list[ContrastivePair]:
         """Form same-task contrastive pairs from top/bottom reward buckets.
 
-        For each task with at least two tagged entries, sort by reward and
-        take the bottom ``bot_frac`` and top ``top_frac`` as disjoint buckets.
-        Build all cross-bucket ``(worse, better)`` candidates with a strict
-        reward gap, pool them across tasks, then randomly sample at most
-        ``max_pairs`` and return them sorted by descending gap.
+        For each task with at least two tagged entries, compute same-role,
+        same-task relative scores as ``reward - task_mean_reward``. Then sort
+        by raw reward and take the bottom ``bot_frac`` and top ``top_frac`` as
+        disjoint buckets. Build all cross-bucket candidates with a strict raw
+        reward gap, pool them across tasks, and return up to ``max_pairs``
+        pairs ordered by descending relative-score gap. The persisted verifier
+        rewards are not changed.
 
         Args:
             agent_role: Role to filter entries by.
@@ -303,13 +332,12 @@ class HistoryStore:
             task_id: If set, restrict to entries whose metadata task_id matches.
             top_frac: Fraction of each task group to treat as the "better" bucket.
             bot_frac: Fraction of each task group to treat as the "worse" bucket.
-            selection_seed: Deterministic seed used when sampling from a large pool.
+            selection_seed: Deterministic seed used to break equal-gap ties.
         """
-        tagged = [
-            _RewardedEntry(entry=e, reward=e.reward)
-            for e in self._entries
-            if e.agent_role == agent_role and e.reward is not None
-        ]
+        tagged: list[_RewardedEntry] = []
+        for entry in self._entries:
+            if entry.agent_role == agent_role and entry.reward is not None:
+                tagged.append(_RewardedEntry(entry=entry, reward=entry.reward))
         if task_id is not None:
             tagged = [
                 item for item in tagged if item.entry.metadata.get("task_id") == task_id
@@ -329,13 +357,21 @@ class HistoryStore:
                 dropped_untagged,
             )
 
-        pool: list[tuple[_RewardedEntry, _RewardedEntry]] = []
+        pool: list[ContrastivePair] = []
         for entries in by_task.values():
             n = len(entries)
             if n < 2:
                 continue
 
-            sorted_entries = sorted(entries, key=lambda item: item.reward)
+            task_mean_reward = sum(item.reward for item in entries) / n
+            relative_entries = [
+                _RewardedEntry(
+                    entry=item.entry,
+                    reward=item.reward,
+                    relative_reward=item.reward - task_mean_reward,
+                )
+                for item in entries
+            ]
             k_bot = max(1, ceil(n * bot_frac))
             k_top = max(1, ceil(n * top_frac))
 
@@ -344,21 +380,30 @@ class HistoryStore:
                 k_bot = max(1, min(k_bot, n - 1))
                 k_top = max(1, n - k_bot)
 
+            sorted_entries = sorted(relative_entries, key=lambda item: item.reward)
             bot = sorted_entries[:k_bot]
             top = sorted_entries[-k_top:]
 
-            pool.extend(
-                (worse, better)
-                for worse in bot
-                for better in top
-                if better.reward > worse.reward
-            )
+            for worse in bot:
+                for better in top:
+                    if better.reward <= worse.reward:
+                        continue
+                    pool.append(
+                        ContrastivePair(
+                            worse=worse.entry,
+                            better=better.entry,
+                            worse_reward=worse.reward,
+                            better_reward=better.reward,
+                            worse_relative_reward=worse.relative_reward,
+                            better_relative_reward=better.relative_reward,
+                        )
+                    )
 
         if not pool:
             return []
 
         if len(pool) > max_pairs:
-            pool = random.Random(selection_seed).sample(pool, max_pairs)
+            random.Random(selection_seed).shuffle(pool)
 
-        pool.sort(key=lambda p: p[1].reward - p[0].reward, reverse=True)
-        return [(worse.entry, better.entry) for worse, better in pool]
+        pool.sort(key=lambda pair: pair.relative_reward_gap, reverse=True)
+        return pool[:max_pairs]

@@ -9,12 +9,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from mediated_coevo.evolution.candidates import candidate_from_mapping
+
 from .base import BaseAgent
 
 if TYPE_CHECKING:
     from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
-    from mediated_coevo.models.skill import SkillProposal
+    from mediated_coevo.models.skill import SkillProposal, SkillUpdateCandidate
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.stores.history_store import HistoryEntry
 
@@ -35,6 +37,17 @@ UPDATE_RESPONSE_SCHEMA = (
     "Decide whether to update the skill. Respond with JSON:\n"
     '{"no_update": true} if no change needed, or\n'
     '{"new_content": "...", "reasoning": "..."}'
+)
+UPDATE_BATCH_RESPONSE_SCHEMA = (
+    "Draft 3 to 5 candidate skill updates. Respond with JSON only:\n"
+    '{"candidates": ['
+    '{"candidate_id": "short-stable-id", '
+    '"update_kind": "narrow_clarification | add_procedure | add_failure_guard | '
+    'remove_or_simplify_rule | task_specific_warning | no_update", '
+    '"hypothesis": "...", "risk": "...", "audit_score": 0.0, '
+    '"new_content": "...", "reasoning": "..."}'
+    "]}\n"
+    "Use update_kind=no_update with current content when no edit is warranted."
 )
 
 
@@ -166,6 +179,17 @@ class PlannerAgent(BaseAgent):
         if action == "update_skill":
             return self._build_update_prompt(
                 context,
+                response_schema=UPDATE_RESPONSE_SCHEMA,
+                batch_mode=False,
+                model=model,
+                budgets=self._budgets,
+                budget=budget,
+            )
+        if action == "update_skill_batch":
+            return self._build_update_prompt(
+                context,
+                response_schema=UPDATE_BATCH_RESPONSE_SCHEMA,
+                batch_mode=True,
                 model=model,
                 budgets=self._budgets,
                 budget=budget,
@@ -275,6 +299,54 @@ class PlannerAgent(BaseAgent):
             reasoning=parsed.get("reasoning", ""),
         )
 
+    async def suggest_skill_revision_batch(
+        self,
+        current_skill_content: str,
+        feedback: str | None,
+        edit_history: list[HistoryEntry],
+        *,
+        skill_id: str,
+        task_ids: list[str],
+        iteration: int = 0,
+    ) -> list[SkillUpdateCandidate]:
+        """Propose multiple candidate skill updates without writing to disk."""
+        from mediated_coevo.models.history_signals import PlannerSignal
+
+        context: dict[str, Any] = {
+            "action": "update_skill_batch",
+            "current_skill": current_skill_content,
+            "feedback": feedback,
+            "task_ids": task_ids,
+            "edit_history": [
+                {
+                    "iteration": e.iteration,
+                    "reasoning": (
+                        e.payload.reasoning
+                        if isinstance(e.payload, PlannerSignal)
+                        else ""
+                    ),
+                    "reward": e.reward,
+                }
+                for e in edit_history[-5:]
+            ],
+        }
+        result = await self.process(context)
+        parsed = result["parsed"]
+        raw_candidates = parsed.get("candidates")
+        if not isinstance(raw_candidates, list):
+            return []
+
+        candidates: list[SkillUpdateCandidate] = []
+        for raw_candidate in raw_candidates:
+            candidate = candidate_from_mapping(
+                raw_candidate,
+                skill_id=skill_id,
+                current_skill=current_skill_content,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        return candidates
+
     # ── Prompt builders ──
 
     @staticmethod
@@ -342,6 +414,8 @@ class PlannerAgent(BaseAgent):
     def _build_update_prompt(
         context: dict[str, Any],
         *,
+        response_schema: str,
+        batch_mode: bool,
         model: str = "",
         budgets: BudgetsConfig | None = None,
         budget: int | None = None,
@@ -366,6 +440,13 @@ class PlannerAgent(BaseAgent):
                         max_tokens=budgets.mediator_report_tokens,
                     )
                 )
+            if batch_mode and (task_ids := context.get("task_ids")):
+                sections.append(
+                    BudgetSection(
+                        "candidate_scope",
+                        f"## Candidate Scope\nskill_id=executor task_ids={task_ids}",
+                    )
+                )
             if history := context.get("edit_history"):
                 sections.append(
                     BudgetSection(
@@ -377,7 +458,7 @@ class PlannerAgent(BaseAgent):
             sections.append(
                 BudgetSection(
                     "response_schema",
-                    UPDATE_RESPONSE_SCHEMA,
+                    response_schema,
                     required=True,
                 )
             )
@@ -389,7 +470,9 @@ class PlannerAgent(BaseAgent):
         ]
         if feedback := context.get("feedback"):
             parts.append(f"\n## Execution Feedback\n{feedback}")
+        if batch_mode and (task_ids := context.get("task_ids")):
+            parts.append(f"\n## Candidate Scope\nskill_id=executor task_ids={task_ids}")
         if history := context.get("edit_history"):
             parts.append(f"\n## Recent Edit History\n{history}")
-        parts.append(f"\n{UPDATE_RESPONSE_SCHEMA}")
+        parts.append(f"\n{response_schema}")
         return "\n".join(parts)

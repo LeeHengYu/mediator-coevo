@@ -17,6 +17,7 @@ from mediated_coevo.evolution.compactor import (
     trace_header_summary,
 )
 from mediated_coevo.models.report import MediatorReport
+from mediated_coevo.models.skill import SkillUpdateCandidateBatch
 from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,11 @@ class ArtifactStore:
         self._traces_dir = base_dir / "traces"
         self._reports_dir = base_dir / "reports"
         self._validation_dir = base_dir / "validation"
+        self._candidate_batches_dir = base_dir / "candidate_batches"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
         self._reports_dir.mkdir(parents=True, exist_ok=True)
         self._validation_dir.mkdir(parents=True, exist_ok=True)
+        self._candidate_batches_dir.mkdir(parents=True, exist_ok=True)
 
     def store_trace(self, trace: ExecutionTrace, *, overwrite: bool = False) -> Path:
         """Persist an execution trace. Returns the file path."""
@@ -90,6 +93,20 @@ class ArtifactStore:
             raise FileExistsError(f"Validation result already exists: {path}")
         path.write_text(result.model_dump_json(indent=2))
         logger.debug("Stored validation result: %s", path)
+        return path
+
+    def store_candidate_batch(
+        self,
+        batch: SkillUpdateCandidateBatch,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """Persist a full candidate batch audit artifact."""
+        path = self._candidate_batches_dir / f"{batch.batch_id}.json"
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Candidate batch already exists: {path}")
+        path.write_text(batch.model_dump_json(indent=2))
+        logger.debug("Stored candidate batch: %s", path)
         return path
 
     def load_trace(self, task_id: str, iteration: int) -> ExecutionTrace | None:

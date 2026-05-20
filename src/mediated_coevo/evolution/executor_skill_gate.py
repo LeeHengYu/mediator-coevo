@@ -10,6 +10,14 @@ from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
+from mediated_coevo.evolution.candidates import (
+    build_candidate_batch,
+    candidate_batch_artifact_path,
+    candidate_refs,
+    proposal_to_candidate,
+    selected_candidate,
+    stable_selection_seed,
+)
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.records import rollback_snapshot
 from mediated_coevo.models.skill import (
@@ -113,24 +121,71 @@ class ExecutorSkillGate:
             agent_role="planner",
             tagged_only=True,
         )
-        draft_update = await self.planner.suggest_skill_revision(
-            current_skill_content=current_skill,
-            feedback=advisor_feedback,
-            edit_history=edit_history,
-            task_id=contributing_task_ids,
-            iteration=iteration,
-        )
-        if not draft_update:
+        candidates = []
+        batch_method = getattr(self.planner, "suggest_skill_revision_batch", None)
+        if callable(batch_method):
+            candidates = await batch_method(
+                current_skill_content=current_skill,
+                feedback=advisor_feedback,
+                edit_history=edit_history,
+                skill_id="executor",
+                task_ids=contributing_tasks,
+                iteration=iteration,
+            )
+        else:
+            draft_update = await self.planner.suggest_skill_revision(
+                current_skill_content=current_skill,
+                feedback=advisor_feedback,
+                edit_history=edit_history,
+                task_id=contributing_task_ids,
+                iteration=iteration,
+            )
+            if draft_update:
+                candidates = [proposal_to_candidate(draft_update)]
+        if not candidates:
             return None
 
         old_skill_hash = SkillStore.content_hash(current_skill)
-        new_skill_hash = SkillStore.content_hash(draft_update.new_content)
+        candidate_batch_id = f"{batch_id}-executor-candidates"
+        selection_seed = stable_selection_seed(
+            base_seed=self.config.experiment.seed,
+            iteration=iteration,
+            skill_id="executor",
+            batch_id=candidate_batch_id,
+        )
+        candidate_batch = build_candidate_batch(
+            batch_id=candidate_batch_id,
+            iteration=iteration,
+            skill_id="executor",
+            agent_role="planner",
+            task_ids=contributing_tasks,
+            current_skill=current_skill,
+            candidates=candidates,
+            selection_seed=selection_seed,
+        )
+        self.artifact_store.store_candidate_batch(candidate_batch, overwrite=True)
+        candidate_batch_path = candidate_batch_artifact_path(candidate_batch.batch_id)
+        selected = selected_candidate(candidate_batch)
+        if selected is None:
+            self.last_rejection_id = self._record_rejected_proposals(
+                iteration=iteration,
+                batch_id=batch_id,
+                current_skill=current_skill,
+                proposals=buffered_proposals,
+                reason="candidate_selection: no_valid_candidates",
+                advisor_feedback=advisor_feedback,
+                candidate_batch_id=candidate_batch.batch_id,
+                candidate_batch_path=candidate_batch_path,
+            )
+            return None
+
+        new_skill_hash = SkillStore.content_hash(selected.new_content)
         validation = await self._validate_candidate(
             validation_id=batch_id,
             iteration=iteration,
             task_ids=contributing_tasks,
             current_skill=current_skill,
-            candidate_skill=draft_update.new_content,
+            candidate_skill=selected.new_content,
         )
         if validation.decision != "accepted":
             logger.info(
@@ -145,6 +200,8 @@ class ExecutorSkillGate:
                 reason=f"validation: {validation.reason}",
                 advisor_feedback=advisor_feedback,
                 validation=validation,
+                candidate_batch_id=candidate_batch.batch_id,
+                candidate_batch_path=candidate_batch_path,
             )
             return None
 
@@ -158,6 +215,11 @@ class ExecutorSkillGate:
             reason=advisor_feedback,
             rollback_snapshot=rollback_snapshot(iteration),
             validation=validation,
+            candidate_batch_id=candidate_batch.batch_id,
+            candidate_batch_path=candidate_batch_path,
+            selected_candidate_id=selected.candidate_id,
+            selected_update_kind=selected.update_kind,
+            candidate_refs=candidate_refs(candidate_batch),
             proposal_refs=[
                 ProposalRef(
                     proposal_id=proposal.proposal_id,
@@ -172,7 +234,7 @@ class ExecutorSkillGate:
             skill_id="executor",
             task_id=contributing_task_ids,
             old_content=current_skill,
-            new_content=draft_update.new_content,
+            new_content=selected.new_content,
             reasoning=advisor_feedback,
             iteration=iteration,
             old_skill_hash=old_skill_hash,
@@ -193,6 +255,8 @@ class ExecutorSkillGate:
         reason: str,
         advisor_feedback: str | None = None,
         validation: SkillValidationResult | None = None,
+        candidate_batch_id: str | None = None,
+        candidate_batch_path: str | None = None,
     ) -> str:
         """Persist rejected proposal evidence without writing a skill update."""
         old_skill_hash = SkillStore.content_hash(current_skill)
@@ -207,6 +271,8 @@ class ExecutorSkillGate:
             reason=reason,
             advisor_feedback=advisor_feedback,
             validation=validation,
+            candidate_batch_id=candidate_batch_id,
+            candidate_batch_path=candidate_batch_path,
             proposals=[
                 RejectedSkillProposal(
                     proposal_id=proposal.proposal_id,

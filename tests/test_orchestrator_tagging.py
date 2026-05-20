@@ -31,6 +31,7 @@ from mediated_coevo.models.skill import (
     ProposalRef,
     SkillProposal,
     SkillUpdate,
+    SkillUpdateCandidate,
 )
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
@@ -1069,12 +1070,50 @@ class _PatchPlanner:
         )
 
 
+class _BatchPatchPlanner:
+    step = 7
+
+    async def suggest_skill_revision_batch(
+        self,
+        current_skill_content: str,
+        feedback: str | None,
+        edit_history: list,
+        *,
+        skill_id: str,
+        task_ids: list[str],
+        iteration: int = 0,
+    ) -> list[SkillUpdateCandidate]:
+        return [
+            SkillUpdateCandidate(
+                candidate_id="broad",
+                skill_id=skill_id,
+                update_kind="add_procedure",
+                hypothesis="larger update",
+                old_content=current_skill_content,
+                new_content="broad",
+                reasoning="too broad",
+                audit_score=0.1,
+            ),
+            SkillUpdateCandidate(
+                candidate_id="targeted",
+                skill_id=skill_id,
+                update_kind="narrow_clarification",
+                hypothesis="targeted update",
+                old_content=current_skill_content,
+                new_content="new",
+                reasoning="targeted",
+                audit_score=0.9,
+            ),
+        ]
+
+
 def _advisor_validation_orchestrator(
     tmp_path: Path,
     *,
     current_rewards: dict[str, float | None],
     candidate_rewards: dict[str, float | None],
     proposal_task_ids: list[str],
+    planner: object | None = None,
 ) -> Orchestrator:
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = Config(
@@ -1095,7 +1134,7 @@ def _advisor_validation_orchestrator(
         candidate_rewards=candidate_rewards,
     )
     orch.skill_advisor = _ApprovingAdvisor()
-    orch.planner = _PatchPlanner()
+    orch.planner = planner or _PatchPlanner()
     _attach_executor_skill_gate(orch)
     orch._proposal_buffer = [
         SkillProposal(
@@ -1185,6 +1224,48 @@ async def test_advisor_patch_preserves_buffered_task_provenance(tmp_path):
         ("task-B", "new"),
     ]
     assert _validation_result_json(tmp_path)["decision"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_advisor_patch_selects_from_candidate_batch_and_persists_artifact(
+    tmp_path,
+):
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.4},
+        candidate_rewards={"task-A": 0.8},
+        proposal_task_ids=["task-A"],
+        planner=_BatchPatchPlanner(),
+    )
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is not None
+    assert update.new_content == "new"
+    assert update.provenance is not None
+    assert update.provenance.selected_candidate_id == "targeted"
+    assert update.provenance.selected_update_kind == "narrow_clarification"
+    assert update.provenance.candidate_batch_id == "coevo-iter-0003-executor-candidates"
+    assert [ref.candidate_id for ref in update.provenance.candidate_refs] == [
+        "broad",
+        "targeted",
+    ]
+
+    artifact_path = (
+        tmp_path
+        / "artifacts"
+        / "candidate_batches"
+        / "coevo-iter-0003-executor-candidates.json"
+    )
+    artifact = json.loads(artifact_path.read_text())
+    assert artifact["selected_candidate_id"] == "targeted"
+    assert [candidate["new_content"] for candidate in artifact["candidates"]] == [
+        "broad",
+        "new",
+    ]
 
 
 @pytest.mark.asyncio

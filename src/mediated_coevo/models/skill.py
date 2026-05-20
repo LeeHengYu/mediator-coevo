@@ -29,6 +29,43 @@ class SkillProposal(SkillEdit):
     reward: float | None = None
 
 
+class SkillUpdateCandidate(SkillEdit):
+    """One audit candidate for a possible skill update."""
+
+    candidate_id: str = Field(default_factory=lambda: str(uuid4()))
+    skill_id: str
+    update_kind: str = "unspecified"
+    hypothesis: str = ""
+    risk: str = ""
+    audit_score: float = 0.0
+    selected: bool = False
+    rejection_reason: str | None = None
+
+
+class SkillUpdateCandidateRef(BaseModel):
+    """Compact pointer to a persisted skill-update candidate."""
+
+    candidate_id: str
+    update_kind: str
+    audit_score: float = 0.0
+    selected: bool = False
+    rejection_reason: str | None = None
+
+
+class SkillUpdateCandidateBatch(BaseModel):
+    """Run-local audit artifact containing candidate skill updates."""
+
+    batch_id: str
+    iteration: int
+    skill_id: str
+    agent_role: str
+    task_ids: list[str] = Field(default_factory=list)
+    selection_seed: int | None = None
+    selection_policy: str = "random_top_quartile"
+    selected_candidate_id: str | None = None
+    candidates: list[SkillUpdateCandidate] = Field(default_factory=list)
+
+
 class ProposalRef(BaseModel):
     """Compact pointer to a buffered executor skill proposal."""
 
@@ -86,6 +123,9 @@ class RejectedProposalBatch(BaseModel):
     reason: str = ""
     advisor_feedback: str | None = None
     validation: SkillValidationResult | None = None
+    candidate_batch_id: str | None = None
+    candidate_batch_path: str | None = None
+    selected_candidate_id: str | None = None
     proposals: list[RejectedSkillProposal] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
 
@@ -113,6 +153,11 @@ class SkillUpdateProvenance(BaseModel):
     decision: SkillUpdateDecision
     reason: str = ""
     rollback_snapshot: str | None = None
+    candidate_batch_id: str | None = None
+    candidate_batch_path: str | None = None
+    selected_candidate_id: str | None = None
+    selected_update_kind: str | None = None
+    candidate_refs: list[SkillUpdateCandidateRef] = Field(default_factory=list)
 
 
 class AdvisorBatchProvenance(SkillUpdateProvenance):
