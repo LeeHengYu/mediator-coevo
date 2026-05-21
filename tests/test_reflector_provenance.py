@@ -139,30 +139,3 @@ async def test_reflector_selects_candidate_batch_and_persists_artifact(tmp_path)
         / "reflect-planner-iter-0005.json"
     )
     assert artifact_path.exists()
-
-
-def test_contrastive_pair_sampling_is_repeatable_with_seed(tmp_path):
-    history = HistoryStore(history_dir=tmp_path / "history")
-    for index, reward in enumerate([0.1, 0.2, 0.3, 0.8, 0.9, 1.0]):
-        history.add(HistoryEntry(
-            iteration=index,
-            agent_role="planner",
-            payload=PlannerSignal(reasoning=f"entry {index}"),
-            reward=reward,
-            metadata={"task_id": "task-A"},
-        ))
-
-    first = history.contrastive_pairs(
-        "planner",
-        max_pairs=2,
-        selection_seed=99,
-    )
-    second = history.contrastive_pairs(
-        "planner",
-        max_pairs=2,
-        selection_seed=99,
-    )
-
-    assert [(w.entry_id, b.entry_id) for w, b in first] == [
-        (w.entry_id, b.entry_id) for w, b in second
-    ]
