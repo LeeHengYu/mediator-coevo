@@ -25,12 +25,14 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
     harbor_trial_path = None
     harbor_trial_id = None
     trace_artifact_path = None
+    trace_metadata: dict[str, str] = {}
     if trace is not None:
         success = metric_success(trace)
         verifier_status = metric_verifier_status(trace)
         harbor_job_path = trace.harbor_paths.get("job")
         harbor_trial_path = trace.harbor_paths.get("trial")
         harbor_trial_id = trace.harbor_trial_id
+        trace_metadata = trace.harbor_metadata
         trace_artifact_path = (
             f"artifacts/traces/{record.task_id}_iter{record.iteration:04d}.json"
         )
@@ -80,6 +82,12 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "harbor_job_path": harbor_job_path,
         "harbor_trial_path": harbor_trial_path,
         "harbor_trial_id": harbor_trial_id,
+        "executor_policy_hash": trace_metadata.get("executor_policy_hash"),
+        "executor_policy_injected": trace_metadata.get("executor_policy_injected"),
+        "executor_policy_injection": trace_metadata.get("executor_policy_injection"),
+        "task_resource_count": trace_metadata.get("task_resource_count"),
+        "task_resource_names": trace_metadata.get("task_resource_names"),
+        "verifier_contract_kind": trace_metadata.get("verifier_contract_kind"),
         "trace_artifact_path": trace_artifact_path,
         "advisor_decision": record.advisor_decision,
         "advisor_reason": record.advisor_reason,

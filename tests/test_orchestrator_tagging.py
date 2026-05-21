@@ -597,6 +597,14 @@ def test_metric_row_excludes_large_artifacts_and_promotes_required_fields():
             run_id="job-123",
             harbor_trial_id="trial-123",
             harbor_paths={"job": "/tmp/job", "trial": "/tmp/job/trial"},
+            harbor_metadata={
+                "executor_policy_hash": "policy-hash",
+                "executor_policy_injected": "true",
+                "executor_policy_injection": "instruction_envelope",
+                "task_resource_count": "2",
+                "task_resource_names": "skill-a,skill-b",
+                "verifier_contract_kind": "skillsbench_verifier",
+            },
         ),
         skill_update=update,
         reward=0.0,
@@ -640,6 +648,12 @@ def test_metric_row_excludes_large_artifacts_and_promotes_required_fields():
     assert row["harbor_job_path"] == "/tmp/job"
     assert row["harbor_trial_path"] == "/tmp/job/trial"
     assert row["harbor_trial_id"] == "trial-123"
+    assert row["executor_policy_hash"] == "policy-hash"
+    assert row["executor_policy_injected"] == "true"
+    assert row["executor_policy_injection"] == "instruction_envelope"
+    assert row["task_resource_count"] == "2"
+    assert row["task_resource_names"] == "skill-a,skill-b"
+    assert row["verifier_contract_kind"] == "skillsbench_verifier"
     assert row["proposal_ids"] == ["proposal-1"]
     assert row["advisor_decision"] == "rejected"
     assert row["advisor_reason"] == "advisor rejected the batch"

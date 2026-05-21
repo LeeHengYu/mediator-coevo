@@ -16,6 +16,10 @@ from typing import Any, TextIO
 
 from mediated_coevo.analysis.reporting import build_score_summary, write_score_summary
 from mediated_coevo.models.iteration import IterationRecord
+from mediated_coevo.models.task import (
+    executor_policy_metadata,
+    render_executor_envelope,
+)
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
 
 DEFAULT_SWEBENCH_DATASET = "SWE-bench/SWE-bench_Lite"
@@ -119,11 +123,14 @@ class SWEbenchRepository:
         _clone_repo_with_retry(clone_url, run_dir)
         _run_git(["checkout", task.base_commit], cwd=run_dir)
 
-        (run_dir / "instruction.md").write_text(planner_instruction)
-        if injected_skill_text:
-            skill_dir = run_dir / "environment" / "skills" / injected_skill_name
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            (skill_dir / "SKILL.md").write_text(injected_skill_text)
+        (run_dir / "instruction.md").write_text(
+            build_swebench_executor_envelope(
+                task=task,
+                workspace=run_dir,
+                planner_instruction=planner_instruction,
+                executor_policy=injected_skill_text,
+            )
+        )
         return run_dir
 
     def capture_model_patch(self, workspace: Path) -> str:
@@ -167,6 +174,91 @@ class SWEbenchRepository:
             repo=repo,
             base_commit=base_commit,
         )
+
+
+def build_swebench_executor_envelope(
+    *,
+    task: SWEbenchTask,
+    workspace: Path,
+    planner_instruction: str,
+    executor_policy: str | None,
+) -> str:
+    """Return the shared executor envelope for SWE-bench patch generation."""
+    return render_executor_envelope(
+        task_instruction=_swebench_task_instruction(
+            task=task,
+            workspace=workspace,
+            planner_instruction=planner_instruction,
+        ),
+        executor_policy=executor_policy,
+        task_resources=_swebench_task_resources(workspace),
+        verifier_contract=swebench_verifier_contract(),
+    )
+
+
+def swebench_executor_envelope_metadata(
+    executor_policy: str | None,
+) -> dict[str, str]:
+    """Return trace metadata for the SWE-bench executor envelope."""
+    return executor_policy_metadata(
+        executor_policy=executor_policy,
+        injection_location="prompt_envelope",
+        task_resource_names=("repository_checkout",),
+        verifier_contract_kind=SWEBENCH_VERIFIER_TYPE,
+    )
+
+
+def swebench_verifier_contract() -> str:
+    """Return executor-facing scoring and output constraints for SWE-bench."""
+    return "\n".join(
+        [
+            "Success is judged by the SWE-bench harness against hidden tests.",
+            "Submit only a minimal repository patch for the reported issue.",
+            "Do not modify tests or unrelated behavior.",
+            (
+                "The response must contain only a git-style unified diff suitable "
+                "for SWE-bench model_patch. It must start with `diff --git ` and "
+                "end immediately after the final diff hunk or binary patch section."
+            ),
+            (
+                "Every changed file must include `diff --git a/<path> b/<path>`, "
+                "`--- a/<path>`, and `+++ b/<path>` headers using repo-relative "
+                "paths."
+            ),
+            (
+                "Do not include prose, markdown explanations, test patches, "
+                "absolute paths, commit hashes, base commit lines, summaries, "
+                "metadata, or gold patch fields."
+            ),
+        ]
+    )
+
+
+def _swebench_task_instruction(
+    *,
+    task: SWEbenchTask,
+    workspace: Path,
+    planner_instruction: str,
+) -> str:
+    return "\n\n".join(
+        [
+            "# SWE-bench Task",
+            f"Instance ID: {task.task_id}",
+            f"Repository: {task.repo}",
+            f"Workspace path: {workspace}",
+            "# Planner Instruction",
+            planner_instruction,
+            "# Issue Prompt",
+            task.instruction,
+        ]
+    )
+
+
+def _swebench_task_resources(workspace: Path) -> tuple[str, ...]:
+    return (
+        f"Repository checkout is available at `{workspace}`.",
+        "No benchmark-curated domain skill files are supplied by this adapter.",
+    )
 
 
 @dataclass(frozen=True, slots=True)

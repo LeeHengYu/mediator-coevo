@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -21,6 +22,10 @@ from typing import Any
 
 from mediated_coevo.core.config import DEFAULT_SKILLSBENCH_ARCHIVE_URL
 from mediated_coevo.core.utils import as_mapping, as_nonempty_string
+from mediated_coevo.models.task import (
+    executor_policy_metadata,
+    render_executor_envelope,
+)
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
 
 logger = logging.getLogger(__name__)
@@ -354,14 +359,30 @@ class SkillsBenchRepository:
         shutil.copytree(task.task_dir, run_dir)
 
         instruction_path = run_dir / "instruction.md"
-        instruction_path.write_text(planner_instruction)
-
-        if injected_skill_text:
-            skill_dir = run_dir / "environment" / "skills" / injected_skill_name
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            (skill_dir / "SKILL.md").write_text(injected_skill_text)
+        instruction_path.write_text(
+            render_executor_envelope(
+                task_instruction=planner_instruction,
+                executor_policy=injected_skill_text,
+                task_resources=_skillsbench_task_resources(run_dir),
+                verifier_contract=_skillsbench_verifier_contract(task),
+            )
+        )
 
         return run_dir
+
+    @staticmethod
+    def executor_envelope_metadata(
+        *,
+        run_dir: Path,
+        executor_policy: str | None,
+    ) -> dict[str, str]:
+        """Return trace metadata for the prepared SkillsBench executor envelope."""
+        return executor_policy_metadata(
+            executor_policy=executor_policy,
+            injection_location="instruction_envelope",
+            task_resource_names=_skillsbench_task_resource_names(run_dir),
+            verifier_contract_kind="skillsbench_verifier",
+        )
 
     @staticmethod
     def _load_task(task_dir: Path, task_id: str) -> SkillsBenchTask:
@@ -386,6 +407,62 @@ class SkillsBenchRepository:
             instruction=instruction_path.read_text(),
             task_config=task_config,
         )
+
+
+def _skillsbench_task_resources(run_dir: Path) -> tuple[str, ...]:
+    resource_names = _skillsbench_task_resource_names(run_dir)
+    if resource_names:
+        return (
+            "Task-local curated skills are available under "
+            f"`environment/skills`: {', '.join(resource_names)}. Treat those "
+            "skills as domain resources; use the Executor Policy for workflow, "
+            "verification, and failure handling.",
+        )
+    return (
+        "No task-local curated skills were discovered under `environment/skills`. "
+        "Inspect the task files, repository contents, and tests directly.",
+    )
+
+
+def _skillsbench_task_resource_names(run_dir: Path) -> tuple[str, ...]:
+    skills_dir = run_dir / "environment" / "skills"
+    if not skills_dir.exists():
+        return ()
+    return tuple(
+        skill_dir.name
+        for skill_dir in sorted(skills_dir.iterdir(), key=lambda path: path.name)
+        if skill_dir.is_dir() and (skill_dir / "SKILL.md").is_file()
+    )
+
+
+def _skillsbench_verifier_contract(task: SkillsBenchTask) -> str:
+    metadata = as_mapping(task.task_config.get("metadata"))
+    verifier = as_mapping(task.task_config.get("verifier"))
+    lines = [
+        "Success is judged by the SkillsBench verifier for this task.",
+        "Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or "
+        "expected-output checks.",
+        "Run the provided task tests or verifier command when practical before "
+        "finalizing.",
+    ]
+    if metadata:
+        lines.append(f"Task metadata: {_format_mapping(metadata)}.")
+    if verifier:
+        lines.append(f"Verifier config: {_format_mapping(verifier)}.")
+    return "\n".join(lines)
+
+
+def _format_mapping(values: Mapping[str, Any]) -> str:
+    return ", ".join(
+        f"{key}={_format_metadata_value(value)}"
+        for key, value in sorted(values.items())
+    )
+
+
+def _format_metadata_value(value: Any) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(str(item) for item in value) + "]"
+    return str(value)
 
 
 class HarborRunner:

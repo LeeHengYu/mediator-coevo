@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from mediated_coevo.agents.swebench_patch_generator import _generation_messages
 from mediated_coevo.benchmarks import swebench
 from mediated_coevo.benchmarks import swebench_harness_wrapper
 
@@ -48,6 +49,34 @@ def test_build_swebench_harness_command_uses_project_wrapper():
         "--modal",
         "true",
     ]
+
+
+def test_swebench_generation_messages_use_executor_envelope(tmp_path):
+    task = swebench.SWEbenchTask(
+        task_id="django__django-11910",
+        instance={},
+        instruction="Fix the regression.",
+        task_config={},
+        repo="django/django",
+        base_commit="base-commit",
+    )
+
+    messages = _generation_messages(
+        task=task,
+        workspace=tmp_path,
+        planner_instruction="Planner instruction",
+        executor_skill_text="Use targeted reproduction before editing.",
+        injected_skill_name="executor",
+    )
+
+    user_content = messages[1]["content"]
+    assert "# Task Instruction" in user_content
+    assert "# Executor Policy" in user_content
+    assert "# Task Resources" in user_content
+    assert "# Verifier Contract" in user_content
+    assert "# Active executor Skill" not in user_content
+    assert "Use targeted reproduction before editing." in user_content
+    assert "SWE-bench harness" in user_content
 
 
 def test_harness_wrapper_removes_stale_sympy_branch_mapping(monkeypatch):
@@ -204,7 +233,7 @@ def test_prepare_patch_generation_workspace_retries_transient_clone(
         task=task,
         destination_root=tmp_path,
         planner_instruction="planner instruction",
-        injected_skill_text=None,
+        injected_skill_text="Executor policy",
         injected_skill_name="executor",
     )
 
@@ -214,6 +243,8 @@ def test_prepare_patch_generation_workspace_retries_transient_clone(
     assert checkout_calls == [["git", "checkout", "base-commit"]]
     assert cleaned_paths == [Path(clone_calls[0][-1])]
     assert workspace == Path(clone_calls[1][-1])
+    assert "# Executor Policy" in (workspace / "instruction.md").read_text()
+    assert not (workspace / "environment" / "skills" / "executor").exists()
 
 
 def test_prepare_patch_generation_workspace_does_not_retry_non_transient_clone(

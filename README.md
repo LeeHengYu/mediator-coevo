@@ -44,12 +44,31 @@ The experiment loop has four roles:
 
 The mutable runtime policies are:
 
-- `skills/executor/SKILL.md`: task execution behavior.
+- `skills/executor/SKILL.md`: portable Executor policy for workflow,
+  verification, resource use, and failure handling.
 - `skills/planner/SKILL.md`: planning and executor-skill-refinement behavior.
 - `skills/mediator/SKILL.md`: feedback filtering and reporting behavior.
 
 Runtime skill files are copied into each experiment directory before the run
 starts. Normal experiment runs do not edit the repo-level `skills/` directory.
+
+Executor policy is exposed to benchmark backends through a shared runtime
+envelope rather than as benchmark-specific domain knowledge:
+
+```text
+Task Instruction
+Executor Policy
+Task Resources
+Verifier Contract
+```
+
+SkillsBench and SWE-bench use the same logical envelope. For SkillsBench, the
+runner copies the original task directory, preserves any curated
+`environment/skills/` entries, and rewrites the copied task `instruction.md` to
+include the envelope. The curated SkillsBench skills remain task resources; the
+evolved `executor` policy is not written as a competing
+`environment/skills/executor/SKILL.md` skill. For SWE-bench, the same envelope is
+included in the patch-generation prompt.
 
 ### Reward Sources And Tagging
 
@@ -112,9 +131,10 @@ and similarity checking. Planner reflection asks for two candidate skill
 rewrites, validates both empirically, and commits the accepted candidate with
 the higher validation reward.
 
-The validation task pool comes from `experiment.skill_validation`. Validation
-compares current and candidate skill behavior on the same selected tasks and
-accepts only when the candidate improves by at least `min_mean_delta` without
+The validation task pool comes from `experiment.skill_validation`. Executor
+validation compares the old and candidate Executor policies on the same selected
+tasks under the same task instruction, task resources, and verifier contract.
+It accepts only when the candidate improves by at least `min_mean_delta` without
 violating configured regression or usability rules.
 
 ### What Is Not GRPO
@@ -465,6 +485,17 @@ Important files:
 - `skills/`: run-local skill copy.
 - `skills_snapshots/`: committed skill snapshots.
 
+Executor policy observability fields in `metrics.jsonl`:
+
+- `executor_policy_hash`: hash of the policy text injected for the run.
+- `executor_policy_injected`: whether a non-empty policy was included.
+- `executor_policy_injection`: where the policy was exposed, such as
+  `instruction_envelope` for SkillsBench or `prompt_envelope` for SWE-bench.
+- `task_resource_count` and `task_resource_names`: task-local resources exposed
+  alongside the policy, such as curated SkillsBench skills.
+- `verifier_contract_kind`: the benchmark verifier contract shown to the
+  Executor.
+
 Matrix outputs use one subdirectory per preset:
 
 ```text
@@ -508,6 +539,9 @@ Current config defaults include:
 - `experiment.skill_validation.enabled = true`
 - `executor_runtime.agent_name = "hermes"`
 - `executor_runtime.harbor_timeout_sec = 1800`
+- `executor_runtime.injected_skill_name = "executor"` names the Executor policy
+  channel. The policy is rendered through the shared envelope; it is not
+  automatically copied as a task-local domain skill for every benchmark.
 
 To use the agent configured (for Skillsbench tasks), pre-installation of respective tools, such as CLI, is required.
 
