@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-from mediated_coevo.core.config import Config
+from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.skill import SkillProposal
@@ -10,6 +12,15 @@ from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
+
+
+def _models_config() -> ModelsConfig:
+    return ModelsConfig(
+        planner="test-planner",
+        executor="test-executor",
+        mediator="test-mediator",
+        judge="test-judge",
+    )
 
 
 class _LLM:
@@ -60,15 +71,8 @@ def _proposal(task_id: str, reward: float) -> SkillProposal:
 
 def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _SkillStore]:
     skill_store = _SkillStore()
-    orch = Orchestrator.__new__(Orchestrator)
-    orch.config = Config(
-        models={
-            "planner": "test-planner",
-            "executor": "test-executor",
-            "mediator": "test-mediator",
-            "judge": "test-judge",
-        }
-    )
+    orch: Any = Orchestrator.__new__(Orchestrator)
+    orch.config = Config(models=_models_config())
     orch.config.experiment.advisor_buffer_max = 2
     orch.skill_store = skill_store
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")

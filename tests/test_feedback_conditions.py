@@ -7,7 +7,7 @@ import pytest
 import typer
 from pydantic import ValidationError
 
-from mediated_coevo.core.config import Config
+from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.experiment.conditions import get_executor_proposal_feedback
 from mediated_coevo.main import _validate_condition_name
 from mediated_coevo.models.history_signals import MediatorSignal
@@ -23,6 +23,15 @@ from mediated_coevo.stores.history_store import HistoryStore
 class _Task:
     instruction = "base instruction"
     task_config: dict = {}
+
+
+def _models_config() -> ModelsConfig:
+    return ModelsConfig(
+        planner="test-planner",
+        executor="test-executor",
+        mediator="test-mediator",
+        judge="test-judge",
+    )
 
 
 class _TaskRepo:
@@ -239,14 +248,7 @@ def _orchestrator(
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
     orch.benchmark_repo = _TaskRepo()
-    orch.config = Config(
-        models={
-            "planner": "test-planner",
-            "executor": "test-executor",
-            "mediator": "test-mediator",
-            "judge": "test-judge",
-        }
-    )
+    orch.config = Config(models=_models_config())
     orch.config.experiment.condition_name = condition
     orch.config.experiment.shared_notes = "shared note"
     orch.experiment_dir = tmp_path
@@ -694,14 +696,7 @@ async def test_long_trace_stderr_falls_back_when_llm_compactor_fails(tmp_path):
 
 
 def test_condition_assignment_and_cli_validation_reject_unknown_names():
-    config = Config(
-        models={
-            "planner": "test-planner",
-            "executor": "test-executor",
-            "mediator": "test-mediator",
-            "judge": "test-judge",
-        }
-    )
+    config = Config(models=_models_config())
     with pytest.raises(ValidationError):
         config.experiment.condition_name = "bad-condition"
 

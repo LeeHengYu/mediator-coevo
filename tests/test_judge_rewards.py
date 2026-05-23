@@ -10,7 +10,7 @@ from mediated_coevo.analysis.judge_rewards import (
     compute_judge_reward,
 )
 from mediated_coevo.analysis.reporting import build_score_summary, write_score_summary
-from mediated_coevo.core.config import Config
+from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.judge import JudgeAxisScores, JudgeCapFlags, JudgeLLMResponse
@@ -57,12 +57,12 @@ class _FakeJudgeClient:
 
 def _config() -> Config:
     return Config(
-        models={
-            "planner": "openrouter/test/planner",
-            "executor": "openrouter/test/executor",
-            "mediator": "openrouter/test/mediator",
-            "judge": "openrouter/test/judge",
-        }
+        models=ModelsConfig(
+            planner="openrouter/test/planner",
+            executor="openrouter/test/executor",
+            mediator="openrouter/test/mediator",
+            judge="openrouter/test/judge",
+        )
     )
 
 

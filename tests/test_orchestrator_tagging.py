@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -34,13 +35,22 @@ from mediated_coevo.models.skill import (
 )
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
-from mediated_coevo.core.config import Config
+from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 from mediated_coevo.runtime.token_budget import TokenBudgetEvent
+
+
+def _models_config() -> ModelsConfig:
+    return ModelsConfig(
+        planner="test-planner",
+        executor="test-executor",
+        mediator="test-mediator",
+        judge="test-judge",
+    )
 
 
 def _bare_orchestrator(tmp_path: Path) -> Orchestrator:
@@ -1076,15 +1086,8 @@ def _advisor_validation_orchestrator(
     candidate_rewards: dict[str, float | None],
     proposal_task_ids: list[str],
 ) -> Orchestrator:
-    orch = Orchestrator.__new__(Orchestrator)
-    orch.config = Config(
-        models={
-            "planner": "test-planner",
-            "executor": "test-executor",
-            "mediator": "test-mediator",
-            "judge": "test-judge",
-        }
-    )
+    orch: Any = Orchestrator.__new__(Orchestrator)
+    orch.config = Config(models=_models_config())
     orch.config.experiment.advisor_buffer_max = len(proposal_task_ids)
     orch.skill_store = _MemorySkillStore()
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")

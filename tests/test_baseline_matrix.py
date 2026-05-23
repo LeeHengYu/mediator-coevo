@@ -17,7 +17,7 @@ from mediated_coevo.experiment.conditions import (
     ExperimentDesignError,
     validate_experiment_design,
 )
-from mediated_coevo.core.config import Config, SkillUpdateConfig
+from mediated_coevo.core.config import Config, ModelsConfig, SkillUpdateConfig
 from mediated_coevo.main import (
     ExperimentFactory,
     _apply_experiment_settings,
@@ -33,12 +33,12 @@ from mediated_coevo.stores.history_store import HistoryStore
 
 def _config() -> Config:
     return Config(
-        models={
-            "planner": "test-planner",
-            "executor": "test-executor",
-            "mediator": "test-mediator",
-            "judge": "test-judge",
-        }
+        models=ModelsConfig(
+            planner="test-planner",
+            executor="test-executor",
+            mediator="test-mediator",
+            judge="test-judge",
+        )
     )
 
 
