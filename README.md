@@ -540,4 +540,5 @@ runtime side effects. Examples:
 - Self-Evolving Coordination Protocol (SECP): https://arxiv.org/abs/2602.02170
 - Rubric as Reward: https://arxiv.org/pdf/2507.17746
 - Skill Collective Evolution: https://github.com/AMAP-ML/SkillClaw
-- LLM-as-Judge guide(23 Jun): https://arxiv.org/pdf/2306.05685
+- LLM-as-Judge guide (23 Jun): https://arxiv.org/pdf/2306.05685
+- Textual Parameter Graph Optimization: https://arxiv.org/pdf/2604.20714
