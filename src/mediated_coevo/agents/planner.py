@@ -163,7 +163,17 @@ class PlannerAgent(BaseAgent):
         from mediated_coevo.runtime.token_budget import count_message_tokens
 
         system_tokens = count_message_tokens(model, messages)
-        return max(1, self._budgets.planner_context_tokens - system_tokens)
+        with_empty_user_tokens = count_message_tokens(
+            model,
+            [*messages, {"role": "user", "content": ""}],
+        )
+        user_message_overhead = max(0, with_empty_user_tokens - system_tokens)
+        return max(
+            1,
+            self._budgets.planner_context_tokens
+            - system_tokens
+            - user_message_overhead,
+        )
 
     def _build_user_prompt(
         self,
@@ -233,10 +243,14 @@ class PlannerAgent(BaseAgent):
     ) -> TaskSpec:
         from mediated_coevo.models.task import TaskSpec
 
+        instruction = await self._compact_plan_instruction_if_needed(
+            task_id=task_id,
+            base_instruction=base_instruction,
+        )
         context: dict[str, Any] = {
             "action": "plan_task",
             "task_id": task_id,
-            "base_instruction": base_instruction,
+            "base_instruction": instruction,
             "current_skills": current_skills,
         }
         if prior_context:
@@ -250,6 +264,43 @@ class PlannerAgent(BaseAgent):
             skills_context=current_skills,
             planner_reasoning=parsed.get("reasoning"),
             iteration=iteration,
+        )
+
+    async def _compact_plan_instruction_if_needed(
+        self,
+        *,
+        task_id: str,
+        base_instruction: str,
+    ) -> str:
+        if not self._budgets:
+            return base_instruction
+
+        from mediated_coevo.evolution.compactor import compact_text_for_context
+        from mediated_coevo.runtime.token_budget import count_text_tokens
+
+        model = self.llm_client.model
+        instruction_tokens = count_text_tokens(model, base_instruction)
+        budget_tokens = max(
+            self._budgets.trace_excerpt_tokens,
+            self._budgets.planner_context_tokens // 2,
+        )
+        if instruction_tokens <= budget_tokens:
+            return base_instruction
+
+        compacted = await compact_text_for_context(
+            base_instruction,
+            llm_client=self.llm_client,
+            label=f"benchmark instruction for {task_id}",
+            model=model,
+            budget_tokens=budget_tokens,
+            completion_tokens=min(1024, self._budgets.planner_completion_tokens),
+            condition_name=self._condition_name,
+        )
+        return (
+            "## Compacted Benchmark Instruction\n"
+            "The original benchmark instruction exceeded the planner prompt budget. "
+            "This compacted version preserves the task goal and concrete issue signals.\n\n"
+            f"{compacted}"
         )
 
     async def suggest_skill_revision(
@@ -362,12 +413,26 @@ class PlannerAgent(BaseAgent):
         budget: int | None = None,
     ) -> str:
         if budgets and budget:
-            from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
+            from mediated_coevo.runtime.token_budget import (
+                BudgetSection,
+                count_text_tokens,
+                pack_sections,
+            )
+
+            task_header = (
+                f"Plan a task for task_id: {context.get('task_id', 'unknown')}"
+            )
+            response_schema = PLAN_RESPONSE_SCHEMA
+            fixed_required_tokens = count_text_tokens(
+                model,
+                f"{task_header}\n\n{response_schema}",
+            )
+            instruction_budget = max(1, budget - fixed_required_tokens)
 
             sections = [
                 BudgetSection(
                     "task_header",
-                    f"Plan a task for task_id: {context.get('task_id', 'unknown')}",
+                    task_header,
                     required=True,
                 )
             ]
@@ -382,6 +447,7 @@ class PlannerAgent(BaseAgent):
                             f"{instruction}"
                         ),
                         required=True,
+                        max_tokens=instruction_budget,
                     )
                 )
             if report := context.get("mediator_report"):
@@ -395,7 +461,7 @@ class PlannerAgent(BaseAgent):
             sections.append(
                 BudgetSection(
                     "response_schema",
-                    PLAN_RESPONSE_SCHEMA,
+                    response_schema,
                     required=True,
                 )
             )

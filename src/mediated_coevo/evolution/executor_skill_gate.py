@@ -413,16 +413,6 @@ class ExecutorSkillGate:
     ) -> SkillValidationResult:
         """Run current and candidate executor skills before adopting a candidate."""
         validation_config = self.config.experiment.skill_validation
-        if not validation_config.enabled:
-            return SkillValidationResult(
-                validation_id=validation_id,
-                task_ids=list(task_ids),
-                decision="accepted",
-                reason="validation_disabled",
-                min_mean_delta=validation_config.min_mean_delta,
-                reward_tolerance=validation_config.reward_tolerance,
-            )
-
         task_results = [
             await self._validate_task(
                 validation_id=validation_id,
@@ -470,10 +460,59 @@ class ExecutorSkillGate:
                 task_spec,
                 [current_skill] if current_skill else [],
             )
+            current_path = self.artifact_store.store_validation_trace(
+                validation_id,
+                "current",
+                current_trace,
+            )
+            current_judge_record = None
+            if current_trace.is_usable_feedback_signal:
+                current_judge_record = await judge_reward_for_trace(
+                    trace=current_trace,
+                    config=self.config,
+                    llm_client=self.judge_llm_client,
+                    trace_path=current_path,
+                    task_category=task_metadata.get("task_category"),
+                    task_difficulty=task_metadata.get("task_difficulty"),
+                    expected_reward_range=task_metadata.get("expected_reward_range"),
+                    verifier_type=task_metadata.get("verifier_type"),
+                    verifier_status=current_trace.status,
+                )
+                if current_judge_record is not None:
+                    _log_validation_judge_reward(
+                        variant="current",
+                        trace=current_trace,
+                        judge_record=current_judge_record,
+                    )
+
             candidate_trace = await self.executor.execute_task(
                 task_spec,
                 [candidate_skill] if candidate_skill else [],
             )
+            candidate_path = self.artifact_store.store_validation_trace(
+                validation_id,
+                "candidate",
+                candidate_trace,
+            )
+            candidate_judge_record = None
+            if candidate_trace.is_usable_feedback_signal:
+                candidate_judge_record = await judge_reward_for_trace(
+                    trace=candidate_trace,
+                    config=self.config,
+                    llm_client=self.judge_llm_client,
+                    trace_path=candidate_path,
+                    task_category=task_metadata.get("task_category"),
+                    task_difficulty=task_metadata.get("task_difficulty"),
+                    expected_reward_range=task_metadata.get("expected_reward_range"),
+                    verifier_type=task_metadata.get("verifier_type"),
+                    verifier_status=candidate_trace.status,
+                )
+                if candidate_judge_record is not None:
+                    _log_validation_judge_reward(
+                        variant="candidate",
+                        trace=candidate_trace,
+                        judge_record=candidate_judge_record,
+                    )
         except FileNotFoundError as e:
             current_trace = _validation_env_failure(
                 task_id=task_id,
@@ -487,46 +526,23 @@ class ExecutorSkillGate:
                 error_kind="task_not_found",
                 exc=e,
             )
+            current_path = self.artifact_store.store_validation_trace(
+                validation_id,
+                "current",
+                current_trace,
+            )
+            candidate_path = self.artifact_store.store_validation_trace(
+                validation_id,
+                "candidate",
+                candidate_trace,
+            )
+            current_judge_record = None
+            candidate_judge_record = None
 
-        current_path = self.artifact_store.store_validation_trace(
-            validation_id,
-            "current",
-            current_trace,
-        )
-        candidate_path = self.artifact_store.store_validation_trace(
-            validation_id,
-            "candidate",
-            candidate_trace,
-        )
         usable = (
             current_trace.is_usable_feedback_signal
             and candidate_trace.is_usable_feedback_signal
         )
-        current_judge_record = None
-        candidate_judge_record = None
-        if usable:
-            current_judge_record = await judge_reward_for_trace(
-                trace=current_trace,
-                config=self.config,
-                llm_client=self.judge_llm_client,
-                trace_path=current_path,
-                task_category=task_metadata.get("task_category"),
-                task_difficulty=task_metadata.get("task_difficulty"),
-                expected_reward_range=task_metadata.get("expected_reward_range"),
-                verifier_type=task_metadata.get("verifier_type"),
-                verifier_status=current_trace.status,
-            )
-            candidate_judge_record = await judge_reward_for_trace(
-                trace=candidate_trace,
-                config=self.config,
-                llm_client=self.judge_llm_client,
-                trace_path=candidate_path,
-                task_category=task_metadata.get("task_category"),
-                task_difficulty=task_metadata.get("task_difficulty"),
-                expected_reward_range=task_metadata.get("expected_reward_range"),
-                verifier_type=task_metadata.get("verifier_type"),
-                verifier_status=candidate_trace.status,
-            )
         current_reward, current_source = _evolution_reward(
             current_trace,
             current_judge_record,
@@ -785,3 +801,26 @@ def _mean_reward(rewards: Iterable[float | None]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _log_validation_judge_reward(
+    *,
+    variant: str,
+    trace: ExecutionTrace,
+    judge_record: JudgeRewardRecord,
+) -> None:
+    metadata = judge_reward_metadata(judge_record)
+    logger.info(
+        "Validation judge reward after task run: variant=%s task=%s "
+        "iteration=%d verifier_reward=%s judge_reward=%s reward_source=%s",
+        variant,
+        trace.task_id,
+        trace.iteration + 1,
+        _format_reward(trace.reward),
+        _format_reward(judge_record.judge_reward),
+        metadata["reward_source"],
+    )
+
+
+def _format_reward(reward: float | None) -> str:
+    return f"{reward:.2f}" if reward is not None else "n/a"

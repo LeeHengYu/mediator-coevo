@@ -71,7 +71,7 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
         seed=123,
         coevo_interval=2,
         advisor_buffer_max=1,
-        skill_validation_enabled=False,
+        harbor_agent_setup_timeout_multiplier=2.5,
     )
 
     assert updated is config
@@ -79,7 +79,7 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
     assert config.experiment.seed == 123
     assert config.experiment.coevo_interval == 2
     assert config.experiment.advisor_buffer_max == 1
-    assert config.experiment.skill_validation.enabled is False
+    assert config.executor_runtime.harbor_agent_setup_timeout_multiplier == 2.5
 
 
 def test_baseline_preset_mapping_matches_matrix_plan():

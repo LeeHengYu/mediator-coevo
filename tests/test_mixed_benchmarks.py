@@ -286,7 +286,6 @@ def test_unified_run_delegates_mixed_selection_and_controls(monkeypatch):
             "2",
             "--coevo-interval",
             "1",
-            "--skill-validation",
         ],
     )
 
@@ -297,7 +296,6 @@ def test_unified_run_delegates_mixed_selection_and_controls(monkeypatch):
     assert selection.task_ids == ["fix-build-google-auto", "sympy__sympy-13915"]
     assert config.experiment.advisor_buffer_max == 2
     assert config.experiment.coevo_interval == 1
-    assert config.experiment.skill_validation.enabled is True
 
 
 def test_unified_run_supports_swebench_limit(monkeypatch):

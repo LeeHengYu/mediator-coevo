@@ -7,6 +7,8 @@ import hashlib
 import io
 import json
 import logging
+import os
+import signal
 import shutil
 import tomllib
 import urllib.error
@@ -473,10 +475,12 @@ class HarborRunner:
         agent_name: str,
         jobs_dir: Path,
         timeout_sec: float = 1800.0,
+        agent_setup_timeout_multiplier: float | None = None,
     ) -> None:
         self.agent_name = agent_name
         self.jobs_dir = jobs_dir
         self.timeout_sec = timeout_sec
+        self.agent_setup_timeout_multiplier = agent_setup_timeout_multiplier
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._harbor_path: str | None = None
 
@@ -507,6 +511,13 @@ class HarborRunner:
             "-o",
             str(self.jobs_dir),
         ]
+        if self.agent_setup_timeout_multiplier is not None:
+            cmd.extend(
+                [
+                    "--agent-setup-timeout-multiplier",
+                    str(self.agent_setup_timeout_multiplier),
+                ]
+            )
         logger.info("Running Harbor task: %s", " ".join(cmd))
 
         try:
@@ -514,6 +525,7 @@ class HarborRunner:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise HarborNotFoundError(f"harbor CLI not executable: {e}") from e
@@ -524,10 +536,7 @@ class HarborRunner:
                 timeout=self.timeout_sec,
             )
         except TimeoutError as e:
-            with suppress(ProcessLookupError):
-                proc.kill()
-            with suppress(Exception):
-                await proc.wait()
+            await _terminate_process_tree(proc)
             raise HarborTimeoutError(
                 f"harbor run exceeded {self.timeout_sec}s timeout for {task_dir}"
             ) from e
@@ -900,6 +909,26 @@ def _format_harbor_stderr(
     if exception_info:
         sections.append(json.dumps(exception_info, indent=2))
     return "\n\n".join(sections)
+
+
+async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Terminate Harbor and child processes started in its process group."""
+    pid = proc.pid
+    if pid is None:
+        return
+
+    with suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+        return
+    except TimeoutError:
+        pass
+
+    with suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGKILL)
+    with suppress(Exception):
+        await proc.wait()
 
 
 def _read_agent_summary(trial_dir: Path) -> str:

@@ -306,6 +306,16 @@ class _JudgeClient:
         return []
 
 
+class _EventJudgeClient(_JudgeClient):
+    def __init__(self, score: float, events: list[str]) -> None:
+        super().__init__(score)
+        self.events = events
+
+    async def complete(self, *args, **kwargs) -> dict:
+        self.events.append("judge")
+        return await super().complete(*args, **kwargs)
+
+
 class _SequencedJudgeClient(_JudgeClient):
     def __init__(self, scores: list[float]) -> None:
         super().__init__(scores[0])
@@ -313,6 +323,16 @@ class _SequencedJudgeClient(_JudgeClient):
 
     async def complete(self, *args, **kwargs) -> dict:
         self.score = self.scores.pop(0)
+        return await super().complete(*args, **kwargs)
+
+
+class _EventSequencedJudgeClient(_SequencedJudgeClient):
+    def __init__(self, scores: list[float], events: list[str]) -> None:
+        super().__init__(scores)
+        self.events = events
+
+    async def complete(self, *args, **kwargs) -> dict:
+        self.events.append("judge")
         return await super().complete(*args, **kwargs)
 
 
@@ -1041,10 +1061,12 @@ class _ValidationExecutor:
         *,
         current_rewards: dict[str, float | None],
         candidate_rewards: dict[str, float | None],
+        events: list[str] | None = None,
     ) -> None:
         self.current_rewards = current_rewards
         self.candidate_rewards = candidate_rewards
         self.calls: list[tuple[str, str]] = []
+        self.events = events
 
     async def execute_task(
         self,
@@ -1058,6 +1080,9 @@ class _ValidationExecutor:
             if skill_text == "new"
             else self.current_rewards
         )
+        if self.events is not None:
+            variant = "candidate" if rewards is self.candidate_rewards else "current"
+            self.events.append(f"execute:{variant}")
         reward = rewards[task_spec.task_id]
         if reward is None:
             return ExecutionTrace(
@@ -1194,6 +1219,19 @@ class _RewardExecutor:
         )
 
 
+class _EventRewardExecutor(_RewardExecutor):
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def execute_task(
+        self,
+        task_spec: TaskSpec,
+        skill_texts: list[str],
+    ) -> ExecutionTrace:
+        self.events.append("executor")
+        return await super().execute_task(task_spec, skill_texts)
+
+
 class _ExposedMediator:
     llm_client = _DrainClient("mediator.process_trace")
 
@@ -1211,6 +1249,20 @@ class _ExposedMediator:
 
     async def compact_feedback(self, report: MediatorReport) -> MediatorSignal:
         return MediatorSignal(headline=report.content)
+
+
+class _EventExposedMediator(_ExposedMediator):
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def mediate_trace(
+        self,
+        condition: str,
+        trace: ExecutionTrace,
+        task_context: TaskSpec,
+    ) -> MediatorReport:
+        self.events.append("mediator")
+        return await super().mediate_trace(condition, trace, task_context)
 
 
 class _RejectingAdvisor:
@@ -1360,6 +1412,55 @@ async def test_run_iteration_tags_pending_history_with_judge_reward(tmp_path):
     assert sidecar_rows[0]["judge_reward"] == pytest.approx(0.73)
 
 
+@pytest.mark.asyncio
+async def test_run_iteration_judges_initial_task_before_mediation_and_logs_one_based(
+    tmp_path,
+    caplog,
+):
+    events: list[str] = []
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.planner = _ProposalPlanner()
+    orch.executor = _EventRewardExecutor(events)
+    orch.mediator = _EventExposedMediator(events)
+    orch.skill_store = _RunIterationSkillStore()
+    orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    orch.history_store = HistoryStore(history_dir=tmp_path / "history")
+    orch.benchmark_repo = _AnyTaskRepo()
+    orch.config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        }
+    )
+    orch.config.experiment.skill_updates.executor = False
+    orch.experiment_dir = tmp_path
+    orch.skill_advisor = _RejectingAdvisor()
+    orch.judge_llm_client = _EventJudgeClient(0.73, events)
+    orch._proposal_buffer = []
+    orch._previous_report_by_task = {}
+    orch._previous_reward_by_task = {}
+    _attach_executor_skill_gate(orch)
+    caplog.set_level("INFO")
+
+    record = await orch._run_iteration("task-A", 0)
+
+    assert record.iteration == 0
+    assert events == ["executor", "judge", "mediator"]
+    sidecar_rows = [
+        json.loads(line)
+        for line in (tmp_path / "artifacts" / "judge_rewards.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert sidecar_rows[0]["iteration"] == 0
+    assert sidecar_rows[0]["judge_reward"] == pytest.approx(0.73)
+    assert "Judge reward after task run: task=task-A iteration=1" in caplog.text
+    assert "Iteration 1 complete" in caplog.text
+    assert "Iteration 0 complete" not in caplog.text
+
+
 class _MemorySkillStore:
     def __init__(self) -> None:
         self.content = "old"
@@ -1451,6 +1552,7 @@ def _advisor_validation_orchestrator(
     task_profiles: dict[str, dict] | None = None,
     allow_contributing_fallback: bool = True,
     allow_swebench_replacement_for_skillsbench: bool = False,
+    events: list[str] | None = None,
 ) -> Orchestrator:
     orch: Any = Orchestrator.__new__(Orchestrator)
     orch.config = Config(
@@ -1475,6 +1577,7 @@ def _advisor_validation_orchestrator(
     orch.executor = _ValidationExecutor(
         current_rewards=current_rewards,
         candidate_rewards=candidate_rewards,
+        events=events,
     )
     orch.skill_advisor = _ApprovingAdvisor()
     orch.planner = planner or _PatchPlanner()
@@ -1688,6 +1791,30 @@ async def test_advisor_validation_uses_judge_reward_as_driver(tmp_path):
     assert task_result["candidate_reward_source"] == "judge"
     assert task_result["current_verifier_reward"] == pytest.approx(0.0)
     assert task_result["candidate_verifier_reward"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_advisor_validation_judges_each_variant_after_its_task_run(tmp_path):
+    events: list[str] = []
+    orch = _advisor_validation_orchestrator(
+        tmp_path,
+        current_rewards={"task-A": 0.4},
+        candidate_rewards={"task-A": 0.8},
+        proposal_task_ids=["task-A"],
+        events=events,
+    )
+    orch.executor_skill_gate.judge_llm_client = _EventSequencedJudgeClient(
+        [0.4, 0.8],
+        events,
+    )
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is not None
+    assert events == ["execute:current", "judge", "execute:candidate", "judge"]
 
 
 @pytest.mark.asyncio

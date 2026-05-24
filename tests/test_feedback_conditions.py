@@ -151,7 +151,10 @@ class _TraceHistoryInspectingMediator:
     ) -> MediatorReport | None:
         self.trace_iterations_seen = [
             item.iteration
-            for item in self.artifact_store.query_traces(task_id=trace.task_id)
+            for item in self.artifact_store.query_traces(
+                task_id=trace.task_id,
+                before_iteration=trace.iteration,
+            )
         ]
         return None
 

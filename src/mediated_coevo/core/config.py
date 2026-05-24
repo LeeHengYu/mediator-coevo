@@ -90,7 +90,6 @@ class SkillUpdateConfig(BaseModel):
 class SkillValidationConfig(BaseModel):
     """Empirical gate settings for executor skill candidates."""
 
-    enabled: bool = True
     min_mean_delta: float = 0.01
     reward_tolerance: float = 1e-9
     require_all_tasks_usable: bool = True
@@ -147,6 +146,9 @@ class ExecutorRuntimeConfig(BaseModel):
     # Hard wall-clock cap on a single Harbor subprocess (seconds). Prevents
     # a hung run from blocking the orchestrator indefinitely.
     harbor_timeout_sec: float = 1800.0
+    # Optional Harbor multiplier for agent setup. Some tasks spend several
+    # minutes installing agent dependencies before the actual run starts.
+    harbor_agent_setup_timeout_multiplier: float | None = None
     # When True, refuse to start the experiment if the harbor CLI is missing.
     # When False, the executor synthesizes env_failure traces on each task
     # so CI can exercise the orchestrator without harbor installed.

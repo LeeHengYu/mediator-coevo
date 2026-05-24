@@ -226,17 +226,11 @@ class Orchestrator:
         trace = await self.executor.execute_task(task_spec, skill_texts)
 
         report = None
-        trace_path = None
-        try:
-            report = await self.mediator.mediate_trace(condition, trace, task_spec)
-            if report is not None:
-                self.artifact_store.store_report(report)
-        finally:
-            trace_path = self.artifact_store.store_trace(trace)
+        trace_path = self.artifact_store.store_trace(trace)
 
         outcome_reward = None
         outcome_metadata = None
-        if trace.iteration > 0 and trace.is_usable_feedback_signal:
+        if trace.is_usable_feedback_signal:
             judge_record = await self._judge_evolution_reward(
                 trace=trace,
                 task_metadata=task_metadata,
@@ -247,6 +241,28 @@ class Orchestrator:
                     append_judge_reward_record(self.experiment_dir, judge_record)
                 outcome_reward = judge_record.judge_reward
                 outcome_metadata = judge_reward_metadata(judge_record)
+                logger.info(
+                    "Judge reward after task run: task=%s iteration=%d "
+                    "verifier_reward=%s judge_reward=%s reward_source=%s",
+                    task_id,
+                    _display_iteration(trace.iteration),
+                    _format_reward(trace.reward),
+                    _format_reward(judge_record.judge_reward),
+                    outcome_metadata["reward_source"],
+                )
+        else:
+            logger.info(
+                "Judge reward skipped after task run: task=%s iteration=%d "
+                "status=%s reward=%s",
+                task_id,
+                _display_iteration(trace.iteration),
+                trace.status,
+                _format_reward(trace.reward),
+            )
+
+        report = await self.mediator.mediate_trace(condition, trace, task_spec)
+        if report is not None:
+            self.artifact_store.store_report(report)
 
         proposal_feedback = await get_executor_proposal_feedback(
             condition=condition,
@@ -312,13 +328,12 @@ class Orchestrator:
             record.advisor_reason = self.executor_skill_gate.last_advisor_reason
             record.advisor_rejection_id = self.executor_skill_gate.last_rejection_id
             record.proposal_ids = list(self.executor_skill_gate.last_proposal_ids)
-        reward_str = f"{trace.reward:.2f}" if trace.reward is not None else "n/a"
         logger.info(
             "Iteration %d complete: condition=%s status=%s reward=%s tokens=%d duration=%.1fs",
-            iteration,
+            _display_iteration(iteration),
             condition,
             trace.status,
-            reward_str,
+            _format_reward(trace.reward),
             record.total_tokens,
             duration,
         )
@@ -373,7 +388,7 @@ class Orchestrator:
         llm_token_events = self._drain_llm_token_events()
         logger.warning(
             "Iteration %d skipped before planning: task=%s status=%s error_kind=%s",
-            iteration,
+            _display_iteration(iteration),
             task_id,
             trace.status,
             trace.error_kind,
@@ -526,7 +541,7 @@ class Orchestrator:
         start = time.time()
         logger.info(
             "=== Co-evolution checkpoint at iteration %d (condition=%s) ===",
-            iteration,
+            _display_iteration(iteration),
             condition,
         )
 
@@ -632,20 +647,6 @@ class Orchestrator:
 
         validation_config = self.config.experiment.skill_validation
         validation_id = f"{draft.candidate_batch.batch_id}-planner-validation"
-        if not validation_config.enabled:
-            best = max(
-                candidates,
-                key=lambda candidate: (candidate.audit_score, candidate.candidate_id),
-            )
-            return best.candidate_id, SkillValidationResult(
-                validation_id=validation_id,
-                task_ids=[],
-                decision="accepted",
-                reason="validation_disabled",
-                min_mean_delta=validation_config.min_mean_delta,
-                reward_tolerance=validation_config.reward_tolerance,
-            )
-
         task_ids = self.executor_skill_gate._select_validation_task_ids(
             contributing_tasks=draft.candidate_batch.task_ids,
             iteration=iteration,
@@ -913,3 +914,12 @@ def _validation_reward(
         str(metadata["reward_source"]),
         judge_record.judge_reward,
     )
+
+
+def _display_iteration(iteration: int) -> int:
+    """Return the human-facing iteration number for terminal logs."""
+    return iteration + 1
+
+
+def _format_reward(reward: float | None) -> str:
+    return f"{reward:.2f}" if reward is not None else "n/a"

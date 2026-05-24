@@ -162,6 +162,9 @@ class ExperimentFactory:
             agent_name=config.executor_runtime.agent_name,
             jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
             timeout_sec=config.executor_runtime.harbor_timeout_sec,
+            agent_setup_timeout_multiplier=(
+                config.executor_runtime.harbor_agent_setup_timeout_multiplier
+            ),
         )
         planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
         planner.configure_token_budget(
@@ -481,7 +484,7 @@ def _apply_experiment_settings(
     baseline_preset: str | None = None,
     coevo_interval: int | None = None,
     advisor_buffer_max: int | None = None,
-    skill_validation_enabled: bool | None = None,
+    harbor_agent_setup_timeout_multiplier: float | None = None,
 ) -> Config:
     """Apply CLI experiment settings to a loaded config object."""
     config.experiment.num_iterations = iterations
@@ -495,8 +498,10 @@ def _apply_experiment_settings(
         config.experiment.coevo_interval = coevo_interval
     if advisor_buffer_max is not None:
         config.experiment.advisor_buffer_max = advisor_buffer_max
-    if skill_validation_enabled is not None:
-        config.experiment.skill_validation.enabled = skill_validation_enabled
+    if harbor_agent_setup_timeout_multiplier is not None:
+        config.executor_runtime.harbor_agent_setup_timeout_multiplier = (
+            harbor_agent_setup_timeout_multiplier
+        )
     return config
 
 
@@ -830,9 +835,7 @@ def _print_experiment_controls(config: Config) -> None:
     console.print(
         f"[bold]Advisor buffer max:[/] {config.experiment.advisor_buffer_max}"
     )
-    console.print(
-        f"[bold]Skill validation:[/] {config.experiment.skill_validation.enabled}"
-    )
+    console.print("[bold]Skill validation:[/] required")
 
 
 def _resolve_output_dir(output_dir: Path) -> Path:
@@ -1150,6 +1153,9 @@ def _build_unified_runtime(
                 agent_name=config.executor_runtime.agent_name,
                 jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
                 timeout_sec=config.executor_runtime.harbor_timeout_sec,
+                agent_setup_timeout_multiplier=(
+                    config.executor_runtime.harbor_agent_setup_timeout_multiplier
+                ),
             ),
             workspace_root=experiment_dir / "benchmarks",
             injected_skill_name=config.executor_runtime.injected_skill_name,
@@ -1587,11 +1593,12 @@ def run(
             help="Override experiment.advisor_buffer_max for this run.",
         ),
     ] = None,
-    skill_validation_enabled: Annotated[
-        bool | None,
+    harbor_agent_setup_timeout_multiplier: Annotated[
+        float | None,
         typer.Option(
-            "--skill-validation/--no-skill-validation",
-            help="Enable or disable executor skill candidate validation.",
+            "--harbor-agent-setup-timeout-multiplier",
+            min=0.1,
+            help="Forwarded to Harbor for slow agent setup phases.",
         ),
     ] = None,
     run_id: Annotated[
@@ -1643,7 +1650,7 @@ def run(
         skill_updates=skill_update_config,
         coevo_interval=coevo_interval,
         advisor_buffer_max=advisor_buffer_max,
-        skill_validation_enabled=skill_validation_enabled,
+        harbor_agent_setup_timeout_multiplier=harbor_agent_setup_timeout_multiplier,
     )
 
     _validate_or_raise_bad_parameter(config)
@@ -1727,13 +1734,6 @@ def matrix(
             help="Override experiment.advisor_buffer_max for every matrix row.",
         ),
     ] = None,
-    skill_validation_enabled: Annotated[
-        bool | None,
-        typer.Option(
-            "--skill-validation/--no-skill-validation",
-            help="Enable or disable executor skill candidate validation for every row.",
-        ),
-    ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -1746,7 +1746,6 @@ def matrix(
         seed=seed,
         coevo_interval=coevo_interval,
         advisor_buffer_max=advisor_buffer_max,
-        skill_validation_enabled=skill_validation_enabled,
     )
     for preset_name in BASELINE_PRESET_NAMES:
         preset = get_baseline_preset(preset_name)

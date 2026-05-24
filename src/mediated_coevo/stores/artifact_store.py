@@ -191,9 +191,14 @@ class ArtifactStore:
         self,
         task_id: str | None = None,
         recent: int = 5,
+        before_iteration: int | None = None,
     ) -> list[str]:
         """Return short text summaries of recent traces for context injection."""
-        traces = self.query_traces(task_id=task_id, recent=recent)
+        traces = self.query_traces(
+            task_id=task_id,
+            recent=recent,
+            before_iteration=before_iteration,
+        )
         summaries: list[str] = []
         for trace in traces:
             summary = trace_header_summary(trace)
