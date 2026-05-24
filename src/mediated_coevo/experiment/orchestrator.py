@@ -645,7 +645,6 @@ class Orchestrator:
         if not candidates:
             return None
 
-        validation_config = self.config.experiment.skill_validation
         validation_id = f"{draft.candidate_batch.batch_id}-planner-validation"
         task_ids = self.executor_skill_gate._select_validation_task_ids(
             contributing_tasks=draft.candidate_batch.task_ids,

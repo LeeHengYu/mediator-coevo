@@ -56,6 +56,12 @@ from mediated_coevo.benchmarks.task_sets import (
     TaskSetError,
     resolve_task_selection,
 )
+from mediated_coevo.cloud.vm import (
+    CloudVMConfigError,
+    GCPVMConfig,
+    RemoteHarborRunner,
+    load_vm_config,
+)
 from mediated_coevo.core.config import (
     Config,
     SkillUpdateConfig,
@@ -424,6 +430,22 @@ def _resolve_unified_task_selection(
     return selection
 
 
+def _load_remote_harbor_config(
+    *,
+    enabled: bool,
+    env_file: Path,
+    selection: BenchmarkTaskSelection,
+) -> GCPVMConfig | None:
+    if not enabled:
+        return None
+    if not selection.has_skillsbench:
+        raise typer.BadParameter("--cloud requires a SkillsBench selection")
+    try:
+        return load_vm_config(env_file)
+    except (OSError, CloudVMConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 def _preflight_task_ids_from_cli(
     tasks: str | None,
     task_set: str | None,
@@ -454,6 +476,15 @@ def _ensure_harbor_available(config: Config) -> None:
         console.print(
             "[bold red]ERROR:[/] harbor CLI not found on PATH. Install harbor, "
             "or set executor_runtime.harbor_required = false in config."
+        )
+        raise typer.Exit(code=1)
+
+
+def _ensure_gcloud_available() -> None:
+    if shutil.which("gcloud") is None:
+        console.print(
+            "[bold red]ERROR:[/] gcloud CLI not found on PATH. Install the "
+            "Google Cloud CLI before using --cloud."
         )
         raise typer.Exit(code=1)
 
@@ -1099,6 +1130,33 @@ def _needs_validation_swebench(
     )
 
 
+def _build_harbor_runner(
+    *,
+    config: Config,
+    experiment_dir: Path,
+    remote_harbor_config: GCPVMConfig | None,
+) -> HarborRunner | RemoteHarborRunner:
+    jobs_dir = experiment_dir / config.executor_runtime.jobs_dir
+    timeout_sec = config.executor_runtime.harbor_timeout_sec
+    setup_timeout_multiplier = (
+        config.executor_runtime.harbor_agent_setup_timeout_multiplier
+    )
+    if remote_harbor_config is not None:
+        return RemoteHarborRunner(
+            config=remote_harbor_config,
+            agent_name=config.executor_runtime.agent_name,
+            jobs_dir=jobs_dir,
+            timeout_sec=timeout_sec,
+            agent_setup_timeout_multiplier=setup_timeout_multiplier,
+        )
+    return HarborRunner(
+        agent_name=config.executor_runtime.agent_name,
+        jobs_dir=jobs_dir,
+        timeout_sec=timeout_sec,
+        agent_setup_timeout_multiplier=setup_timeout_multiplier,
+    )
+
+
 def _build_unified_runtime(
     *,
     config: Config,
@@ -1110,6 +1168,7 @@ def _build_unified_runtime(
     split: str,
     timeout: int,
     max_workers: int,
+    remote_harbor_config: GCPVMConfig | None = None,
 ) -> ExperimentRuntime:
     """Build one orchestrator that can route across selected benchmark backends."""
     from mediated_coevo.llm.client import LLMClient
@@ -1149,13 +1208,10 @@ def _build_unified_runtime(
         skillsbench_executor = ExecutorAgent(
             model=config.models.executor,
             benchmark_repo=skillsbench_repo,
-            harbor_runner=HarborRunner(
-                agent_name=config.executor_runtime.agent_name,
-                jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
-                timeout_sec=config.executor_runtime.harbor_timeout_sec,
-                agent_setup_timeout_multiplier=(
-                    config.executor_runtime.harbor_agent_setup_timeout_multiplier
-                ),
+            harbor_runner=_build_harbor_runner(
+                config=config,
+                experiment_dir=experiment_dir,
+                remote_harbor_config=remote_harbor_config,
             ),
             workspace_root=experiment_dir / "benchmarks",
             injected_skill_name=config.executor_runtime.injected_skill_name,
@@ -1240,6 +1296,7 @@ def _run_unified_experiment(
     max_workers: int,
     run_id: str | None,
     swebench_eval_instance_ids: list[str],
+    remote_harbor_config: GCPVMConfig | None = None,
 ) -> None:
     """Run SkillsBench, SWE-bench, or mixed selections in one evolution loop."""
     random.seed(seed)
@@ -1252,9 +1309,14 @@ def _run_unified_experiment(
     )
 
     _prepare_llm_credentials_or_exit(config)
-    if _needs_runtime_skillsbench(selection, config):
-        _ensure_harbor_available(config)
-    if _needs_runtime_swebench(selection, config):
+    needs_skillsbench_runtime = _needs_runtime_skillsbench(selection, config)
+    needs_swebench_runtime = _needs_runtime_swebench(selection, config)
+    if needs_skillsbench_runtime:
+        if remote_harbor_config is None:
+            _ensure_harbor_available(config)
+        else:
+            _ensure_gcloud_available()
+    if needs_swebench_runtime:
         try:
             swebench_helpers.validate_modal_credentials()
         except RuntimeError as exc:
@@ -1277,11 +1339,17 @@ def _run_unified_experiment(
         split=split,
         timeout=timeout,
         max_workers=max_workers,
+        remote_harbor_config=remote_harbor_config,
     )
 
     _print_unified_task_selection(selection)
     if selection.has_swebench:
         console.print(f"[bold]SWE-bench dataset:[/] {dataset_name} ({split})")
+    if remote_harbor_config is not None:
+        console.print(
+            "[bold]Harbor runtime:[/] "
+            f"GCP VM {remote_harbor_config.vm_name} ({remote_harbor_config.zone})"
+        )
     if swebench_eval_instance_ids:
         console.print(
             f"[bold]SWE-bench frozen eval instances:[/] {swebench_eval_instance_ids}"
@@ -1631,6 +1699,23 @@ def run(
         Path,
         typer.Option(help="Config directory"),
     ] = PROJECT_ROOT / "config",
+    cloud: Annotated[
+        bool,
+        typer.Option(
+            "--cloud",
+            help=(
+                "Run SkillsBench Harbor jobs on the configured GCP VM while "
+                "keeping the experiment control plane local."
+            ),
+        ),
+    ] = False,
+    cloud_env_file: Annotated[
+        Path,
+        typer.Option(
+            "--cloud-env-file",
+            help="Dotenv file containing GCP VM Harbor settings.",
+        ),
+    ] = PROJECT_ROOT / ".env",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run a unified SkillsBench, SWE-bench, or mixed co-evolution experiment."""
@@ -1674,6 +1759,11 @@ def run(
             "SWE-bench frozen eval requires an evolution SWE-bench selection "
             "(--swebench-instance or --swebench-limit)"
         )
+    remote_harbor_config = _load_remote_harbor_config(
+        enabled=cloud,
+        env_file=cloud_env_file,
+        selection=selection,
+    )
     swebench_eval_instance_ids: list[str] = []
     if swebench_eval_requested:
         swebench_eval_instance_ids = _swebench_instance_ids_from_unified_cli(
@@ -1698,8 +1788,8 @@ def run(
         max_workers=max_workers,
         run_id=run_id,
         swebench_eval_instance_ids=swebench_eval_instance_ids,
+        remote_harbor_config=remote_harbor_config,
     )
-
 
 @app.command()
 def matrix(

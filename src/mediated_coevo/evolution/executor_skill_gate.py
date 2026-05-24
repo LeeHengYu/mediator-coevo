@@ -412,7 +412,6 @@ class ExecutorSkillGate:
         candidate_skill: str,
     ) -> SkillValidationResult:
         """Run current and candidate executor skills before adopting a candidate."""
-        validation_config = self.config.experiment.skill_validation
         task_results = [
             await self._validate_task(
                 validation_id=validation_id,

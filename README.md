@@ -208,7 +208,7 @@ Export the model credential used by all LLM calls:
 export OPENROUTER_API_KEY=...
 ```
 
-SkillsBench runs require Harbor and a local container runtime:
+Local SkillsBench runs require Harbor and a local container runtime:
 
 ```bash
 uv tool install harbor
@@ -216,6 +216,10 @@ harbor --version
 docker --version
 docker compose version
 ```
+
+To run Docker-heavy SkillsBench tasks on the configured GCP VM instead of the
+local machine, use the `--cloud` flag. See
+[Cloud VM Harbor Setup](#cloud-vm-harbor-setup).
 
 SWE-bench runs use Modal instead of local Docker. Configure Modal before running
 SWE-bench commands:
@@ -242,6 +246,150 @@ Shell completion helpers:
 ```bash
 uv run medcoevo --install-completion
 uv run medcoevo --show-completion
+```
+
+## Cloud VM Harbor Setup
+
+`medcoevo run --cloud` keeps the co-evolution control plane on the local
+machine, but sends each prepared SkillsBench task workspace to an existing GCP
+VM for `harbor run`. The VM is only a remote Docker/Harbor host: the full repo
+is not copied to the VM, `medcoevo run` is not run on the VM, and experiment
+outputs stay under local `data/experiments/`.
+
+Current CLI shape:
+
+```bash
+uv run medcoevo run \
+  --skillsbench-task dialogue-parser \
+  --iterations 1 \
+  --condition no_feedback \
+  --skill-updates none \
+  --cloud
+```
+
+Use `--cloud-env-file` when the GCP settings are not in `.env`:
+
+```bash
+uv run medcoevo run \
+  --skillsbench-task dialogue-parser \
+  --iterations 1 \
+  --cloud \
+  --cloud-env-file .env-another
+```
+
+### Local Dotenv Keys
+
+The cloud path reads VM connection settings and the OpenRouter Secret Manager
+resource from the dotenv file. The API key value itself should stay in Secret
+Manager and is read by the VM service account at runtime.
+
+Copy [.env.example](.env.example) to `.env` and fill in local-only secrets:
+
+```bash
+cp .env.example .env
+```
+
+`GCP_REGION` is optional when `GCP_ZONE` is set. `GCP_REMOTE_DIR` is optional
+and defaults to `/tmp/mediator-coevo`; this project’s VM smoke run used
+`~/mediator-coevo`. `GCP_SERVICE_ACCOUNT` is informational for this path; the
+VM’s attached service account is what actually accesses Secret Manager.
+
+The example file also lists GCS keys that are not used by direct VM Harbor mode
+so they are not confused with the active `--cloud` path.
+
+### Local Requirements
+
+The local machine needs:
+
+- `gcloud` installed and authenticated.
+- permission to `gcloud compute ssh` and `gcloud compute scp` to the VM.
+- `OPENROUTER_API_KEY` exported locally for planner, mediator, and judge model
+  calls.
+
+Local Harbor and local Docker are not required when `--cloud` is used for a
+SkillsBench-only run. The CLI checks `gcloud` locally and skips the local Harbor
+preflight.
+
+### VM Requirements
+
+The VM must have:
+
+- Docker daemon running.
+- Docker Compose v2 available as `docker compose`.
+- `uv` on `PATH`.
+- Harbor on `PATH`.
+- `gcloud` on `PATH`.
+- VM service account access to the OpenRouter secret stored in the secret manager within the same GCP project.
+- an OAuth scope that permits Secret Manager access, such as `cloud-platform`.
+
+The Debian 12 VM setup used for the smoke run was:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose python3-venv pipx
+sudo systemctl enable --now docker
+
+mkdir -p "$HOME/.local/bin"
+curl -LsSf https://astral.sh/uv/install.sh | sh
+"$HOME/.local/bin/uv" tool install harbor
+
+sudo ln -sf "$HOME/.local/bin/uv" /usr/local/bin/uv
+sudo ln -sf "$HOME/.local/bin/harbor" /usr/local/bin/harbor
+
+tmp="$(mktemp)"
+curl -fL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o "$tmp"
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo install -m 0755 "$tmp" /usr/local/lib/docker/cli-plugins/docker-compose
+rm -f "$tmp"
+```
+
+Verify the VM runtime:
+
+```bash
+docker ps >/dev/null
+docker --version
+docker compose version
+uv --version
+harbor --version
+```
+
+Grant Secret Manager access to the VM service account:
+
+```bash
+gcloud secrets add-iam-policy-binding OPENROUTER_API_KEY \
+  --project agent-coevolution \
+  --member serviceAccount:vm-service-account@developer.gserviceaccount.com \
+  --role roles/secretmanager.secretAccessor
+```
+
+If the VM was created with narrow OAuth scopes, update it to use
+`cloud-platform` scope. This requires stopping the VM:
+
+```bash
+gcloud compute instances stop vm-instance-name \
+  --project agent-coevolution \
+  --zone us-central1-a
+
+gcloud compute instances set-service-account vm-instance-name \
+  --project agent-coevolution \
+  --zone us-central1-a \
+  --service-account vm-service-account@developer.gserviceaccount.com \
+  --scopes cloud-platform
+
+gcloud compute instances start vm-instance-name \
+  --project agent-coevolution \
+  --zone us-central1-a
+```
+
+After changing scopes, clear stale VM-side gcloud token cache and verify the VM
+can read the secret without printing the secret value:
+
+```bash
+rm -f ~/.config/gcloud/access_tokens.db ~/.config/gcloud/credentials.db
+gcloud secrets versions access latest \
+  --secret OPENROUTER_API_KEY \
+  --project agent-coevolution >/dev/null
+echo secret-ok
 ```
 
 ## `run`
@@ -276,6 +424,8 @@ Core run options:
 | `--coevo-interval`                             | config value       | Planner/Mediator reflection interval override.                          |
 | `--run-id`                                     | generated          | Timestamp-prefixed output directory suffix.                             |
 | `--config-dir`                                 | `config/`          | Directory containing `default.toml`.                                    |
+| `--cloud`                                      | false              | Run SkillsBench Harbor jobs on the configured GCP VM.                   |
+| `--cloud-env-file`                             | `.env`             | Dotenv file containing GCP VM Harbor settings.                          |
 | `--verbose`, `-v`                              | false              | Enable debug logging.                                                   |
 
 Feedback conditions:

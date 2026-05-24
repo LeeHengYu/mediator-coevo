@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mediated_coevo.agents.planner import PLAN_RESPONSE_SCHEMA, PlannerAgent
+from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.experiment.conditions import get_prior_context
 from mediated_coevo.core.config import Config
 from mediated_coevo.llm.client import LLMClient

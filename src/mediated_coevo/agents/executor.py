@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from mediated_coevo.agents.swebench_patch_generator import SWEbenchPatchGenerator
 from mediated_coevo.benchmarks import (
     HarborNotFoundError,
-    HarborRunner,
+    HarborRunResult,
     HarborTimeoutError,
     SkillsBenchRepository,
     parse_execution_trace,
@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Maps an exception raised by HarborRunner.run to the error_kind we surface.
+
+class HarborTaskRunner(Protocol):
+    async def run(self, task_dir: Path, model: str) -> HarborRunResult: ...
+
+
+# Maps an exception raised by a Harbor task runner to the error_kind we surface.
 # OSError must be last (other entries are subclasses we want to detect first).
 _HARBOR_ERROR_KINDS: tuple[tuple[type[BaseException], str], ...] = (
     (HarborNotFoundError, "harbor_not_found"),
@@ -46,7 +51,7 @@ class ExecutorAgent:
         self,
         model: str,
         benchmark_repo: SkillsBenchRepository,
-        harbor_runner: HarborRunner,
+        harbor_runner: HarborTaskRunner,
         workspace_root: Path,
         injected_skill_name: str,
     ) -> None:
