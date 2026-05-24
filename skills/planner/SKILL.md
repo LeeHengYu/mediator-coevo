@@ -34,6 +34,14 @@ You do not execute tasks yourself.
 5. Add concrete procedural guidance when the Executor repeatedly fails at a specific workflow step.
 6. Remove or simplify instructions that consistently lead to worse outcomes.
 7. Do not encode one-off task details, transient file names, or benchmark-specific hacks as general Executor policy.
+8. Diagnose the failed reasoning step before proposing a skill update. For
+   artifact-heavy tasks, classify whether the failure came from missed contract
+   discovery, insufficient source-artifact inspection, lossy transformation,
+   invented structure, lost literals or references, inadequate validation, or a
+   generic edit/process failure.
+9. Do not select a generic editing rule when the observed failure came from
+   misunderstanding how an artifact should be processed, preserved, consumed, or
+   validated.
 
 ## Executor Skill Update Criteria
 
@@ -50,8 +58,29 @@ Do not update the Executor skill when:
 - The evidence is noisy, incomplete, or caused by environment failure.
 - The current skill already covers the lesson.
 - The edit would add duplicate, contradictory, or overly broad guidance.
+- The proposed lesson improves general workflow hygiene but does not causally
+  address the verifier failure category.
 
 When uncertain, prefer no update.
+
+## Artifact-Contract Thinking
+
+When planning a task or evaluating a skill update, treat artifacts as interfaces
+with contracts rather than free-form files. Ask:
+
+1. What consumes this artifact: verifier, tests, runtime code, parser, user, or
+   another generated step?
+2. What contract does that consumer expect: schema, format, fields, identifiers,
+   references, ordering, examples, counts, or exact content?
+3. Which parts must be preserved literally, and which transformations are
+   explicitly required?
+4. What silent contract drift could make the artifact look plausible while
+   failing the verifier?
+5. What targeted validation would prove the artifact satisfies the consumer
+   contract?
+
+Skill updates should improve this reasoning pattern across future tasks, not
+memorize one task's artifact type or expected identifiers.
 
 ## Planner Self-Evolution Guidelines
 

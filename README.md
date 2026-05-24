@@ -169,13 +169,12 @@ uv run medcoevo run \
   --skill-updates none \
   --advisor-buffer-max 2 \
   --coevo-interval 2 \
-  --run-id <suffix> \
-  --no-skill-validation
+  --run-id <suffix>
 ```
 
 This selects one SkillsBench task, runs two iterations, disables committed skill
-updates, sets the advisor and reflection cadence to two iterations, and skips
-skill validation gates. The default condition is
+updates, and sets the advisor and reflection cadence to two iterations. Skill
+validation gates are always required for skill candidates. The default condition is
 `learned_mediator`, so the Mediator still produces feedback reports unless you
 override `--condition`.
 
@@ -275,7 +274,6 @@ Core run options:
 | `--skill-updates`                              | `all`              | Which skill families may be committed.                                  |
 | `--advisor-buffer-max`                         | config value       | Executor proposal batch size override.                                  |
 | `--coevo-interval`                             | config value       | Planner/Mediator reflection interval override.                          |
-| `--skill-validation` / `--no-skill-validation` | config value       | Enable or disable Executor candidate and Planner reflection validation. |
 | `--run-id`                                     | generated          | Timestamp-prefixed output directory suffix.                             |
 | `--config-dir`                                 | `config/`          | Directory containing `default.toml`.                                    |
 | `--verbose`, `-v`                              | false              | Enable debug logging.                                                   |
@@ -315,8 +313,7 @@ uv run medcoevo matrix \
 
 Supported options include `--tasks`, `--task-set`, `--iterations`, `--seed`,
 `--coevo-interval`, `--advisor-buffer-max`,
-`--skill-validation` / `--no-skill-validation`, `--config-dir`, and
-`--verbose`.
+`--config-dir`, and `--verbose`.
 
 Baseline rows:
 
@@ -536,9 +533,8 @@ Current config defaults include:
 - `experiment.advisor_buffer_max = 3`
 - `experiment.seed = 42`
 - `experiment.allow_cross_task_feedback = true`
-- `experiment.skill_validation.enabled = true`
 - `executor_runtime.agent_name = "hermes"`
-- `executor_runtime.harbor_timeout_sec = 1800`
+- `executor_runtime.harbor_timeout_sec = 7200`
 - `executor_runtime.injected_skill_name = "executor"` names the Executor policy
   channel. The policy is rendered through the shared envelope; it is not
   automatically copied as a task-local domain skill for every benchmark.
