@@ -143,9 +143,9 @@ class ExecutorRuntimeConfig(BaseModel):
     remote_fetch: bool = True
     archive_url: str = Field(default=DEFAULT_SKILLSBENCH_ARCHIVE_URL, min_length=1)
     archive_sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
-    # Hard wall-clock cap on a single Harbor subprocess (seconds). Prevents
-    # a hung run from blocking the orchestrator indefinitely.
-    harbor_timeout_sec: float = 1800.0
+    # Hard wall-clock cap on a single Harbor subprocess (seconds). This must
+    # exceed task agent/verifier phase limits so Harbor can finish cleanly.
+    harbor_timeout_sec: float = 5400.0
     # Optional Harbor multiplier for agent setup. Some tasks spend several
     # minutes installing agent dependencies before the actual run starts.
     harbor_agent_setup_timeout_multiplier: float | None = None
