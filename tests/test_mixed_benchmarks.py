@@ -14,10 +14,11 @@ from mediated_coevo.benchmarks.mixed import (
     MixedBenchmarkRepository,
     build_benchmark_task_selection,
 )
-from mediated_coevo.core.config import Config
+from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.main import ExperimentRuntime, MatrixRuntime, app
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
+from tests.config_helpers import experiment_config
 
 
 @dataclass
@@ -62,6 +63,28 @@ class _Executor:
         )
 
 
+def _write_runtime_skills(root: Path) -> None:
+    for skill_name in ("executor", "planner", "mediator"):
+        skill_dir = root / "skills" / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(f"# {skill_name}\n")
+
+
+def _experiment_root_config() -> Config:
+    config = Config(
+        models=ModelsConfig(
+            planner="test-planner",
+            executor="test-executor",
+            mediator="test-mediator",
+            judge="test-judge",
+        ),
+        experiment=experiment_config(),
+    )
+    config.paths.skills_dir = "skills"
+    config.paths.data_dir = "data"
+    return config
+
+
 def test_mixed_repository_routes_selected_tasks_to_backend_repos():
     selection = build_benchmark_task_selection(
         skillsbench_task_ids=["skills-task"],
@@ -84,6 +107,57 @@ def test_mixed_repository_routes_selected_tasks_to_backend_repos():
 
     with pytest.raises(FileNotFoundError, match="not selected"):
         repo.resolve("missing")
+
+
+def test_runtime_routing_includes_validation_only_swebench_when_enabled():
+    selection = build_benchmark_task_selection(
+        skillsbench_task_ids=["skills-task"],
+        swebench_instance_ids=[],
+    )
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        },
+        experiment=experiment_config(),
+    )
+    config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
+    config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = True
+
+    routing = main_module._runtime_benchmark_by_task_id(selection, config)
+
+    assert routing == {
+        "skills-task": "skillsbench",
+        "django__django-11099": "swebench",
+    }
+    assert main_module._needs_runtime_swebench(selection, config) is True
+
+
+def test_runtime_routing_ignores_validation_only_swebench_when_disabled():
+    selection = build_benchmark_task_selection(
+        skillsbench_task_ids=["skills-task"],
+        swebench_instance_ids=[],
+    )
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        },
+        experiment=experiment_config(),
+    )
+    config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
+    config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = (
+        False
+    )
+
+    routing = main_module._runtime_benchmark_by_task_id(selection, config)
+
+    assert routing == {"skills-task": "skillsbench"}
+    assert main_module._needs_runtime_swebench(selection, config) is False
 
 
 @pytest.mark.asyncio
@@ -138,7 +212,8 @@ def test_swebench_executor_uses_openrouter_model_for_llm_patch_generation(
             "executor": "google/gemini-3-flash-preview",
             "mediator": "openrouter/test/mediator",
             "judge": "openrouter/test/judge",
-        }
+        },
+        experiment=experiment_config(),
     )
 
     executor = main_module._build_swebench_executor(
@@ -154,17 +229,31 @@ def test_swebench_executor_uses_openrouter_model_for_llm_patch_generation(
     assert executor._model == "google/gemini-3-flash-preview"
     assert (
         main_module._openrouter_model_for_llm(
-            "openrouter/google/gemini-3-flash-preview"
+            "openrouter/openrouter/google/gemini-3-flash-preview"
         )
         == "openrouter/google/gemini-3-flash-preview"
     )
 
 
 def test_unified_run_requires_at_least_one_benchmark_selection():
-    result = CliRunner().invoke(app, ["run"])
+    result = CliRunner().invoke(app, ["run", "--run-id", "missing-selection"])
 
     assert result.exit_code != 0
     assert "provide at least one SkillsBench task or SWE-bench instance" in result.output
+
+
+def test_unified_run_allows_default_run_id(monkeypatch):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        main_module,
+        "_run_unified_experiment",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    result = CliRunner().invoke(app, ["run", "--skillsbench-task", "demo"])
+
+    assert result.exit_code == 0
+    assert captured["run_id"] is None
 
 
 def test_unified_run_delegates_skillsbench_only(monkeypatch):
@@ -177,7 +266,15 @@ def test_unified_run_delegates_skillsbench_only(monkeypatch):
 
     result = CliRunner().invoke(
         app,
-        ["run", "--skillsbench-task", "fix-build-google-auto", "--iterations", "4"],
+        [
+            "run",
+            "--skillsbench-task",
+            "fix-build-google-auto",
+            "--iterations",
+            "4",
+            "--run-id",
+            "skillsbench-only",
+        ],
     )
 
     assert result.exit_code == 0
@@ -203,7 +300,13 @@ def test_unified_run_delegates_swebench_only(monkeypatch):
 
     result = CliRunner().invoke(
         app,
-        ["run", "--swebench-instance", "django__django-11910"],
+        [
+            "run",
+            "--swebench-instance",
+            "django__django-11910",
+            "--run-id",
+            "swebench-only",
+        ],
     )
 
     assert result.exit_code == 0
@@ -237,7 +340,8 @@ def test_unified_run_delegates_mixed_selection_and_controls(monkeypatch):
             "2",
             "--coevo-interval",
             "1",
-            "--skill-validation",
+            "--run-id",
+            "mixed-controls",
         ],
     )
 
@@ -248,7 +352,6 @@ def test_unified_run_delegates_mixed_selection_and_controls(monkeypatch):
     assert selection.task_ids == ["fix-build-google-auto", "sympy__sympy-13915"]
     assert config.experiment.advisor_buffer_max == 2
     assert config.experiment.coevo_interval == 1
-    assert config.experiment.skill_validation.enabled is True
 
 
 def test_unified_run_supports_swebench_limit(monkeypatch):
@@ -266,7 +369,10 @@ def test_unified_run_supports_swebench_limit(monkeypatch):
         lambda **kwargs: captured.update(kwargs),
     )
 
-    result = CliRunner().invoke(app, ["run", "--swebench-limit", "2"])
+    result = CliRunner().invoke(
+        app,
+        ["run", "--swebench-limit", "2", "--run-id", "swebench-limit"],
+    )
 
     assert result.exit_code == 0
     selection = captured["selection"]
@@ -297,6 +403,8 @@ def test_unified_run_supports_swebench_frozen_eval(monkeypatch):
             "django__django-11910",
             "--swebench-eval-instance",
             "django__django-11099",
+            "--run-id",
+            "swebench-eval",
         ],
     )
 
@@ -320,6 +428,8 @@ def test_unified_run_rejects_overlapping_swebench_eval(monkeypatch):
             "django__django-11910",
             "--swebench-eval-instance",
             "django__django-11910",
+            "--run-id",
+            "swebench-overlap",
         ],
     )
 
@@ -345,7 +455,8 @@ def test_unified_experiment_invokes_judge_after_summary(monkeypatch, tmp_path):
                 "executor": "e",
                 "mediator": "m",
                 "judge": "j",
-            }
+            },
+            experiment=experiment_config(),
         )
 
         async def run_experiment(self, task_ids, iterations):
@@ -395,7 +506,7 @@ def test_unified_experiment_invokes_judge_after_summary(monkeypatch, tmp_path):
         split=swebench.DEFAULT_SWEBENCH_SPLIT,
         timeout=1,
         max_workers=1,
-        run_id=None,
+        run_id="judge-summary",
         swebench_eval_instance_ids=[],
     )
 
@@ -412,7 +523,8 @@ def test_matrix_invokes_judge_for_each_row(monkeypatch):
                 "executor": "e",
                 "mediator": "m",
                 "judge": "j",
-            }
+            },
+            experiment=experiment_config(),
         )
         history_store = object()
 
@@ -459,28 +571,35 @@ def test_unified_experiment_root_prefixes_user_run_id_with_timestamp(
     monkeypatch,
     tmp_path,
 ):
-    for skill_name in ("executor", "planner", "mediator"):
-        skill_dir = tmp_path / "skills" / skill_name
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(f"# {skill_name}\n")
-    config = Config(
-        models={
-            "planner": "test-planner",
-            "executor": "test-executor",
-            "mediator": "test-mediator",
-            "judge": "test-judge",
-        }
-    )
-    config.paths.skills_dir = "skills"
-    config.paths.data_dir = "data"
+    _write_runtime_skills(tmp_path)
+    config = _experiment_root_config()
     monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
 
     experiment_dir, runtime_skills_dir = main_module._prepare_unified_experiment_root(
         config=config,
         seed=42,
         run_id="custom-tail",
-        suffix="mixed",
+        suffix="skillsbench",
     )
 
     assert re.fullmatch(r"\d{8}-\d{6}-custom-tail", experiment_dir.name)
+    assert runtime_skills_dir == experiment_dir / "skills"
+
+
+def test_unified_experiment_root_defaults_run_id_to_seed_and_backend(
+    monkeypatch,
+    tmp_path,
+):
+    _write_runtime_skills(tmp_path)
+    config = _experiment_root_config()
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+
+    experiment_dir, runtime_skills_dir = main_module._prepare_unified_experiment_root(
+        config=config,
+        seed=7,
+        run_id=None,
+        suffix="mixed",
+    )
+
+    assert re.fullmatch(r"\d{8}-\d{6}-7-mixed", experiment_dir.name)
     assert runtime_skills_dir == experiment_dir / "skills"

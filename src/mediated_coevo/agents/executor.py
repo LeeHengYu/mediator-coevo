@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from mediated_coevo.agents.swebench_patch_generator import SWEbenchPatchGenerator
 from mediated_coevo.benchmarks import (
     HarborNotFoundError,
-    HarborRunner,
+    HarborRunResult,
     HarborTimeoutError,
     SkillsBenchRepository,
     parse_execution_trace,
@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Maps an exception raised by HarborRunner.run to the error_kind we surface.
+
+class HarborTaskRunner(Protocol):
+    async def run(self, task_dir: Path, model: str) -> HarborRunResult: ...
+
+
+# Maps an exception raised by a Harbor task runner to the error_kind we surface.
 # OSError must be last (other entries are subclasses we want to detect first).
 _HARBOR_ERROR_KINDS: tuple[tuple[type[BaseException], str], ...] = (
     (HarborNotFoundError, "harbor_not_found"),
@@ -46,7 +51,7 @@ class ExecutorAgent:
         self,
         model: str,
         benchmark_repo: SkillsBenchRepository,
-        harbor_runner: HarborRunner,
+        harbor_runner: HarborTaskRunner,
         workspace_root: Path,
         injected_skill_name: str,
     ) -> None:
@@ -79,6 +84,10 @@ class ExecutorAgent:
             )
         except OSError as e:
             return self._env_failure(task_spec, start, "workspace_prepare_failed", e)
+        envelope_metadata = self._benchmark_repo.executor_envelope_metadata(
+            run_dir=task_run_dir,
+            executor_policy=skill_text,
+        )
 
         try:
             run_result = await self._harbor_runner.run(
@@ -87,14 +96,22 @@ class ExecutorAgent:
             )
         except tuple(exc for exc, _ in _HARBOR_ERROR_KINDS) as e:
             kind = next(k for exc, k in _HARBOR_ERROR_KINDS if isinstance(e, exc))
-            return self._env_failure(task_spec, start, kind, e)
+            return self._env_failure(
+                task_spec,
+                start,
+                kind,
+                e,
+                harbor_metadata=envelope_metadata,
+            )
 
-        return parse_execution_trace(
+        trace = parse_execution_trace(
             run_result=run_result,
             task_id=task_spec.task_id,
             iteration=task_spec.iteration,
             duration_sec=time.time() - start,
         )
+        trace.harbor_metadata = {**trace.harbor_metadata, **envelope_metadata}
+        return trace
 
     def _env_failure(
         self,
@@ -102,6 +119,8 @@ class ExecutorAgent:
         start: float,
         error_kind: str,
         exc: BaseException,
+        *,
+        harbor_metadata: dict[str, str] | None = None,
     ) -> ExecutionTrace:
         logger.warning(
             "ExecutorAgent: %s for task=%s iter=%d: %s",
@@ -118,6 +137,7 @@ class ExecutorAgent:
             status="env_failure",
             error_kind=error_kind,
             error_detail=str(exc),
+            harbor_metadata=harbor_metadata or {},
         )
 
 
@@ -175,6 +195,9 @@ class SWEbenchExecutorAgent:
                 "workspace_prepare_failed",
                 e,
             )
+        envelope_metadata = swebench_helpers.swebench_executor_envelope_metadata(
+            skill_text
+        )
 
         paths: dict[str, str] = {"generation_workspace": str(task_run_dir)}
         try:
@@ -194,6 +217,7 @@ class SWEbenchExecutorAgent:
                 e,
                 stderr=str(e),
                 harbor_paths=paths,
+                harbor_metadata=envelope_metadata,
             )
 
         try:
@@ -215,6 +239,7 @@ class SWEbenchExecutorAgent:
                 stdout=generation.raw_response,
                 stderr=generation.normalization_notes,
                 harbor_paths=paths,
+                harbor_metadata=envelope_metadata,
             )
 
         paths["patch_diff"] = str(patch_path)
@@ -249,6 +274,7 @@ class SWEbenchExecutorAgent:
                 stdout=generation.raw_response,
                 stderr=generation.normalization_notes,
                 harbor_paths=paths,
+                harbor_metadata=envelope_metadata,
             )
 
         paths.update(self._store_harness_logs(task_spec, harness_run))
@@ -270,6 +296,7 @@ class SWEbenchExecutorAgent:
             **trace.harbor_metadata,
             "verifier_type": swebench_helpers.SWEBENCH_VERIFIER_TYPE,
             "patch_generator": "llm",
+            **envelope_metadata,
         }
         return trace
 
@@ -371,6 +398,7 @@ class SWEbenchExecutorAgent:
         stderr: str = "",
         exit_code: int = -1,
         harbor_paths: dict[str, str] | None = None,
+        harbor_metadata: dict[str, str] | None = None,
     ) -> ExecutionTrace:
         logger.warning(
             "SWEbenchExecutorAgent: %s for task=%s iter=%d: %s",
@@ -392,6 +420,7 @@ class SWEbenchExecutorAgent:
             harbor_paths=harbor_paths or {},
             harbor_metadata={
                 "verifier_type": swebench_helpers.SWEBENCH_VERIFIER_TYPE,
+                **(harbor_metadata or {}),
             },
         )
 

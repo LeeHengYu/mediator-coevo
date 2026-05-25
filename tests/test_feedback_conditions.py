@@ -18,6 +18,7 @@ from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
+from tests.config_helpers import experiment_config
 
 
 class _Task:
@@ -160,7 +161,10 @@ class _TraceHistoryInspectingMediator:
     ) -> MediatorReport | None:
         self.trace_iterations_seen = [
             item.iteration
-            for item in self.artifact_store.query_traces(task_id=trace.task_id)
+            for item in self.artifact_store.query_traces(
+                task_id=trace.task_id,
+                before_iteration=trace.iteration,
+            )
         ]
         return None
 
@@ -248,7 +252,15 @@ def _orchestrator(
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
     orch.benchmark_repo = _TaskRepo()
-    orch.config = Config(models=_models_config())
+    orch.config = Config(
+        models=ModelsConfig(
+            planner="test-planner",
+            executor="test-executor",
+            mediator="test-mediator",
+            judge="test-judge",
+        ),
+        experiment=experiment_config(),
+    )
     orch.config.experiment.condition_name = condition
     orch.config.experiment.shared_notes = "shared note"
     orch.experiment_dir = tmp_path
@@ -696,7 +708,15 @@ async def test_long_trace_stderr_falls_back_when_llm_compactor_fails(tmp_path):
 
 
 def test_condition_assignment_and_cli_validation_reject_unknown_names():
-    config = Config(models=_models_config())
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        },
+        experiment=experiment_config(),
+    )
     with pytest.raises(ValidationError):
         config.experiment.condition_name = "bad-condition"
 

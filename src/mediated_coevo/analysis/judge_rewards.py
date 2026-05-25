@@ -129,32 +129,13 @@ async def annotate_judge_rewards(
                 error=str(exc),
             )
         else:
-            judge_reward, base_reward, applied_cap = compute_judge_reward(judge_response)
-            record = JudgeRewardRecord(
-                record_id=record_id,
-                task_id=candidate.task_id,
-                iteration=candidate.iteration,
-                run_id=candidate.run_id,
-                raw_reward=candidate.raw_reward,
-                judge_reward=judge_reward,
-                base_reward=base_reward,
-                applied_cap=applied_cap,
-                axis_scores=judge_response.axis_scores,
-                flags=judge_response.flags,
-                confidence=judge_response.confidence,
-                rationale=judge_response.rationale,
-                flag_evidence=judge_response.flag_evidence,
+            record = _record_from_judge_response(
+                candidate=candidate,
+                data_dir=data_dir,
                 judge_model=judge_model,
                 rubric_version=config.judge.rubric_version,
-                trace_path=_relative_path(candidate.trace_path, data_dir),
-                metrics_path=_relative_path(candidate.metrics_path, data_dir),
-                verifier_status=candidate.verifier_status,
-                trace_status=candidate.trace_status,
-                total_tokens=candidate.total_tokens,
-                task_category=candidate.task_category,
-                task_difficulty=candidate.task_difficulty,
-                expected_reward_range=candidate.expected_reward_range,
-                verifier_type=candidate.verifier_type,
+                record_id=record_id,
+                response=judge_response,
             )
         records_by_id[record.record_id] = record
         new_records.append(record)
@@ -175,6 +156,129 @@ async def annotate_judge_rewards(
         len(new_records),
     )
     return all_records
+
+
+async def judge_reward_for_trace(
+    *,
+    trace: ExecutionTrace,
+    config: Config,
+    llm_client: Any | None,
+    trace_path: Path | None = None,
+    metrics_path: Path | None = None,
+    metrics_row: dict[str, Any] | None = None,
+    task_category: str | None = None,
+    task_difficulty: str | None = None,
+    expected_reward_range: tuple[float, float] | None = None,
+    verifier_type: str | None = None,
+    verifier_status: str | None = None,
+    total_tokens: int | None = None,
+) -> JudgeRewardRecord | None:
+    """Return the evolution reward for one live trace.
+
+    Online evolution uses this before contrastive reflection and candidate
+    validation. Unusable traces return ``None``; usable traces fall back to the
+    verifier reward if the judge client is unavailable or fails.
+    """
+    if trace.status != "ok" or trace.reward is None:
+        return None
+
+    judge_model = getattr(llm_client, "model", None) or config.models.judge
+    candidate = _JudgeCandidate(
+        task_id=trace.task_id,
+        iteration=trace.iteration,
+        raw_reward=trace.reward,
+        run_id=trace.run_id,
+        verifier_status=verifier_status or trace.status,
+        trace_status=trace.status,
+        total_tokens=(
+            total_tokens
+            if total_tokens is not None
+            else trace.token_usage.input_tokens + trace.token_usage.output_tokens
+        ),
+        task_category=task_category,
+        task_difficulty=task_difficulty,
+        expected_reward_range=expected_reward_range,
+        verifier_type=verifier_type,
+        trace=trace,
+        trace_path=trace_path,
+        metrics_path=metrics_path,
+        metrics_row=metrics_row or {},
+    )
+    record_id = candidate.record_id(config.judge.rubric_version)
+
+    if llm_client is None:
+        return _fallback_record(
+            candidate=candidate,
+            data_dir=None,
+            judge_model=judge_model,
+            rubric_version=config.judge.rubric_version,
+            record_id=record_id,
+            error="judge client unavailable",
+            fallback_reason="judge_client_unavailable",
+        )
+
+    try:
+        response = await _judge_candidate(
+            candidate=candidate,
+            config=config,
+            llm_client=llm_client,
+        )
+    except JudgeRewardAnnotationError as exc:
+        logger.warning(
+            "Live judge reward unavailable; falling back to verifier reward: "
+            "task_id=%s iteration=%d error=%s",
+            trace.task_id,
+            trace.iteration,
+            exc,
+        )
+        return _fallback_record(
+            candidate=candidate,
+            data_dir=None,
+            judge_model=judge_model,
+            rubric_version=config.judge.rubric_version,
+            record_id=record_id,
+            error=str(exc),
+        )
+
+    return _record_from_judge_response(
+        candidate=candidate,
+        data_dir=None,
+        judge_model=judge_model,
+        rubric_version=config.judge.rubric_version,
+        record_id=record_id,
+        response=response,
+    )
+
+
+def judge_reward_metadata(record: JudgeRewardRecord) -> dict[str, Any]:
+    """Return compact provenance for a judge-derived evolution reward."""
+    reward_source = (
+        "verifier_fallback"
+        if record.metadata.get("judge_reward_fallback")
+        else "judge"
+    )
+    return {
+        "reward_source": reward_source,
+        "verifier_reward": record.raw_reward,
+        "judge_reward": record.judge_reward,
+        "judge_base_reward": record.base_reward,
+        "judge_reward_record_id": record.record_id,
+        "judge_rubric_version": record.rubric_version,
+        "judge_confidence": record.confidence,
+        "judge_applied_cap": record.applied_cap,
+    }
+
+
+def append_judge_reward_record(data_dir: Path, record: JudgeRewardRecord) -> bool:
+    """Append one judge reward sidecar row if it is not already present."""
+    sidecar_path = data_dir / JUDGE_REWARDS_PATH
+    existing_ids = {
+        existing.record_id for existing in _load_existing_records(sidecar_path)
+    }
+    if record.record_id in existing_ids:
+        return False
+    _append_records(sidecar_path, [record])
+    return True
 
 
 def compute_judge_reward(response: JudgeLLMResponse) -> tuple[float, float, str | None]:
@@ -204,14 +308,53 @@ def compute_judge_reward(response: JudgeLLMResponse) -> tuple[float, float, str 
     return reward, base_reward, applied_cap
 
 
+def _record_from_judge_response(
+    *,
+    candidate: _JudgeCandidate,
+    data_dir: Path | None,
+    judge_model: str,
+    rubric_version: str,
+    record_id: str,
+    response: JudgeLLMResponse,
+) -> JudgeRewardRecord:
+    judge_reward, base_reward, applied_cap = compute_judge_reward(response)
+    return JudgeRewardRecord(
+        record_id=record_id,
+        task_id=candidate.task_id,
+        iteration=candidate.iteration,
+        run_id=candidate.run_id,
+        raw_reward=candidate.raw_reward,
+        judge_reward=judge_reward,
+        base_reward=base_reward,
+        applied_cap=applied_cap,
+        axis_scores=response.axis_scores,
+        flags=response.flags,
+        confidence=response.confidence,
+        rationale=response.rationale,
+        flag_evidence=response.flag_evidence,
+        judge_model=judge_model,
+        rubric_version=rubric_version,
+        trace_path=_relative_path(candidate.trace_path, data_dir),
+        metrics_path=_relative_path(candidate.metrics_path, data_dir),
+        verifier_status=candidate.verifier_status,
+        trace_status=candidate.trace_status,
+        total_tokens=candidate.total_tokens,
+        task_category=candidate.task_category,
+        task_difficulty=candidate.task_difficulty,
+        expected_reward_range=candidate.expected_reward_range,
+        verifier_type=candidate.verifier_type,
+    )
+
+
 def _fallback_record(
     *,
     candidate: _JudgeCandidate,
-    data_dir: Path,
+    data_dir: Path | None,
     judge_model: str,
     rubric_version: str,
     record_id: str,
     error: str,
+    fallback_reason: str = "invalid_judge_response",
 ) -> JudgeRewardRecord:
     """Return a judge sidecar row using the verifier reward as fallback."""
     fallback_task_outcome = candidate.raw_reward
@@ -258,7 +401,7 @@ def _fallback_record(
         metadata={
             "judge_reward_fallback": True,
             "fallback_source": "verifier_reward",
-            "fallback_reason": "invalid_judge_response",
+            "fallback_reason": fallback_reason,
             "fallback_error": error,
         },
     )
@@ -465,6 +608,7 @@ def _annotate_history_entries(
     judge_records: list[JudgeRewardRecord],
 ) -> None:
     for record in judge_records:
+        metadata = judge_reward_metadata(record)
         history_store.annotate_judge_reward(
             task_id=record.task_id,
             iteration=record.iteration,
@@ -473,6 +617,7 @@ def _annotate_history_entries(
             rubric_version=record.rubric_version,
             confidence=record.confidence,
             applied_cap=record.applied_cap,
+            reward_source=metadata["reward_source"],
         )
 
 
@@ -508,9 +653,11 @@ def _load_trace(path: Path | None) -> ExecutionTrace | None:
     return ExecutionTrace.model_validate_json(path.read_text())
 
 
-def _relative_path(path: Path | None, base_dir: Path) -> str | None:
+def _relative_path(path: Path | None, base_dir: Path | None) -> str | None:
     if path is None:
         return None
+    if base_dir is None:
+        return str(path)
     try:
         return str(path.relative_to(base_dir))
     except ValueError:

@@ -123,41 +123,19 @@ def _generation_messages(
     executor_skill_text: str | None,
     injected_skill_name: str,
 ) -> list[dict[str, str]]:
-    skill_section = executor_skill_text or "(no executor skill text supplied)"
-    user_content = "\n\n".join(
-        [
-            "# SWE-bench Task",
-            f"Instance ID: {task.task_id}",
-            f"Repository: {task.repo}",
-            f"Workspace path: {workspace}",
-            "# Planner Instruction",
-            planner_instruction,
-            "# Issue Prompt",
-            task.instruction,
-            f"# Active {injected_skill_name} Skill",
-            skill_section,
-            "# Required Output",
-            (
-                "Your entire response must be only the contents of a git-style "
-                "unified diff suitable for SWE-bench model_patch, exactly like "
-                "`git diff --binary HEAD -- .`. The response must start with "
-                "`diff --git ` and end immediately after the final diff hunk or "
-                "binary patch section. "
-                "Every changed file must include `diff --git a/<path> b/<path>`, "
-                "`--- a/<path>`, and `+++ b/<path>` headers using repo-relative "
-                "paths. Do not use bare paths such as `--- django/...`. Do not "
-                "include prose, markdown explanations, test patches, absolute "
-                "paths, commit hashes, base commit lines, summaries, metadata, "
-                "or gold patch fields."
-            ),
-        ]
+    user_content = swebench_helpers.build_swebench_executor_envelope(
+        task=task,
+        workspace=workspace,
+        planner_instruction=planner_instruction,
+        executor_policy=executor_skill_text,
     )
     return [
         {
             "role": "system",
             "content": (
                 "You are the Executor for a SWE-bench task. Generate the minimal "
-                "repository patch needed to resolve the issue. Output only a "
+                "repository patch needed to resolve the issue. Follow the active "
+                f"{injected_skill_name} policy when it is supplied. Output only a "
                 "valid git-style unified diff with `diff --git` file headers. "
                 "Do not include commit hashes, metadata, or any text outside "
                 "the patch."

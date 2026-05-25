@@ -4,6 +4,7 @@ import pytest
 
 from mediated_coevo.evolution.reflector import Reflector
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
+from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
@@ -17,11 +18,31 @@ class _MarkdownLLM:
         }
 
 
-def _skill_store(tmp_path):
+class _CandidateBatchLLM:
+    model = "test-model"
+
+    async def complete(self, *args, **kwargs):
+        return {
+            "content": (
+                '{"candidates": ['
+                '{"candidate_id": "broad", "update_kind": "edit_scope_policy", '
+                '"hypothesis": "large change", "risk": "too broad", '
+                '"audit_score": 0.2, "new_content": "# Broad Planner\\n", '
+                '"reasoning": "broad"}, '
+                '{"candidate_id": "targeted", "update_kind": "minimal_change_rule", '
+                '"hypothesis": "targeted change", "risk": "low", '
+                '"audit_score": 0.9, "new_content": "# Targeted Planner\\n", '
+                '"reasoning": "targeted"}'
+                "]}"
+            )
+        }
+
+
+def _skill_store(tmp_path, skill_name: str = "mediator", content: str | None = None):
     skills_dir = tmp_path / "skills"
-    skill_dir = skills_dir / "mediator"
+    skill_dir = skills_dir / skill_name
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Old Mediator Protocol\n")
+    (skill_dir / "SKILL.md").write_text(content or "# Old Mediator Protocol\n")
     return SkillStore(skills_dir)
 
 
@@ -71,28 +92,50 @@ async def test_reflector_returns_concise_contrastive_provenance(tmp_path):
     assert pair_ref.reward_gap == pytest.approx(0.8)
 
 
-def test_contrastive_pair_sampling_is_repeatable_with_seed(tmp_path):
+@pytest.mark.asyncio
+async def test_reflector_selects_candidate_batch_and_persists_artifact(tmp_path):
     history = HistoryStore(history_dir=tmp_path / "history")
-    for index, reward in enumerate([0.1, 0.2, 0.3, 0.8, 0.9, 1.0]):
-        history.add(HistoryEntry(
-            iteration=index,
-            agent_role="planner",
-            payload=PlannerSignal(reasoning=f"entry {index}"),
-            reward=reward,
-            metadata={"task_id": "task-A"},
-        ))
+    history.add(HistoryEntry(
+        iteration=0,
+        agent_role="planner",
+        payload=PlannerSignal(reasoning="over-edited"),
+        reward=0.2,
+        metadata={"task_id": "task-A"},
+    ))
+    history.add(HistoryEntry(
+        iteration=1,
+        agent_role="planner",
+        payload=PlannerSignal(reasoning="targeted"),
+        reward=0.8,
+        metadata={"task_id": "task-A"},
+    ))
+    artifacts = ArtifactStore(tmp_path / "artifacts")
 
-    first = history.contrastive_pairs(
+    result = await Reflector(
+        history,
+        _skill_store(tmp_path, skill_name="planner", content="# Old Planner\n"),
+        artifact_store=artifacts,
+        base_seed=42,
+    ).reflect(
         "planner",
-        max_pairs=2,
-        selection_seed=99,
-    )
-    second = history.contrastive_pairs(
-        "planner",
-        max_pairs=2,
-        selection_seed=99,
+        _CandidateBatchLLM(),
+        iteration=5,
     )
 
-    assert [(w.entry_id, b.entry_id) for w, b in first] == [
-        (w.entry_id, b.entry_id) for w, b in second
+    assert result is not None
+    assert result.new_content == "# Targeted Planner"
+    assert result.provenance.selected_candidate_id == "targeted"
+    assert result.provenance.selected_update_kind == "minimal_change_rule"
+    assert result.provenance.candidate_batch_id == "reflect-planner-iter-0005"
+    assert [ref.candidate_id for ref in result.provenance.candidate_refs] == [
+        "broad",
+        "targeted",
     ]
+
+    artifact_path = (
+        tmp_path
+        / "artifacts"
+        / "candidate_batches"
+        / "reflect-planner-iter-0005.json"
+    )
+    assert artifact_path.exists()

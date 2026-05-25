@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,13 +21,60 @@ class ModelConfigError(ValueError):
     """Raised when configured model names are invalid."""
 
 
-def _normalize_openrouter_model_name(model: str) -> str:
-    model = model.strip()
-    if not model:
+class ConfigLoadError(ValueError):
+    """Raised when configuration files are missing required settings."""
+
+
+REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
+    ("experiment", "num_iterations"),
+    ("experiment", "coevo_interval"),
+    ("experiment", "seed"),
+    ("experiment", "advisor_buffer_max"),
+    ("experiment", "condition_name"),
+    ("experiment", "allow_cross_task_feedback"),
+    ("experiment", "skill_updates", "executor"),
+    ("experiment", "skill_updates", "planner"),
+    ("experiment", "skill_updates", "mediator"),
+)
+
+CONFIG_CLI_HINTS: dict[str, str] = {
+    "experiment.num_iterations": "--iterations",
+    "experiment.coevo_interval": "--coevo-interval",
+    "experiment.seed": "--seed",
+    "experiment.advisor_buffer_max": "--advisor-buffer-max",
+    "experiment.condition_name": "--condition",
+    "experiment.skill_updates.executor": "--skill-updates",
+    "experiment.skill_updates.planner": "--skill-updates",
+    "experiment.skill_updates.mediator": "--skill-updates",
+}
+
+
+def normalize_openrouter_model_name(model: str) -> str:
+    """Return a model ID with exactly one OpenRouter prefix."""
+    return f"{OPENROUTER_MODEL_PREFIX}{_provider_model_name(model)}"
+
+
+def normalize_harbor_model_name(model: str) -> str:
+    """Return a provider/model ID without the OpenRouter routing prefix."""
+    return _provider_model_name(model)
+
+
+def _provider_model_name(model: str) -> str:
+    """Return the provider/model suffix after removing OpenRouter prefixes."""
+    normalized = model.strip()
+    if not normalized:
         raise ModelConfigError("model names must be non-empty OpenRouter model IDs")
-    if model.startswith(OPENROUTER_MODEL_PREFIX):
-        return model
-    return f"{OPENROUTER_MODEL_PREFIX}{model}"
+
+    while normalized.startswith(OPENROUTER_MODEL_PREFIX):
+        normalized = normalized.removeprefix(OPENROUTER_MODEL_PREFIX)
+
+    parts = normalized.split("/")
+    if len(parts) < 2 or any(not part for part in parts):
+        raise ModelConfigError(
+            "model names must include provider and model, for example "
+            "'openrouter/openai/gpt-5.5'"
+        )
+    return normalized
 
 
 class ModelsConfig(BaseModel):
@@ -63,18 +111,23 @@ class JudgeConfig(BaseModel):
 class SkillUpdateConfig(BaseModel):
     """Independent permissions for committing each runtime skill family."""
 
-    executor: bool = True
-    planner: bool = True
-    mediator: bool = True
+    executor: bool
+    planner: bool
+    mediator: bool
 
 
 class SkillValidationConfig(BaseModel):
     """Empirical gate settings for executor skill candidates."""
 
-    enabled: bool = True
-    min_mean_delta: float = 0.0
+    min_mean_delta: float = 0.01
     reward_tolerance: float = 1e-9
     require_all_tasks_usable: bool = True
+    sample_size: int = 3
+    skillsbench_tasks: list[str] = Field(default_factory=list)
+    swebench_instances: list[str] = Field(default_factory=list)
+    allow_contributing_fallback: bool = True
+    min_skillsbench_tag_overlap: int = 1
+    allow_swebench_replacement_for_skillsbench: bool = False
 
 
 class BenchmarkSelectionConfig(BaseModel):
@@ -87,12 +140,12 @@ class BenchmarkSelectionConfig(BaseModel):
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
-    num_iterations: int = 30
-    coevo_interval: int = 5
-    seed: int = 42
-    advisor_buffer_max: int = 10
-    condition_name: ConditionName = "learned_mediator"
-    skill_updates: SkillUpdateConfig = Field(default_factory=SkillUpdateConfig)
+    num_iterations: int
+    coevo_interval: int
+    seed: int
+    advisor_buffer_max: int
+    condition_name: ConditionName
+    skill_updates: SkillUpdateConfig
     skill_validation: SkillValidationConfig = Field(
         default_factory=SkillValidationConfig
     )
@@ -101,7 +154,7 @@ class ExperimentConfig(BaseModel):
     )
     baseline_preset: str | None = None
     shared_notes: str | None = None
-    allow_cross_task_feedback: bool = False
+    allow_cross_task_feedback: bool
 
 
 class PathsConfig(BaseModel):
@@ -119,9 +172,12 @@ class ExecutorRuntimeConfig(BaseModel):
     remote_fetch: bool = True
     archive_url: str = Field(default=DEFAULT_SKILLSBENCH_ARCHIVE_URL, min_length=1)
     archive_sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
-    # Hard wall-clock cap on a single Harbor subprocess (seconds). Prevents
-    # a hung run from blocking the orchestrator indefinitely.
-    harbor_timeout_sec: float = 1800.0
+    # Hard wall-clock cap on a single Harbor subprocess (seconds). This must
+    # exceed task agent/verifier phase limits so Harbor can finish cleanly.
+    harbor_timeout_sec: float = 5400.0
+    # Optional Harbor multiplier for agent setup. Some tasks spend several
+    # minutes installing agent dependencies before the actual run starts.
+    harbor_agent_setup_timeout_multiplier: float | None = None
     # When True, refuse to start the experiment if the harbor CLI is missing.
     # When False, the executor synthesizes env_failure traces on each task
     # so CI can exercise the orchestrator without harbor installed.
@@ -133,7 +189,7 @@ class Config(BaseModel):
 
     models: ModelsConfig
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
-    experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
+    experiment: ExperimentConfig
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     executor_runtime: ExecutorRuntimeConfig = Field(
@@ -143,15 +199,19 @@ class Config(BaseModel):
     def normalize_models(self) -> Self:
         """Normalize every configured model name in-place."""
         for field_name, model in self.models:
-            model_str = _normalize_openrouter_model_name(model)
-            if field_name != 'executor':
-                setattr(self.models, field_name, model_str)
-            else: 
-                setattr(self.models, field_name, '/'.join(model_str.split('/')[1:]))
+            if field_name == "executor":
+                normalized = normalize_harbor_model_name(model)
+            else:
+                normalized = normalize_openrouter_model_name(model)
+            setattr(self.models, field_name, normalized)
         return self
 
 
-def load_config(config_dir: Path) -> Config:
+def load_config(
+    config_dir: Path,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> Config:
     """Load default.toml from config_dir."""
     default_path = config_dir / "default.toml"
     data: dict = {}
@@ -160,4 +220,49 @@ def load_config(config_dir: Path) -> Config:
         with open(default_path, "rb") as f:
             data = tomllib.load(f)
 
+    if overrides:
+        _deep_merge(data, overrides)
+    missing_paths = _missing_required_config_paths(data)
+    if missing_paths:
+        raise ConfigLoadError(_missing_config_message(default_path, missing_paths))
+
     return Config(**data)
+
+
+def _deep_merge(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    """Merge CLI override mappings into raw TOML data before validation."""
+    for key, value in source.items():
+        if (
+            isinstance(value, Mapping)
+            and isinstance(target.get(key), dict)
+        ):
+            _deep_merge(target[key], value)
+            continue
+        target[key] = value
+
+
+def _missing_required_config_paths(data: Mapping[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for path in REQUIRED_CONFIG_PATHS:
+        current: Any = data
+        for part in path:
+            if not isinstance(current, Mapping) or part not in current:
+                missing.append(".".join(path))
+                break
+            current = current[part]
+    return missing
+
+
+def _missing_config_message(default_path: Path, missing_paths: list[str]) -> str:
+    details = []
+    for path in missing_paths:
+        cli_hint = CONFIG_CLI_HINTS.get(path)
+        if cli_hint is None:
+            details.append(path)
+        else:
+            details.append(f"{path} ({cli_hint})")
+    joined = ", ".join(details)
+    return (
+        f"missing required config setting(s) in {default_path}: {joined}. "
+        "Set them in default.toml or pass the matching CLI option when available."
+    )

@@ -19,6 +19,7 @@ from mediated_coevo.runtime.token_budget import (
     fit_text_to_tokens,
     pack_sections,
 )
+from tests.config_helpers import experiment_config
 
 
 def test_token_count_falls_back_when_litellm_counter_fails(monkeypatch):
@@ -104,6 +105,22 @@ def test_pack_sections_truncates_optional_section_to_fit():
 
     assert "Required instruction." in packed
     assert count_text_tokens("test-model", packed) <= 30
+
+
+def test_pack_sections_reserves_budget_for_later_required_sections():
+    packed = pack_sections(
+        "test-model",
+        [
+            BudgetSection("required_start", "Required start.", required=True),
+            BudgetSection("optional_middle", "OPTIONAL " * 500),
+            BudgetSection("required_end", "Required end.", required=True),
+        ],
+        budget_limit=20,
+    )
+
+    assert "Required start." in packed
+    assert "Required end." in packed
+    assert count_text_tokens("test-model", packed) <= 20
 
 
 @pytest.mark.asyncio
@@ -200,7 +217,8 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.budgets.trace_excerpt_tokens = 20
     config.budgets.historical_summary_tokens = 30
@@ -254,7 +272,8 @@ def test_planner_constructed_prompt_fits_budget():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.budgets.max_skill_tokens = 30
     config.budgets.mediator_report_tokens = 30
@@ -279,6 +298,70 @@ def test_planner_constructed_prompt_fits_budget():
         count_message_tokens("test-model", messages)
         <= config.budgets.planner_context_tokens
     )
+
+
+@pytest.mark.asyncio
+async def test_planner_compacts_large_benchmark_instruction_before_prompting(
+    monkeypatch,
+):
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        },
+        experiment=experiment_config(),
+    )
+    config.budgets.max_skill_tokens = 30
+    config.budgets.mediator_report_tokens = 30
+    config.budgets.planner_context_tokens = 500
+    planner = PlannerAgent(LLMClient(model="test-model"))
+    planner.configure_token_budget(config.budgets, condition_name="learned_mediator")
+    planner.set_skill_context(
+        executor_skills="# Skill\n" + ("tool guidance " * 300),
+        skill_refiner="# Refiner\n" + ("edit guidance " * 300),
+    )
+    compact_calls = []
+
+    async def _fake_compact_text_for_context(text, **kwargs):
+        compact_calls.append((text, kwargs))
+        return "COMPACTED ISSUE SIGNAL"
+
+    async def _fake_process(context):
+        messages = planner.construct_messages(context)
+        assert (
+            count_message_tokens("test-model", messages)
+            <= config.budgets.planner_context_tokens
+        )
+        return {
+            "parsed": {"instruction": context["base_instruction"], "reasoning": "ok"},
+            "content": "{}",
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+
+    monkeypatch.setattr(
+        "mediated_coevo.evolution.compactor.compact_text_for_context",
+        _fake_compact_text_for_context,
+    )
+    monkeypatch.setattr(planner, "process", _fake_process)
+
+    task_spec = await planner.plan_task(
+        task_id="large-swebench-task",
+        base_instruction="START " + ("required issue text " * 5000) + " END",
+        prior_context="prior feedback " * 300,
+        current_skills=["# executor"],
+        iteration=0,
+    )
+
+    assert compact_calls
+    assert "required issue text" in compact_calls[0][0]
+    assert (
+        compact_calls[0][1]["label"]
+        == "benchmark instruction for large-swebench-task"
+    )
+    assert "COMPACTED ISSUE SIGNAL" in task_spec.instruction
 
 
 def test_planner_plan_prompt_contains_only_prior_feedback_section():

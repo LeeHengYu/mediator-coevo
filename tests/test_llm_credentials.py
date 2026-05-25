@@ -6,9 +6,10 @@ import pytest
 from typer.testing import CliRunner
 
 from mediated_coevo import main as main_module
-from mediated_coevo.core.config import Config, ModelConfigError
+from mediated_coevo.core.config import Config, ModelConfigError, ModelsConfig
 from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_credentials
 from mediated_coevo.main import ExperimentFactory, app
+from tests.config_helpers import experiment_config
 
 
 def test_config_normalize_models_keeps_executor_model_harbor_ready():
@@ -18,7 +19,8 @@ def test_config_normalize_models_keeps_executor_model_harbor_ready():
             "executor": "openrouter/google/gemini-3-flash-preview",
             "mediator": "openai/gpt-5.5",
             "judge": "openai/gpt-5.5",
-        }
+        },
+        experiment=experiment_config(),
     )
 
     config.normalize_models()
@@ -29,6 +31,25 @@ def test_config_normalize_models_keeps_executor_model_harbor_ready():
     assert config.models.judge == "openrouter/openai/gpt-5.5"
 
 
+def test_config_normalize_models_collapses_duplicate_openrouter_prefixes():
+    config = Config(
+        models={
+            "planner": "openrouter/openrouter/anthropic/claude-sonnet-4.6",
+            "executor": "openrouter/openrouter/google/gemini-3-flash-preview",
+            "mediator": "openrouter/openrouter/openai/gpt-5.5",
+            "judge": "openrouter/openrouter/qwen/qwen3.6-flash",
+        },
+        experiment=experiment_config(),
+    )
+
+    config.normalize_models()
+
+    assert config.models.planner == "openrouter/anthropic/claude-sonnet-4.6"
+    assert config.models.executor == "google/gemini-3-flash-preview"
+    assert config.models.mediator == "openrouter/openai/gpt-5.5"
+    assert config.models.judge == "openrouter/qwen/qwen3.6-flash"
+
+
 def test_config_normalize_models_rejects_blank_model_name():
     config = Config(
         models={
@@ -36,10 +57,27 @@ def test_config_normalize_models_rejects_blank_model_name():
             "executor": "google/gemini-3-flash-preview",
             "mediator": "openai/gpt-5.5",
             "judge": "   ",
-        }
+        },
+        experiment=experiment_config(),
     )
 
     with pytest.raises(ModelConfigError, match="model names must be non-empty"):
+        config.normalize_models()
+
+
+@pytest.mark.parametrize("model", ["openrouter", "openrouter/", "openai/"])
+def test_config_normalize_models_rejects_prefix_only_model_names(model: str):
+    config = Config(
+        models=ModelsConfig(
+            planner="anthropic/claude-sonnet-4.6",
+            executor="google/gemini-3-flash-preview",
+            mediator="openai/gpt-5.5",
+            judge=model,
+        ),
+        experiment=experiment_config(),
+    )
+
+    with pytest.raises(ModelConfigError, match="provider and model"):
         config.normalize_models()
 
 
@@ -65,7 +103,10 @@ def test_run_cli_fails_fast_when_openrouter_key_is_missing(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_harbor_check)
 
-    result = CliRunner().invoke(app, ["run", "--skillsbench-task", "demo"])
+    result = CliRunner().invoke(
+        app,
+        ["run", "--skillsbench-task", "demo", "--run-id", "credential-check"],
+    )
 
     assert result.exit_code == 1
     assert "OPENROUTER_API_KEY" in result.output
@@ -84,7 +125,8 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
             "executor": "google/gemini-3-flash-preview",
             "mediator": "openrouter/openai/gpt-5.5",
             "judge": "openai/gpt-5.5",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.paths.skills_dir = "skills"
     main_module._prepare_llm_credentials_or_exit(config)

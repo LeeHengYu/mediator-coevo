@@ -239,7 +239,9 @@ class MediatorAgent(BaseAgent):
         history: list[str] = []
         if self._artifact_store:
             history = self._artifact_store.query_summaries(
-                task_id=trace.task_id, recent=5
+                task_id=trace.task_id,
+                recent=5,
+                before_iteration=trace.iteration,
             )
 
         # 2-3. COMPRESS + DECIDE via LLM call

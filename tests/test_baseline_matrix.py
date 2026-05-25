@@ -7,6 +7,13 @@ import pytest
 import typer
 
 from mediated_coevo import main as main_module
+from mediated_coevo.core.config import (
+    Config,
+    ConfigLoadError,
+    ModelsConfig,
+    SkillUpdateConfig,
+    load_config,
+)
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     BASELINE_PRESETS_BY_NAME,
@@ -17,7 +24,6 @@ from mediated_coevo.experiment.conditions import (
     ExperimentDesignError,
     validate_experiment_design,
 )
-from mediated_coevo.core.config import Config, ModelsConfig, SkillUpdateConfig
 from mediated_coevo.main import (
     ExperimentFactory,
     _apply_experiment_settings,
@@ -29,6 +35,7 @@ from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
+from tests.config_helpers import experiment_config
 
 
 def _config() -> Config:
@@ -38,7 +45,8 @@ def _config() -> Config:
             executor="test-executor",
             mediator="test-mediator",
             judge="test-judge",
-        )
+        ),
+        experiment=experiment_config(),
     )
 
 
@@ -71,7 +79,7 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
         seed=123,
         coevo_interval=2,
         advisor_buffer_max=1,
-        skill_validation_enabled=False,
+        harbor_agent_setup_timeout_multiplier=2.5,
     )
 
     assert updated is config
@@ -79,7 +87,7 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
     assert config.experiment.seed == 123
     assert config.experiment.coevo_interval == 2
     assert config.experiment.advisor_buffer_max == 1
-    assert config.experiment.skill_validation.enabled is False
+    assert config.executor_runtime.harbor_agent_setup_timeout_multiplier == 2.5
 
 
 def test_baseline_preset_mapping_matches_matrix_plan():
@@ -147,14 +155,26 @@ def test_all_baseline_presets_validate():
 @pytest.mark.parametrize(
     ("condition", "skill_updates", "match"),
     [
-        ("no_feedback", SkillUpdateConfig(planner=True), "no_feedback"),
-        ("full_traces", SkillUpdateConfig(mediator=True), "mediator"),
+        (
+            "no_feedback",
+            SkillUpdateConfig(executor=False, planner=True, mediator=False),
+            "no_feedback",
+        ),
+        (
+            "full_traces",
+            SkillUpdateConfig(executor=False, planner=False, mediator=True),
+            "mediator",
+        ),
         (
             "shared_notes",
             SkillUpdateConfig(executor=True, planner=False, mediator=False),
             "shared_notes",
         ),
-        ("static_mediator", SkillUpdateConfig(mediator=True), "static_mediator"),
+        (
+            "static_mediator",
+            SkillUpdateConfig(executor=False, planner=False, mediator=True),
+            "static_mediator",
+        ),
     ],
 )
 def test_invalid_condition_update_designs_fail_before_runtime(
@@ -181,8 +201,60 @@ def _write_minimal_config(config_dir) -> None:
         executor = "test-executor"
         mediator = "test-mediator"
         judge = "test-judge"
+
+        [experiment]
+        num_iterations = 2
+        coevo_interval = 2
+        advisor_buffer_max = 2
+        seed = 42
+        condition_name = "learned_mediator"
+        allow_cross_task_feedback = false
+
+        [experiment.skill_updates]
+        executor = true
+        planner = true
+        mediator = true
         """
     )
+
+
+def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "default.toml").write_text(
+        """
+        [models]
+        planner = "test-planner"
+        executor = "test-executor"
+        mediator = "test-mediator"
+        judge = "test-judge"
+        """
+    )
+
+    with pytest.raises(ConfigLoadError, match="experiment.num_iterations"):
+        load_config(config_dir)
+
+    config = load_config(
+        config_dir,
+        overrides={
+            "experiment": {
+                "num_iterations": 3,
+                "coevo_interval": 2,
+                "advisor_buffer_max": 2,
+                "seed": 7,
+                "condition_name": "learned_mediator",
+                "allow_cross_task_feedback": False,
+                "skill_updates": {
+                    "executor": True,
+                    "planner": True,
+                    "mediator": True,
+                },
+            }
+        },
+    )
+
+    assert config.experiment.num_iterations == 3
+    assert config.experiment.seed == 7
 
 
 def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
@@ -222,6 +294,32 @@ def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path
             skill_updates="all",
             config_dir=config_dir,
         )
+
+
+def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
+    monkeypatch,
+    tmp_path,
+):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main_module, "_prepare_llm_credentials_or_exit", lambda config: config)
+    monkeypatch.setattr(main_module, "_ensure_harbor_available", lambda config: None)
+
+    def capture_run(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_module, "_run_unified_experiment", capture_run)
+
+    main_module.run(
+        skillsbench_tasks=["task-A"],
+        config_dir=config_dir,
+    )
+
+    assert captured["iterations"] == 2
+    assert captured["seed"] == 42
+    assert captured["condition_name"] == "learned_mediator"
 
 
 def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path):
@@ -429,6 +527,10 @@ async def test_planner_and_mediator_reflection_are_independently_gated(monkeypat
             pass
 
         async def reflect(self, agent_role, *args, **kwargs):
+            calls.append(agent_role)
+            return None
+
+        async def draft_reflection(self, *, agent_role, **kwargs):
             calls.append(agent_role)
             return None
 

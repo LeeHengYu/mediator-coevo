@@ -45,6 +45,7 @@ from mediated_coevo.benchmarks import (
     SkillsBenchRepository,
 )
 from mediated_coevo.benchmarks.mixed import (
+    BenchmarkKind,
     BenchmarkTaskSelection,
     MixedBenchmarkRepository,
     build_benchmark_task_selection,
@@ -55,11 +56,18 @@ from mediated_coevo.benchmarks.task_sets import (
     TaskSetError,
     resolve_task_selection,
 )
+from mediated_coevo.cloud.vm import (
+    CloudVMConfigError,
+    GCPVMConfig,
+    RemoteHarborRunner,
+    load_vm_config,
+)
 from mediated_coevo.core.config import (
     Config,
-    OPENROUTER_MODEL_PREFIX,
+    ConfigLoadError,
     SkillUpdateConfig,
     load_config,
+    normalize_openrouter_model_name,
 )
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.baselines import (
@@ -161,6 +169,9 @@ class ExperimentFactory:
             agent_name=config.executor_runtime.agent_name,
             jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
             timeout_sec=config.executor_runtime.harbor_timeout_sec,
+            agent_setup_timeout_multiplier=(
+                config.executor_runtime.harbor_agent_setup_timeout_multiplier
+            ),
         )
         planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
         planner.configure_token_budget(
@@ -190,6 +201,7 @@ class ExperimentFactory:
             config.budgets,
             condition_name=config.experiment.condition_name,
         )
+        judge_client = LLMClient(model=config.models.judge)
 
         return ExperimentRuntime(
             experiment_dir=experiment_dir,
@@ -204,6 +216,7 @@ class ExperimentFactory:
                 config=config,
                 experiment_dir=experiment_dir,
                 skill_advisor=skill_advisor,
+                judge_llm_client=judge_client,
             ),
         )
 
@@ -273,6 +286,60 @@ def _build_benchmark_repo(project_root: Path, config: Config) -> SkillsBenchRepo
             local_archive_base_dir=project_root,
         ),
     )
+
+
+def _load_config_or_bad_parameter(
+    config_dir: Path,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> Config:
+    try:
+        return load_config(config_dir, overrides=overrides)
+    except ConfigLoadError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _nested_override(section: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        section[key] = value
+
+
+def _run_config_overrides(
+    *,
+    iterations: int | None,
+    seed: int | None,
+    condition: str | None,
+    skill_updates: str | None,
+    coevo_interval: int | None,
+    advisor_buffer_max: int | None,
+    harbor_agent_setup_timeout_multiplier: float | None,
+) -> dict[str, Any]:
+    experiment: dict[str, Any] = {}
+    _nested_override(experiment, "num_iterations", iterations)
+    _nested_override(experiment, "seed", seed)
+    _nested_override(experiment, "coevo_interval", coevo_interval)
+    _nested_override(experiment, "advisor_buffer_max", advisor_buffer_max)
+    if condition is not None:
+        experiment["condition_name"] = _validate_condition_name(condition)
+    if skill_updates is not None:
+        try:
+            experiment["skill_updates"] = parse_skill_updates(skill_updates).model_dump()
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    executor_runtime: dict[str, Any] = {}
+    _nested_override(
+        executor_runtime,
+        "harbor_agent_setup_timeout_multiplier",
+        harbor_agent_setup_timeout_multiplier,
+    )
+
+    overrides: dict[str, Any] = {}
+    if experiment:
+        overrides["experiment"] = experiment
+    if executor_runtime:
+        overrides["executor_runtime"] = executor_runtime
+    return overrides
 
 
 def _available_task_set_help() -> str:
@@ -418,6 +485,22 @@ def _resolve_unified_task_selection(
     return selection
 
 
+def _load_remote_harbor_config(
+    *,
+    enabled: bool,
+    env_file: Path,
+    selection: BenchmarkTaskSelection,
+) -> GCPVMConfig | None:
+    if not enabled:
+        return None
+    if not selection.has_skillsbench:
+        raise typer.BadParameter("--cloud requires a SkillsBench selection")
+    try:
+        return load_vm_config(env_file)
+    except (OSError, CloudVMConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 def _preflight_task_ids_from_cli(
     tasks: str | None,
     task_set: str | None,
@@ -452,6 +535,15 @@ def _ensure_harbor_available(config: Config) -> None:
         raise typer.Exit(code=1)
 
 
+def _ensure_gcloud_available() -> None:
+    if shutil.which("gcloud") is None:
+        console.print(
+            "[bold red]ERROR:[/] gcloud CLI not found on PATH. Install the "
+            "Google Cloud CLI before using --cloud."
+        )
+        raise typer.Exit(code=1)
+
+
 def _prepare_llm_credentials_or_exit(config: Config) -> Config:
     from mediated_coevo.core.config import ModelConfigError
     from mediated_coevo.llm.client import (
@@ -471,18 +563,20 @@ def _prepare_llm_credentials_or_exit(config: Config) -> Config:
 def _apply_experiment_settings(
     config: Config,
     *,
-    iterations: int,
-    seed: int,
+    iterations: int | None = None,
+    seed: int | None = None,
     condition_name: ConditionName | None = None,
     skill_updates: SkillUpdateConfig | None = None,
     baseline_preset: str | None = None,
     coevo_interval: int | None = None,
     advisor_buffer_max: int | None = None,
-    skill_validation_enabled: bool | None = None,
+    harbor_agent_setup_timeout_multiplier: float | None = None,
 ) -> Config:
     """Apply CLI experiment settings to a loaded config object."""
-    config.experiment.num_iterations = iterations
-    config.experiment.seed = seed
+    if iterations is not None:
+        config.experiment.num_iterations = iterations
+    if seed is not None:
+        config.experiment.seed = seed
     if condition_name is not None:
         config.experiment.condition_name = condition_name
     if skill_updates is not None:
@@ -492,8 +586,10 @@ def _apply_experiment_settings(
         config.experiment.coevo_interval = coevo_interval
     if advisor_buffer_max is not None:
         config.experiment.advisor_buffer_max = advisor_buffer_max
-    if skill_validation_enabled is not None:
-        config.experiment.skill_validation.enabled = skill_validation_enabled
+    if harbor_agent_setup_timeout_multiplier is not None:
+        config.executor_runtime.harbor_agent_setup_timeout_multiplier = (
+            harbor_agent_setup_timeout_multiplier
+        )
     return config
 
 
@@ -827,9 +923,7 @@ def _print_experiment_controls(config: Config) -> None:
     console.print(
         f"[bold]Advisor buffer max:[/] {config.experiment.advisor_buffer_max}"
     )
-    console.print(
-        f"[bold]Skill validation:[/] {config.experiment.skill_validation.enabled}"
-    )
+    console.print("[bold]Skill validation:[/] required")
 
 
 def _resolve_output_dir(output_dir: Path) -> Path:
@@ -1012,10 +1106,7 @@ def _build_swebench_executor(
 
 def _openrouter_model_for_llm(model: str) -> str:
     """Return a LiteLLM/OpenRouter model id from a Harbor-ready model id."""
-    model = model.strip()
-    if model.startswith(OPENROUTER_MODEL_PREFIX):
-        return model
-    return f"{OPENROUTER_MODEL_PREFIX}{model}"
+    return normalize_openrouter_model_name(model)
 
 
 def _prepare_unified_experiment_root(
@@ -1039,6 +1130,90 @@ def _prepare_unified_experiment_root(
     return experiment_dir, runtime_skills_dir
 
 
+def _runtime_benchmark_by_task_id(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> dict[str, BenchmarkKind]:
+    """Include validation-only tasks in runtime routing without evolving on them."""
+    mapping = dict(selection.benchmark_by_task_id)
+    if _needs_validation_skillsbench(selection, config):
+        for task_id in config.experiment.skill_validation.skillsbench_tasks:
+            mapping.setdefault(task_id, "skillsbench")
+    if _needs_validation_swebench(selection, config):
+        for task_id in config.experiment.skill_validation.swebench_instances:
+            mapping.setdefault(task_id, "swebench")
+    return mapping
+
+
+def _needs_runtime_skillsbench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    return selection.has_skillsbench or _needs_validation_skillsbench(
+        selection,
+        config,
+    )
+
+
+def _needs_runtime_swebench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    return selection.has_swebench or _needs_validation_swebench(selection, config)
+
+
+def _needs_validation_skillsbench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    return (
+        bool(config.experiment.skill_validation.skillsbench_tasks)
+        and selection.has_skillsbench
+    )
+
+
+def _needs_validation_swebench(
+    selection: BenchmarkTaskSelection,
+    config: Config,
+) -> bool:
+    validation = config.experiment.skill_validation
+    if not validation.swebench_instances:
+        return False
+    if selection.has_swebench:
+        return True
+    return (
+        selection.has_skillsbench
+        and validation.allow_swebench_replacement_for_skillsbench
+    )
+
+
+def _build_harbor_runner(
+    *,
+    config: Config,
+    experiment_dir: Path,
+    remote_harbor_config: GCPVMConfig | None,
+) -> HarborRunner | RemoteHarborRunner:
+    jobs_dir = experiment_dir / config.executor_runtime.jobs_dir
+    timeout_sec = config.executor_runtime.harbor_timeout_sec
+    setup_timeout_multiplier = (
+        config.executor_runtime.harbor_agent_setup_timeout_multiplier
+    )
+    if remote_harbor_config is not None:
+        return RemoteHarborRunner(
+            config=remote_harbor_config,
+            agent_name=config.executor_runtime.agent_name,
+            jobs_dir=jobs_dir,
+            timeout_sec=timeout_sec,
+            agent_setup_timeout_multiplier=setup_timeout_multiplier,
+        )
+    return HarborRunner(
+        agent_name=config.executor_runtime.agent_name,
+        jobs_dir=jobs_dir,
+        timeout_sec=timeout_sec,
+        agent_setup_timeout_multiplier=setup_timeout_multiplier,
+    )
+
+
 def _build_unified_runtime(
     *,
     config: Config,
@@ -1050,6 +1225,7 @@ def _build_unified_runtime(
     split: str,
     timeout: int,
     max_workers: int,
+    remote_harbor_config: GCPVMConfig | None = None,
 ) -> ExperimentRuntime:
     """Build one orchestrator that can route across selected benchmark backends."""
     from mediated_coevo.llm.client import LLMClient
@@ -1064,39 +1240,42 @@ def _build_unified_runtime(
     artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
     history_store = HistoryStore(history_dir=experiment_dir / "history")
 
+    needs_skillsbench = _needs_runtime_skillsbench(selection, config)
+    needs_swebench = _needs_runtime_swebench(selection, config)
     skillsbench_repo = (
         _build_benchmark_repo(PROJECT_ROOT, config)
-        if selection.has_skillsbench
+        if needs_skillsbench
         else None
     )
     swebench_repo = (
         swebench_helpers.SWEbenchRepository(dataset_name=dataset_name, split=split)
-        if selection.has_swebench
+        if needs_swebench
         else None
     )
+    runtime_benchmark_by_task_id = _runtime_benchmark_by_task_id(selection, config)
     benchmark_repo = MixedBenchmarkRepository(
-        benchmark_by_task_id=selection.benchmark_by_task_id,
+        benchmark_by_task_id=runtime_benchmark_by_task_id,
         skillsbench_repo=skillsbench_repo,
         swebench_repo=swebench_repo,
     )
 
     skillsbench_executor = None
-    if selection.has_skillsbench:
+    if needs_skillsbench:
         assert skillsbench_repo is not None
         skillsbench_executor = ExecutorAgent(
             model=config.models.executor,
             benchmark_repo=skillsbench_repo,
-            harbor_runner=HarborRunner(
-                agent_name=config.executor_runtime.agent_name,
-                jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
-                timeout_sec=config.executor_runtime.harbor_timeout_sec,
+            harbor_runner=_build_harbor_runner(
+                config=config,
+                experiment_dir=experiment_dir,
+                remote_harbor_config=remote_harbor_config,
             ),
             workspace_root=experiment_dir / "benchmarks",
             injected_skill_name=config.executor_runtime.injected_skill_name,
         )
 
     swebench_executor = None
-    if selection.has_swebench:
+    if needs_swebench:
         assert swebench_repo is not None
         swebench_executor = _build_swebench_executor(
             config=config,
@@ -1113,7 +1292,7 @@ def _build_unified_runtime(
         condition_name=config.experiment.condition_name,
     )
     executor = RoutedExecutorAgent(
-        benchmark_by_task_id=selection.benchmark_by_task_id,
+        benchmark_by_task_id=runtime_benchmark_by_task_id,
         skillsbench_executor=skillsbench_executor,
         swebench_executor=swebench_executor,
     )
@@ -1133,6 +1312,7 @@ def _build_unified_runtime(
         config.budgets,
         condition_name=config.experiment.condition_name,
     )
+    judge_client = LLMClient(model=config.models.judge)
 
     return ExperimentRuntime(
         experiment_dir=experiment_dir,
@@ -1147,6 +1327,7 @@ def _build_unified_runtime(
             config=config,
             experiment_dir=experiment_dir,
             skill_advisor=skill_advisor,
+            judge_llm_client=judge_client,
         ),
     )
 
@@ -1172,6 +1353,7 @@ def _run_unified_experiment(
     max_workers: int,
     run_id: str | None,
     swebench_eval_instance_ids: list[str],
+    remote_harbor_config: GCPVMConfig | None = None,
 ) -> None:
     """Run SkillsBench, SWE-bench, or mixed selections in one evolution loop."""
     random.seed(seed)
@@ -1184,9 +1366,14 @@ def _run_unified_experiment(
     )
 
     _prepare_llm_credentials_or_exit(config)
-    if selection.has_skillsbench:
-        _ensure_harbor_available(config)
-    if selection.has_swebench:
+    needs_skillsbench_runtime = _needs_runtime_skillsbench(selection, config)
+    needs_swebench_runtime = _needs_runtime_swebench(selection, config)
+    if needs_skillsbench_runtime:
+        if remote_harbor_config is None:
+            _ensure_harbor_available(config)
+        else:
+            _ensure_gcloud_available()
+    if needs_swebench_runtime:
         try:
             swebench_helpers.validate_modal_credentials()
         except RuntimeError as exc:
@@ -1209,11 +1396,17 @@ def _run_unified_experiment(
         split=split,
         timeout=timeout,
         max_workers=max_workers,
+        remote_harbor_config=remote_harbor_config,
     )
 
     _print_unified_task_selection(selection)
     if selection.has_swebench:
         console.print(f"[bold]SWE-bench dataset:[/] {dataset_name} ({split})")
+    if remote_harbor_config is not None:
+        console.print(
+            "[bold]Harbor runtime:[/] "
+            f"GCP VM {remote_harbor_config.vm_name} ({remote_harbor_config.zone})"
+        )
     if swebench_eval_instance_ids:
         console.print(
             f"[bold]SWE-bench frozen eval instances:[/] {swebench_eval_instance_ids}"
@@ -1488,27 +1681,35 @@ def run(
             help="SWE-bench dataset split to use.",
         ),
     ] = swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
-    iterations: Annotated[int, typer.Option(help="Number of iterations")] = 30,
-    seed: Annotated[int, typer.Option(help="Random seed")] = 42,
+    iterations: Annotated[
+        int | None,
+        typer.Option(help="Number of iterations. Overrides experiment.num_iterations."),
+    ] = None,
+    seed: Annotated[
+        int | None,
+        typer.Option(help="Random seed. Overrides experiment.seed."),
+    ] = None,
     condition: Annotated[
-        str,
+        str | None,
         typer.Option(
             help=(
-                "Experiment condition: no_feedback | full_traces | shared_notes | "
-                "static_mediator | learned_mediator"
+                "Experiment condition. Overrides experiment.condition_name. "
+                "Allowed: no_feedback | full_traces | shared_notes | "
+                "static_mediator | learned_mediator."
             ),
         ),
-    ] = "learned_mediator",
+    ] = None,
     skill_updates: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--skill-updates",
             help=(
-                "Comma-separated skill updates allowed: none | executor | planner | "
-                "mediator | all"
+                "Comma-separated skill updates allowed. Overrides "
+                "experiment.skill_updates. Allowed: none | executor | planner | "
+                "mediator | all."
             ),
         ),
-    ] = "all",
+    ] = None,
     coevo_interval: Annotated[
         int | None,
         typer.Option(
@@ -1525,11 +1726,12 @@ def run(
             help="Override experiment.advisor_buffer_max for this run.",
         ),
     ] = None,
-    skill_validation_enabled: Annotated[
-        bool | None,
+    harbor_agent_setup_timeout_multiplier: Annotated[
+        float | None,
         typer.Option(
-            "--skill-validation/--no-skill-validation",
-            help="Enable or disable executor skill candidate validation.",
+            "--harbor-agent-setup-timeout-multiplier",
+            min=0.1,
+            help="Forwarded to Harbor for slow agent setup phases.",
         ),
     ] = None,
     run_id: Annotated[
@@ -1562,27 +1764,45 @@ def run(
         Path,
         typer.Option(help="Config directory"),
     ] = PROJECT_ROOT / "config",
+    cloud: Annotated[
+        bool,
+        typer.Option(
+            "--cloud",
+            help=(
+                "Run SkillsBench Harbor jobs on the configured GCP VM while "
+                "keeping the experiment control plane local."
+            ),
+        ),
+    ] = False,
+    cloud_env_file: Annotated[
+        Path,
+        typer.Option(
+            "--cloud-env-file",
+            help="Dotenv file containing GCP VM Harbor settings.",
+        ),
+    ] = PROJECT_ROOT / ".env",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run a unified SkillsBench, SWE-bench, or mixed co-evolution experiment."""
     _setup_logging(verbose)
 
-    condition_name = _validate_condition_name(condition)
-    try:
-        skill_update_config = parse_skill_updates(skill_updates)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    config = _apply_experiment_settings(
-        load_config(config_dir),
-        iterations=iterations,
-        seed=seed,
-        condition_name=condition_name,
-        skill_updates=skill_update_config,
-        coevo_interval=coevo_interval,
-        advisor_buffer_max=advisor_buffer_max,
-        skill_validation_enabled=skill_validation_enabled,
+    config = _load_config_or_bad_parameter(
+        config_dir,
+        overrides=_run_config_overrides(
+            iterations=iterations,
+            seed=seed,
+            condition=condition,
+            skill_updates=skill_updates,
+            coevo_interval=coevo_interval,
+            advisor_buffer_max=advisor_buffer_max,
+            harbor_agent_setup_timeout_multiplier=(
+                harbor_agent_setup_timeout_multiplier
+            ),
+        ),
     )
+    iterations = config.experiment.num_iterations
+    seed = config.experiment.seed
+    condition_name = config.experiment.condition_name
 
     _validate_or_raise_bad_parameter(config)
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
@@ -1605,6 +1825,11 @@ def run(
             "SWE-bench frozen eval requires an evolution SWE-bench selection "
             "(--swebench-instance or --swebench-limit)"
         )
+    remote_harbor_config = _load_remote_harbor_config(
+        enabled=cloud,
+        env_file=cloud_env_file,
+        selection=selection,
+    )
     swebench_eval_instance_ids: list[str] = []
     if swebench_eval_requested:
         swebench_eval_instance_ids = _swebench_instance_ids_from_unified_cli(
@@ -1629,8 +1854,8 @@ def run(
         max_workers=max_workers,
         run_id=run_id,
         swebench_eval_instance_ids=swebench_eval_instance_ids,
+        remote_harbor_config=remote_harbor_config,
     )
-
 
 @app.command()
 def matrix(
@@ -1647,8 +1872,14 @@ def matrix(
             f"Available: {_available_task_set_help()}"
         ),
     ),
-    iterations: int = typer.Option(30, help="Number of iterations per row"),
-    seed: int = typer.Option(42, help="Random seed reused for every row"),
+    iterations: int | None = typer.Option(
+        None,
+        help="Number of iterations per row. Overrides experiment.num_iterations.",
+    ),
+    seed: int | None = typer.Option(
+        None,
+        help="Random seed reused for every row. Overrides experiment.seed.",
+    ),
     coevo_interval: Annotated[
         int | None,
         typer.Option(
@@ -1665,26 +1896,23 @@ def matrix(
             help="Override experiment.advisor_buffer_max for every matrix row.",
         ),
     ] = None,
-    skill_validation_enabled: Annotated[
-        bool | None,
-        typer.Option(
-            "--skill-validation/--no-skill-validation",
-            help="Enable or disable executor skill candidate validation for every row.",
-        ),
-    ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Run the six-row baseline matrix with isolated per-row skills."""
     _setup_logging(verbose)
 
-    config = _apply_experiment_settings(
-        load_config(config_dir),
-        iterations=iterations,
-        seed=seed,
-        coevo_interval=coevo_interval,
-        advisor_buffer_max=advisor_buffer_max,
-        skill_validation_enabled=skill_validation_enabled,
+    config = _load_config_or_bad_parameter(
+        config_dir,
+        overrides=_run_config_overrides(
+            iterations=iterations,
+            seed=seed,
+            condition=None,
+            skill_updates=None,
+            coevo_interval=coevo_interval,
+            advisor_buffer_max=advisor_buffer_max,
+            harbor_agent_setup_timeout_multiplier=None,
+        ),
     )
     for preset_name in BASELINE_PRESET_NAMES:
         preset = get_baseline_preset(preset_name)
@@ -1702,8 +1930,9 @@ def matrix(
         task_set,
         benchmark_repo,
     )
-
     factory = ExperimentFactory(PROJECT_ROOT)
+    seed = config.experiment.seed
+    iterations = config.experiment.num_iterations
     matrix_dir = factory.create_matrix_dir(seed=seed, data_dir=config.paths.data_dir)
     rows = _build_matrix_runtimes(
         factory=factory,
@@ -1762,7 +1991,9 @@ def inspect_experiment(
     """Inspect an experiment output directory."""
     target_dir = experiment_dir
     if target_dir is None:
-        target_dir = _latest_experiment_dir(_experiments_root(load_config(config_dir)))
+        target_dir = _latest_experiment_dir(
+            _experiments_root(_load_config_or_bad_parameter(config_dir))
+        )
     payload = _inspection_payload(target_dir)
     if json_output:
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -1897,7 +2128,7 @@ def sync_skillsbench(
 ) -> None:
     """Fetch selected SkillsBench tasks into the configured local cache."""
     _setup_logging(verbose)
-    config = load_config(config_dir)
+    config = _load_config_or_bad_parameter(config_dir)
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
     task_ids = _sync_task_ids_from_cli(tasks, task_set)
 

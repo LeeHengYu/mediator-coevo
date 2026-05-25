@@ -9,12 +9,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from mediated_coevo.evolution.candidates import candidate_from_mapping
+
 from .base import BaseAgent
 
 if TYPE_CHECKING:
     from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
-    from mediated_coevo.models.skill import SkillProposal
+    from mediated_coevo.models.skill import SkillProposal, SkillUpdateCandidate
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.stores.history_store import HistoryEntry
 
@@ -35,6 +37,21 @@ UPDATE_RESPONSE_SCHEMA = (
     "Decide whether to update the skill. Respond with JSON:\n"
     '{"no_update": true} if no change needed, or\n'
     '{"new_content": "...", "reasoning": "..."}'
+)
+UPDATE_BATCH_RESPONSE_SCHEMA = (
+    "Draft 3 to 5 candidate skill updates. Respond with JSON only:\n"
+    '{"candidates": ['
+    '{"candidate_id": "short-stable-id", '
+    '"update_kind": "narrow_clarification | add_procedure | add_failure_guard | '
+    'remove_or_simplify_rule | task_specific_warning | no_update", '
+    '"hypothesis": "...", "risk": "...", "audit_score": 0.0, '
+    '"new_content": "...", "reasoning": "..."}'
+    "]}\n"
+    "Use update_kind=no_update with current content when no edit is warranted. "
+    "For every non-no_update candidate, new_content must be a complete, "
+    "semantically integrated rewrite of the current Markdown skill: merge the "
+    "new guidance into the existing structure, resolve duplicate or conflicting "
+    "rules, and do not append an addendum unless a new section is clearly needed."
 )
 
 
@@ -146,7 +163,17 @@ class PlannerAgent(BaseAgent):
         from mediated_coevo.runtime.token_budget import count_message_tokens
 
         system_tokens = count_message_tokens(model, messages)
-        return max(1, self._budgets.planner_context_tokens - system_tokens)
+        with_empty_user_tokens = count_message_tokens(
+            model,
+            [*messages, {"role": "user", "content": ""}],
+        )
+        user_message_overhead = max(0, with_empty_user_tokens - system_tokens)
+        return max(
+            1,
+            self._budgets.planner_context_tokens
+            - system_tokens
+            - user_message_overhead,
+        )
 
     def _build_user_prompt(
         self,
@@ -166,6 +193,17 @@ class PlannerAgent(BaseAgent):
         if action == "update_skill":
             return self._build_update_prompt(
                 context,
+                response_schema=UPDATE_RESPONSE_SCHEMA,
+                batch_mode=False,
+                model=model,
+                budgets=self._budgets,
+                budget=budget,
+            )
+        if action == "update_skill_batch":
+            return self._build_update_prompt(
+                context,
+                response_schema=UPDATE_BATCH_RESPONSE_SCHEMA,
+                batch_mode=True,
                 model=model,
                 budgets=self._budgets,
                 budget=budget,
@@ -205,10 +243,14 @@ class PlannerAgent(BaseAgent):
     ) -> TaskSpec:
         from mediated_coevo.models.task import TaskSpec
 
+        instruction = await self._compact_plan_instruction_if_needed(
+            task_id=task_id,
+            base_instruction=base_instruction,
+        )
         context: dict[str, Any] = {
             "action": "plan_task",
             "task_id": task_id,
-            "base_instruction": base_instruction,
+            "base_instruction": instruction,
             "current_skills": current_skills,
         }
         if prior_context:
@@ -222,6 +264,43 @@ class PlannerAgent(BaseAgent):
             skills_context=current_skills,
             planner_reasoning=parsed.get("reasoning"),
             iteration=iteration,
+        )
+
+    async def _compact_plan_instruction_if_needed(
+        self,
+        *,
+        task_id: str,
+        base_instruction: str,
+    ) -> str:
+        if not self._budgets:
+            return base_instruction
+
+        from mediated_coevo.evolution.compactor import compact_text_for_context
+        from mediated_coevo.runtime.token_budget import count_text_tokens
+
+        model = self.llm_client.model
+        instruction_tokens = count_text_tokens(model, base_instruction)
+        budget_tokens = max(
+            self._budgets.trace_excerpt_tokens,
+            self._budgets.planner_context_tokens // 2,
+        )
+        if instruction_tokens <= budget_tokens:
+            return base_instruction
+
+        compacted = await compact_text_for_context(
+            base_instruction,
+            llm_client=self.llm_client,
+            label=f"benchmark instruction for {task_id}",
+            model=model,
+            budget_tokens=budget_tokens,
+            completion_tokens=min(1024, self._budgets.planner_completion_tokens),
+            condition_name=self._condition_name,
+        )
+        return (
+            "## Compacted Benchmark Instruction\n"
+            "The original benchmark instruction exceeded the planner prompt budget. "
+            "This compacted version preserves the task goal and concrete issue signals.\n\n"
+            f"{compacted}"
         )
 
     async def suggest_skill_revision(
@@ -275,6 +354,54 @@ class PlannerAgent(BaseAgent):
             reasoning=parsed.get("reasoning", ""),
         )
 
+    async def suggest_skill_revision_batch(
+        self,
+        current_skill_content: str,
+        feedback: str | None,
+        edit_history: list[HistoryEntry],
+        *,
+        skill_id: str,
+        task_ids: list[str],
+        iteration: int = 0,
+    ) -> list[SkillUpdateCandidate]:
+        """Propose multiple candidate skill updates without writing to disk."""
+        from mediated_coevo.models.history_signals import PlannerSignal
+
+        context: dict[str, Any] = {
+            "action": "update_skill_batch",
+            "current_skill": current_skill_content,
+            "feedback": feedback,
+            "task_ids": task_ids,
+            "edit_history": [
+                {
+                    "iteration": e.iteration,
+                    "reasoning": (
+                        e.payload.reasoning
+                        if isinstance(e.payload, PlannerSignal)
+                        else ""
+                    ),
+                    "reward": e.reward,
+                }
+                for e in edit_history[-5:]
+            ],
+        }
+        result = await self.process(context)
+        parsed = result["parsed"]
+        raw_candidates = parsed.get("candidates")
+        if not isinstance(raw_candidates, list):
+            return []
+
+        candidates: list[SkillUpdateCandidate] = []
+        for raw_candidate in raw_candidates:
+            candidate = candidate_from_mapping(
+                raw_candidate,
+                skill_id=skill_id,
+                current_skill=current_skill_content,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        return candidates
+
     # ── Prompt builders ──
 
     @staticmethod
@@ -286,12 +413,26 @@ class PlannerAgent(BaseAgent):
         budget: int | None = None,
     ) -> str:
         if budgets and budget:
-            from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
+            from mediated_coevo.runtime.token_budget import (
+                BudgetSection,
+                count_text_tokens,
+                pack_sections,
+            )
+
+            task_header = (
+                f"Plan a task for task_id: {context.get('task_id', 'unknown')}"
+            )
+            response_schema = PLAN_RESPONSE_SCHEMA
+            fixed_required_tokens = count_text_tokens(
+                model,
+                f"{task_header}\n\n{response_schema}",
+            )
+            instruction_budget = max(1, budget - fixed_required_tokens)
 
             sections = [
                 BudgetSection(
                     "task_header",
-                    f"Plan a task for task_id: {context.get('task_id', 'unknown')}",
+                    task_header,
                     required=True,
                 )
             ]
@@ -306,6 +447,7 @@ class PlannerAgent(BaseAgent):
                             f"{instruction}"
                         ),
                         required=True,
+                        max_tokens=instruction_budget,
                     )
                 )
             if report := context.get("mediator_report"):
@@ -319,7 +461,7 @@ class PlannerAgent(BaseAgent):
             sections.append(
                 BudgetSection(
                     "response_schema",
-                    PLAN_RESPONSE_SCHEMA,
+                    response_schema,
                     required=True,
                 )
             )
@@ -342,6 +484,8 @@ class PlannerAgent(BaseAgent):
     def _build_update_prompt(
         context: dict[str, Any],
         *,
+        response_schema: str,
+        batch_mode: bool,
         model: str = "",
         budgets: BudgetsConfig | None = None,
         budget: int | None = None,
@@ -366,6 +510,13 @@ class PlannerAgent(BaseAgent):
                         max_tokens=budgets.mediator_report_tokens,
                     )
                 )
+            if batch_mode and (task_ids := context.get("task_ids")):
+                sections.append(
+                    BudgetSection(
+                        "candidate_scope",
+                        f"## Candidate Scope\nskill_id=executor task_ids={task_ids}",
+                    )
+                )
             if history := context.get("edit_history"):
                 sections.append(
                     BudgetSection(
@@ -377,7 +528,7 @@ class PlannerAgent(BaseAgent):
             sections.append(
                 BudgetSection(
                     "response_schema",
-                    UPDATE_RESPONSE_SCHEMA,
+                    response_schema,
                     required=True,
                 )
             )
@@ -389,7 +540,9 @@ class PlannerAgent(BaseAgent):
         ]
         if feedback := context.get("feedback"):
             parts.append(f"\n## Execution Feedback\n{feedback}")
+        if batch_mode and (task_ids := context.get("task_ids")):
+            parts.append(f"\n## Candidate Scope\nskill_id=executor task_ids={task_ids}")
         if history := context.get("edit_history"):
             parts.append(f"\n## Recent Edit History\n{history}")
-        parts.append(f"\n{UPDATE_RESPONSE_SCHEMA}")
+        parts.append(f"\n{response_schema}")
         return "\n".join(parts)
