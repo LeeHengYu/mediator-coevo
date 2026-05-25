@@ -328,15 +328,6 @@ class Orchestrator:
             record.advisor_reason = self.executor_skill_gate.last_advisor_reason
             record.advisor_rejection_id = self.executor_skill_gate.last_rejection_id
             record.proposal_ids = list(self.executor_skill_gate.last_proposal_ids)
-        logger.info(
-            "Iteration %d complete: condition=%s status=%s reward=%s tokens=%d duration=%.1fs",
-            _display_iteration(iteration),
-            condition,
-            trace.status,
-            _format_reward(trace.reward),
-            record.total_tokens,
-            duration,
-        )
         return record
 
     async def _judge_evolution_reward(
