@@ -19,6 +19,7 @@ from mediated_coevo.runtime.token_budget import (
     fit_text_to_tokens,
     pack_sections,
 )
+from tests.config_helpers import experiment_config
 
 
 def test_token_count_falls_back_when_litellm_counter_fails(monkeypatch):
@@ -216,7 +217,8 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.budgets.trace_excerpt_tokens = 20
     config.budgets.historical_summary_tokens = 30
@@ -270,7 +272,8 @@ def test_planner_constructed_prompt_fits_budget():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.budgets.max_skill_tokens = 30
     config.budgets.mediator_report_tokens = 30
@@ -307,7 +310,8 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.budgets.max_skill_tokens = 30
     config.budgets.mediator_report_tokens = 30

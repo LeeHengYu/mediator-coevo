@@ -43,6 +43,7 @@ from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 from mediated_coevo.runtime.token_budget import TokenBudgetEvent
+from tests.config_helpers import experiment_config
 
 
 def _bare_orchestrator(tmp_path: Path) -> Orchestrator:
@@ -448,7 +449,8 @@ def test_build_coevolution_record_captures_reflector_token_events():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch.skill_store = _EmptySkillStore()
 
@@ -492,7 +494,8 @@ def test_build_iteration_record_adds_compact_metric_fields():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch._previous_reward_by_task = {"task-A": 0.25}
     orch.planner = _LLMBackedComponent(_DrainClient("planner.plan_task"))
@@ -707,7 +710,8 @@ def test_zero_reward_harbor_run_is_logged_as_task_failure():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch._previous_reward_by_task = {}
     orch.planner = _LLMBackedComponent(_DrainClient("planner.plan_task"))
@@ -903,7 +907,8 @@ def _planner_reflection_orchestrator(
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch.config.experiment.skill_updates.executor = False
     orch.config.experiment.skill_updates.mediator = False
@@ -1004,7 +1009,8 @@ async def test_missing_task_is_recorded_as_env_failure_without_agent_calls(tmp_p
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch.experiment_dir = tmp_path
     orch.skill_advisor = _NoCallAdvisor()
@@ -1294,7 +1300,8 @@ async def test_previous_report_prior_context_is_keyed_by_task(tmp_path):
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch.experiment_dir = tmp_path
     orch.skill_advisor = _NoCallAdvisor()
@@ -1328,7 +1335,8 @@ async def test_run_iteration_logs_advisor_rejection_in_metrics_record(tmp_path):
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch.config.experiment.advisor_buffer_max = 1
     orch.experiment_dir = tmp_path
@@ -1370,7 +1378,8 @@ async def test_run_iteration_tags_pending_history_with_judge_reward(tmp_path):
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch.config.experiment.skill_updates.executor = False
     orch.experiment_dir = tmp_path
@@ -1432,7 +1441,8 @@ async def test_run_iteration_judges_initial_task_before_mediation_and_logs_one_b
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     orch.config.experiment.skill_updates.executor = False
     orch.experiment_dir = tmp_path
@@ -1561,7 +1571,8 @@ def _advisor_validation_orchestrator(
             executor="test-executor",
             mediator="test-mediator",
             judge="test-judge",
-        )
+        ),
+        experiment=experiment_config(),
     )
     orch.config.experiment.advisor_buffer_max = len(proposal_task_ids)
     orch.config.experiment.skill_validation.allow_contributing_fallback = (

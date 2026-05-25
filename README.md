@@ -416,10 +416,10 @@ Core run options:
 
 | Option                                         | Default            | Meaning                                                                 |
 | ---------------------------------------------- | ------------------ | ----------------------------------------------------------------------- |
-| `--iterations`                                 | `30`               | Number of experiment iterations.                                        |
-| `--seed`                                       | `42`               | Random seed.                                                            |
-| `--condition`                                  | `learned_mediator` | Feedback routing condition.                                             |
-| `--skill-updates`                              | `all`              | Which skill families may be committed.                                  |
+| `--iterations`                                 | config value       | Number of experiment iterations.                                        |
+| `--seed`                                       | config value       | Random seed.                                                            |
+| `--condition`                                  | config value       | Feedback routing condition.                                             |
+| `--skill-updates`                              | config value       | Which skill families may be committed.                                  |
 | `--advisor-buffer-max`                         | config value       | Executor proposal batch size override.                                  |
 | `--coevo-interval`                             | config value       | Planner/Mediator reflection interval override.                          |
 | `--run-id`                                     | generated          | Timestamp-prefixed output directory suffix.                             |
@@ -675,16 +675,20 @@ The current config controls:
 
 CLI options override the loaded config for a single run. The resolved config is
 persisted in the experiment directory as `config.toml`.
+Required experiment settings must be present in `default.toml` unless the CLI
+provides an override; otherwise the command fails before runtime setup and names
+the missing setting.
 
 Current config defaults include:
 
-- `experiment.num_iterations = 30`
-- `experiment.coevo_interval = 3`
-- `experiment.advisor_buffer_max = 3`
+- `experiment.num_iterations = 5`
+- `experiment.coevo_interval = 2`
+- `experiment.advisor_buffer_max = 2`
 - `experiment.seed = 42`
+- `experiment.condition_name = "learned_mediator"`
 - `experiment.allow_cross_task_feedback = true`
 - `executor_runtime.agent_name = "hermes"`
-- `executor_runtime.harbor_timeout_sec = 7200`
+- `executor_runtime.harbor_timeout_sec = 5400`
 - `executor_runtime.injected_skill_name = "executor"` names the Executor policy
   channel. The policy is rendered through the shared envelope; it is not
   automatically copied as a task-local domain skill for every benchmark.

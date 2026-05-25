@@ -4,6 +4,7 @@ import tomllib
 
 from mediated_coevo.core.config import Config
 from mediated_coevo.main import ExperimentFactory
+from tests.config_helpers import experiment_config
 
 
 def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
@@ -18,7 +19,8 @@ def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.experiment.shared_notes = None
 

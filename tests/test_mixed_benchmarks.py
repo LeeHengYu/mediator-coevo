@@ -18,6 +18,7 @@ from mediated_coevo.core.config import Config
 from mediated_coevo.main import ExperimentRuntime, MatrixRuntime, app
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
+from tests.config_helpers import experiment_config
 
 
 @dataclass
@@ -97,7 +98,8 @@ def test_runtime_routing_includes_validation_only_swebench_when_enabled():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
     config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = True
@@ -122,7 +124,8 @@ def test_runtime_routing_ignores_validation_only_swebench_when_disabled():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
     config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = (
@@ -187,7 +190,8 @@ def test_swebench_executor_uses_openrouter_model_for_llm_patch_generation(
             "executor": "google/gemini-3-flash-preview",
             "mediator": "openrouter/test/mediator",
             "judge": "openrouter/test/judge",
-        }
+        },
+        experiment=experiment_config(),
     )
 
     executor = main_module._build_swebench_executor(
@@ -392,7 +396,8 @@ def test_unified_experiment_invokes_judge_after_summary(monkeypatch, tmp_path):
                 "executor": "e",
                 "mediator": "m",
                 "judge": "j",
-            }
+            },
+            experiment=experiment_config(),
         )
 
         async def run_experiment(self, task_ids, iterations):
@@ -459,7 +464,8 @@ def test_matrix_invokes_judge_for_each_row(monkeypatch):
                 "executor": "e",
                 "mediator": "m",
                 "judge": "j",
-            }
+            },
+            experiment=experiment_config(),
         )
         history_store = object()
 
@@ -516,7 +522,8 @@ def test_unified_experiment_root_prefixes_user_run_id_with_timestamp(
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.paths.skills_dir = "skills"
     config.paths.data_dir = "data"

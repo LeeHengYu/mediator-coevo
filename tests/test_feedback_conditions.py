@@ -18,6 +18,7 @@ from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
+from tests.config_helpers import experiment_config
 
 
 class _Task:
@@ -248,7 +249,8 @@ def _orchestrator(
             executor="test-executor",
             mediator="test-mediator",
             judge="test-judge",
-        )
+        ),
+        experiment=experiment_config(),
     )
     orch.config.experiment.condition_name = condition
     orch.config.experiment.shared_notes = "shared note"
@@ -703,7 +705,8 @@ def test_condition_assignment_and_cli_validation_reject_unknown_names():
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     with pytest.raises(ValidationError):
         config.experiment.condition_name = "bad-condition"

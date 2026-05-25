@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +19,34 @@ DEFAULT_SKILLSBENCH_ARCHIVE_URL = (
 
 class ModelConfigError(ValueError):
     """Raised when configured model names are invalid."""
+
+
+class ConfigLoadError(ValueError):
+    """Raised when configuration files are missing required settings."""
+
+
+REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
+    ("experiment", "num_iterations"),
+    ("experiment", "coevo_interval"),
+    ("experiment", "seed"),
+    ("experiment", "advisor_buffer_max"),
+    ("experiment", "condition_name"),
+    ("experiment", "allow_cross_task_feedback"),
+    ("experiment", "skill_updates", "executor"),
+    ("experiment", "skill_updates", "planner"),
+    ("experiment", "skill_updates", "mediator"),
+)
+
+CONFIG_CLI_HINTS: dict[str, str] = {
+    "experiment.num_iterations": "--iterations",
+    "experiment.coevo_interval": "--coevo-interval",
+    "experiment.seed": "--seed",
+    "experiment.advisor_buffer_max": "--advisor-buffer-max",
+    "experiment.condition_name": "--condition",
+    "experiment.skill_updates.executor": "--skill-updates",
+    "experiment.skill_updates.planner": "--skill-updates",
+    "experiment.skill_updates.mediator": "--skill-updates",
+}
 
 
 def normalize_openrouter_model_name(model: str) -> str:
@@ -82,9 +111,9 @@ class JudgeConfig(BaseModel):
 class SkillUpdateConfig(BaseModel):
     """Independent permissions for committing each runtime skill family."""
 
-    executor: bool = True
-    planner: bool = True
-    mediator: bool = True
+    executor: bool
+    planner: bool
+    mediator: bool
 
 
 class SkillValidationConfig(BaseModel):
@@ -111,12 +140,12 @@ class BenchmarkSelectionConfig(BaseModel):
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
-    num_iterations: int = 30
-    coevo_interval: int = 5
-    seed: int = 42
-    advisor_buffer_max: int = 10
-    condition_name: ConditionName = "learned_mediator"
-    skill_updates: SkillUpdateConfig = Field(default_factory=SkillUpdateConfig)
+    num_iterations: int
+    coevo_interval: int
+    seed: int
+    advisor_buffer_max: int
+    condition_name: ConditionName
+    skill_updates: SkillUpdateConfig
     skill_validation: SkillValidationConfig = Field(
         default_factory=SkillValidationConfig
     )
@@ -125,7 +154,7 @@ class ExperimentConfig(BaseModel):
     )
     baseline_preset: str | None = None
     shared_notes: str | None = None
-    allow_cross_task_feedback: bool = False
+    allow_cross_task_feedback: bool
 
 
 class PathsConfig(BaseModel):
@@ -160,7 +189,7 @@ class Config(BaseModel):
 
     models: ModelsConfig
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
-    experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
+    experiment: ExperimentConfig
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     executor_runtime: ExecutorRuntimeConfig = Field(
@@ -178,7 +207,11 @@ class Config(BaseModel):
         return self
 
 
-def load_config(config_dir: Path) -> Config:
+def load_config(
+    config_dir: Path,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> Config:
     """Load default.toml from config_dir."""
     default_path = config_dir / "default.toml"
     data: dict = {}
@@ -187,4 +220,49 @@ def load_config(config_dir: Path) -> Config:
         with open(default_path, "rb") as f:
             data = tomllib.load(f)
 
+    if overrides:
+        _deep_merge(data, overrides)
+    missing_paths = _missing_required_config_paths(data)
+    if missing_paths:
+        raise ConfigLoadError(_missing_config_message(default_path, missing_paths))
+
     return Config(**data)
+
+
+def _deep_merge(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    """Merge CLI override mappings into raw TOML data before validation."""
+    for key, value in source.items():
+        if (
+            isinstance(value, Mapping)
+            and isinstance(target.get(key), dict)
+        ):
+            _deep_merge(target[key], value)
+            continue
+        target[key] = value
+
+
+def _missing_required_config_paths(data: Mapping[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for path in REQUIRED_CONFIG_PATHS:
+        current: Any = data
+        for part in path:
+            if not isinstance(current, Mapping) or part not in current:
+                missing.append(".".join(path))
+                break
+            current = current[part]
+    return missing
+
+
+def _missing_config_message(default_path: Path, missing_paths: list[str]) -> str:
+    details = []
+    for path in missing_paths:
+        cli_hint = CONFIG_CLI_HINTS.get(path)
+        if cli_hint is None:
+            details.append(path)
+        else:
+            details.append(f"{path} ({cli_hint})")
+    joined = ", ".join(details)
+    return (
+        f"missing required config setting(s) in {default_path}: {joined}. "
+        "Set them in default.toml or pass the matching CLI option when available."
+    )

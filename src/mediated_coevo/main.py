@@ -64,6 +64,7 @@ from mediated_coevo.cloud.vm import (
 )
 from mediated_coevo.core.config import (
     Config,
+    ConfigLoadError,
     SkillUpdateConfig,
     load_config,
     normalize_openrouter_model_name,
@@ -287,6 +288,60 @@ def _build_benchmark_repo(project_root: Path, config: Config) -> SkillsBenchRepo
     )
 
 
+def _load_config_or_bad_parameter(
+    config_dir: Path,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> Config:
+    try:
+        return load_config(config_dir, overrides=overrides)
+    except ConfigLoadError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _nested_override(section: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        section[key] = value
+
+
+def _run_config_overrides(
+    *,
+    iterations: int | None,
+    seed: int | None,
+    condition: str | None,
+    skill_updates: str | None,
+    coevo_interval: int | None,
+    advisor_buffer_max: int | None,
+    harbor_agent_setup_timeout_multiplier: float | None,
+) -> dict[str, Any]:
+    experiment: dict[str, Any] = {}
+    _nested_override(experiment, "num_iterations", iterations)
+    _nested_override(experiment, "seed", seed)
+    _nested_override(experiment, "coevo_interval", coevo_interval)
+    _nested_override(experiment, "advisor_buffer_max", advisor_buffer_max)
+    if condition is not None:
+        experiment["condition_name"] = _validate_condition_name(condition)
+    if skill_updates is not None:
+        try:
+            experiment["skill_updates"] = parse_skill_updates(skill_updates).model_dump()
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    executor_runtime: dict[str, Any] = {}
+    _nested_override(
+        executor_runtime,
+        "harbor_agent_setup_timeout_multiplier",
+        harbor_agent_setup_timeout_multiplier,
+    )
+
+    overrides: dict[str, Any] = {}
+    if experiment:
+        overrides["experiment"] = experiment
+    if executor_runtime:
+        overrides["executor_runtime"] = executor_runtime
+    return overrides
+
+
 def _available_task_set_help() -> str:
     return ", ".join(sorted([*TASK_SETS, SKILLSBENCH_ALL_TASK_SET]))
 
@@ -508,8 +563,8 @@ def _prepare_llm_credentials_or_exit(config: Config) -> Config:
 def _apply_experiment_settings(
     config: Config,
     *,
-    iterations: int,
-    seed: int,
+    iterations: int | None = None,
+    seed: int | None = None,
     condition_name: ConditionName | None = None,
     skill_updates: SkillUpdateConfig | None = None,
     baseline_preset: str | None = None,
@@ -518,8 +573,10 @@ def _apply_experiment_settings(
     harbor_agent_setup_timeout_multiplier: float | None = None,
 ) -> Config:
     """Apply CLI experiment settings to a loaded config object."""
-    config.experiment.num_iterations = iterations
-    config.experiment.seed = seed
+    if iterations is not None:
+        config.experiment.num_iterations = iterations
+    if seed is not None:
+        config.experiment.seed = seed
     if condition_name is not None:
         config.experiment.condition_name = condition_name
     if skill_updates is not None:
@@ -1624,27 +1681,35 @@ def run(
             help="SWE-bench dataset split to use.",
         ),
     ] = swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
-    iterations: Annotated[int, typer.Option(help="Number of iterations")] = 30,
-    seed: Annotated[int, typer.Option(help="Random seed")] = 42,
+    iterations: Annotated[
+        int | None,
+        typer.Option(help="Number of iterations. Overrides experiment.num_iterations."),
+    ] = None,
+    seed: Annotated[
+        int | None,
+        typer.Option(help="Random seed. Overrides experiment.seed."),
+    ] = None,
     condition: Annotated[
-        str,
+        str | None,
         typer.Option(
             help=(
-                "Experiment condition: no_feedback | full_traces | shared_notes | "
-                "static_mediator | learned_mediator"
+                "Experiment condition. Overrides experiment.condition_name. "
+                "Allowed: no_feedback | full_traces | shared_notes | "
+                "static_mediator | learned_mediator."
             ),
         ),
-    ] = "learned_mediator",
+    ] = None,
     skill_updates: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--skill-updates",
             help=(
-                "Comma-separated skill updates allowed: none | executor | planner | "
-                "mediator | all"
+                "Comma-separated skill updates allowed. Overrides "
+                "experiment.skill_updates. Allowed: none | executor | planner | "
+                "mediator | all."
             ),
         ),
-    ] = "all",
+    ] = None,
     coevo_interval: Annotated[
         int | None,
         typer.Option(
@@ -1721,22 +1786,23 @@ def run(
     """Run a unified SkillsBench, SWE-bench, or mixed co-evolution experiment."""
     _setup_logging(verbose)
 
-    condition_name = _validate_condition_name(condition)
-    try:
-        skill_update_config = parse_skill_updates(skill_updates)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    config = _apply_experiment_settings(
-        load_config(config_dir),
-        iterations=iterations,
-        seed=seed,
-        condition_name=condition_name,
-        skill_updates=skill_update_config,
-        coevo_interval=coevo_interval,
-        advisor_buffer_max=advisor_buffer_max,
-        harbor_agent_setup_timeout_multiplier=harbor_agent_setup_timeout_multiplier,
+    config = _load_config_or_bad_parameter(
+        config_dir,
+        overrides=_run_config_overrides(
+            iterations=iterations,
+            seed=seed,
+            condition=condition,
+            skill_updates=skill_updates,
+            coevo_interval=coevo_interval,
+            advisor_buffer_max=advisor_buffer_max,
+            harbor_agent_setup_timeout_multiplier=(
+                harbor_agent_setup_timeout_multiplier
+            ),
+        ),
     )
+    iterations = config.experiment.num_iterations
+    seed = config.experiment.seed
+    condition_name = config.experiment.condition_name
 
     _validate_or_raise_bad_parameter(config)
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
@@ -1806,8 +1872,14 @@ def matrix(
             f"Available: {_available_task_set_help()}"
         ),
     ),
-    iterations: int = typer.Option(30, help="Number of iterations per row"),
-    seed: int = typer.Option(42, help="Random seed reused for every row"),
+    iterations: int | None = typer.Option(
+        None,
+        help="Number of iterations per row. Overrides experiment.num_iterations.",
+    ),
+    seed: int | None = typer.Option(
+        None,
+        help="Random seed reused for every row. Overrides experiment.seed.",
+    ),
     coevo_interval: Annotated[
         int | None,
         typer.Option(
@@ -1830,12 +1902,17 @@ def matrix(
     """Run the six-row baseline matrix with isolated per-row skills."""
     _setup_logging(verbose)
 
-    config = _apply_experiment_settings(
-        load_config(config_dir),
-        iterations=iterations,
-        seed=seed,
-        coevo_interval=coevo_interval,
-        advisor_buffer_max=advisor_buffer_max,
+    config = _load_config_or_bad_parameter(
+        config_dir,
+        overrides=_run_config_overrides(
+            iterations=iterations,
+            seed=seed,
+            condition=None,
+            skill_updates=None,
+            coevo_interval=coevo_interval,
+            advisor_buffer_max=advisor_buffer_max,
+            harbor_agent_setup_timeout_multiplier=None,
+        ),
     )
     for preset_name in BASELINE_PRESET_NAMES:
         preset = get_baseline_preset(preset_name)
@@ -1853,8 +1930,9 @@ def matrix(
         task_set,
         benchmark_repo,
     )
-
     factory = ExperimentFactory(PROJECT_ROOT)
+    seed = config.experiment.seed
+    iterations = config.experiment.num_iterations
     matrix_dir = factory.create_matrix_dir(seed=seed, data_dir=config.paths.data_dir)
     rows = _build_matrix_runtimes(
         factory=factory,
@@ -1913,7 +1991,9 @@ def inspect_experiment(
     """Inspect an experiment output directory."""
     target_dir = experiment_dir
     if target_dir is None:
-        target_dir = _latest_experiment_dir(_experiments_root(load_config(config_dir)))
+        target_dir = _latest_experiment_dir(
+            _experiments_root(_load_config_or_bad_parameter(config_dir))
+        )
     payload = _inspection_payload(target_dir)
     if json_output:
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -2048,7 +2128,7 @@ def sync_skillsbench(
 ) -> None:
     """Fetch selected SkillsBench tasks into the configured local cache."""
     _setup_logging(verbose)
-    config = load_config(config_dir)
+    config = _load_config_or_bad_parameter(config_dir)
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
     task_ids = _sync_task_ids_from_cli(tasks, task_set)
 

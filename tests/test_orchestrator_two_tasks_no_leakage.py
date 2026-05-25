@@ -14,6 +14,7 @@ from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
+from tests.config_helpers import experiment_config
 
 
 class _LLM:
@@ -152,7 +153,8 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.experiment.condition_name = "learned_mediator"
     config.experiment.coevo_interval = 99
@@ -271,7 +273,8 @@ async def test_full_traces_cross_task_feedback_is_round_causal(tmp_path):
             "executor": "test-executor",
             "mediator": "test-mediator",
             "judge": "test-judge",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.experiment.condition_name = "full_traces"
     config.experiment.allow_cross_task_feedback = True

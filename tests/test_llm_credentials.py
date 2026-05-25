@@ -9,6 +9,7 @@ from mediated_coevo import main as main_module
 from mediated_coevo.core.config import Config, ModelConfigError, ModelsConfig
 from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_credentials
 from mediated_coevo.main import ExperimentFactory, app
+from tests.config_helpers import experiment_config
 
 
 def test_config_normalize_models_keeps_executor_model_harbor_ready():
@@ -18,7 +19,8 @@ def test_config_normalize_models_keeps_executor_model_harbor_ready():
             "executor": "openrouter/google/gemini-3-flash-preview",
             "mediator": "openai/gpt-5.5",
             "judge": "openai/gpt-5.5",
-        }
+        },
+        experiment=experiment_config(),
     )
 
     config.normalize_models()
@@ -36,7 +38,8 @@ def test_config_normalize_models_collapses_duplicate_openrouter_prefixes():
             "executor": "openrouter/openrouter/google/gemini-3-flash-preview",
             "mediator": "openrouter/openrouter/openai/gpt-5.5",
             "judge": "openrouter/openrouter/qwen/qwen3.6-flash",
-        }
+        },
+        experiment=experiment_config(),
     )
 
     config.normalize_models()
@@ -54,7 +57,8 @@ def test_config_normalize_models_rejects_blank_model_name():
             "executor": "google/gemini-3-flash-preview",
             "mediator": "openai/gpt-5.5",
             "judge": "   ",
-        }
+        },
+        experiment=experiment_config(),
     )
 
     with pytest.raises(ModelConfigError, match="model names must be non-empty"):
@@ -69,7 +73,8 @@ def test_config_normalize_models_rejects_prefix_only_model_names(model: str):
             executor="google/gemini-3-flash-preview",
             mediator="openai/gpt-5.5",
             judge=model,
-        )
+        ),
+        experiment=experiment_config(),
     )
 
     with pytest.raises(ModelConfigError, match="provider and model"):
@@ -117,7 +122,8 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
             "executor": "google/gemini-3-flash-preview",
             "mediator": "openrouter/openai/gpt-5.5",
             "judge": "openai/gpt-5.5",
-        }
+        },
+        experiment=experiment_config(),
     )
     config.paths.skills_dir = "skills"
     main_module._prepare_llm_credentials_or_exit(config)
