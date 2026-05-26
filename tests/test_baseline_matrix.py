@@ -518,6 +518,11 @@ class _SkillStore:
         return {}
 
 
+class _PairableHistoryStore:
+    def tagged_task_counts(self, agent_role: str) -> dict[str, int]:
+        return {"task-A": 2}
+
+
 @pytest.mark.asyncio
 async def test_planner_and_mediator_reflection_are_independently_gated(monkeypatch):
     calls: list[str] = []
@@ -540,7 +545,7 @@ async def test_planner_and_mediator_reflection_are_independently_gated(monkeypat
 
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = _config()
-    orch.history_store = object()
+    orch.history_store = _PairableHistoryStore()
     orch.skill_store = _SkillStore()
     orch.planner = _Planner()
     orch.mediator = _Mediator()
@@ -562,6 +567,20 @@ async def test_planner_and_mediator_reflection_are_independently_gated(monkeypat
     )
     assert await orch._coevolve(4, "no_feedback") is None
     assert calls == ["mediator"]
+
+
+def test_reflection_defers_until_same_task_history_is_pairable(caplog):
+    class _SparseHistoryStore:
+        def tagged_task_counts(self, agent_role: str) -> dict[str, int]:
+            return {"task-A": 1, "task-B": 1}
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.history_store = _SparseHistoryStore()
+    caplog.set_level("INFO")
+
+    assert orch._reflection_has_pairable_history("mediator") is False
+    assert "Mediator reflection deferred" in caplog.text
+    assert "need at least two tagged same-task history entries" in caplog.text
 
 
 def test_metrics_rows_include_baseline_and_skill_update_policy():

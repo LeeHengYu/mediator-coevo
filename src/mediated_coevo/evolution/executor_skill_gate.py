@@ -161,6 +161,7 @@ class ExecutorSkillGate:
             agent_role="planner",
             tagged_only=True,
         )
+        rejected_update_history = self._compact_rejected_update_history()
         candidates = []
         batch_method = getattr(self.planner, "suggest_skill_revision_batch", None)
         if callable(batch_method):
@@ -168,6 +169,7 @@ class ExecutorSkillGate:
                 current_skill_content=current_skill,
                 feedback=advisor_feedback,
                 edit_history=edit_history,
+                rejected_update_history=rejected_update_history,
                 skill_id="executor",
                 task_ids=contributing_tasks,
                 iteration=iteration,
@@ -335,6 +337,54 @@ class ExecutorSkillGate:
             ],
         )
         return self.history_store.record_rejected_proposals(rejected_batch)
+
+    def _compact_rejected_update_history(self) -> list[dict[str, Any]]:
+        """Return concise negative evidence from recently rejected updates."""
+        summaries: list[dict[str, Any]] = []
+        for batch in self.history_store.query_rejected_proposals(
+            skill_id="executor",
+            recent=5,
+        ):
+            validation = batch.validation
+            validation_summary: dict[str, Any] | None = None
+            if validation is not None:
+                validation_summary = {
+                    "decision": validation.decision,
+                    "reason": validation.reason,
+                    "current_mean_reward": validation.current_mean_reward,
+                    "candidate_mean_reward": validation.candidate_mean_reward,
+                    "mean_delta": validation.mean_delta,
+                    "regressed_task_ids": [
+                        result.task_id
+                        for result in validation.task_results
+                        if result.regressed
+                    ],
+                    "unusable_task_ids": [
+                        result.task_id
+                        for result in validation.task_results
+                        if not result.usable
+                    ],
+                }
+            summaries.append(
+                {
+                    "batch_id": batch.batch_id,
+                    "iteration": batch.iteration,
+                    "reason": batch.reason,
+                    "task_ids": _dedupe_task_ids(batch.task_ids),
+                    "advisor_feedback": batch.advisor_feedback,
+                    "candidate_batch_id": batch.candidate_batch_id,
+                    "validation": validation_summary,
+                    "proposal_refs": [
+                        {
+                            "task_id": proposal.task_id,
+                            "reward": proposal.reward,
+                            "reward_source": proposal.reward_source,
+                        }
+                        for proposal in batch.proposals
+                    ],
+                }
+            )
+        return summaries
 
     def _select_validation_task_ids(
         self,

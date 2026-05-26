@@ -122,14 +122,16 @@ Planner and Mediator meta-skill evolution runs at the co-evolution interval:
 
 ```text
 same-task history -> group-relative pairs -> LLM reflection prompt
-                  -> candidate skill rewrites -> skill commit gate
+                  -> candidate skill rewrites -> candidate audit
+                  -> empirical validation -> meta-skill commit
 ```
 
 The reflection prompt shows each worse/better pair with its evolution reward and
-task-relative delta. Mediator reflection currently commits after candidate audit
-and similarity checking. Planner reflection asks for two candidate skill
-rewrites, validates both empirically, and commits the accepted candidate with
-the higher validation reward.
+task-relative delta. Planner and Mediator reflection each ask for two candidate
+skill rewrites, validate them empirically, and commit only an accepted candidate
+with the higher validation reward. Mediator validation replays a shared source
+trace through current and candidate mediator protocols, then scores the executor
+skill candidate induced by that feedback through the executor validation gate.
 
 The validation task pool comes from `experiment.skill_validation`. Executor
 validation compares the old and candidate Executor policies on the same selected
@@ -502,6 +504,14 @@ uv run medcoevo inspect --json
 `inspect` understands both single-run directories and baseline matrix
 directories.
 
+Audit skill-update provenance, adjacent reward effects, delayed Mediator report
+effects, committed-update ledger entries, rejected reflection evidence, diff
+artifact paths, and adjacent reward regressions from an experiment metrics file:
+
+```bash
+uv run python -m mediated_coevo.analysis.evolution_audit data/experiments/<run-dir>
+```
+
 ## `skillsbench sync`
 
 SkillsBench tasks are cached under `benchmarks/skillsbench/tasks/`. Missing
@@ -606,10 +616,12 @@ data/experiments/<timestamp>-<run-id>/
 |-- artifacts/
 |   |-- reports/
 |   |-- traces/
-|   `-- validation/
+|   |-- validation/
+|   `-- skill_updates/
 |-- history/
 |   |-- history.jsonl
-|   `-- rejected_proposals.jsonl
+|   |-- rejected_proposals.jsonl
+|   `-- rejected_reflections.jsonl
 |-- jobs/
 |-- skills/
 `-- skills_snapshots/
@@ -623,12 +635,17 @@ Important files:
   totals, per-task summaries, and environment failure count.
 - `artifacts/traces/`: normalized task execution traces.
 - `artifacts/reports/`: Mediator reports.
-- `artifacts/validation/`: Executor skill and Planner reflection validation
-  evidence when enabled.
+- `artifacts/validation/`: Executor skill, Planner reflection, and Mediator
+  reflection validation evidence when enabled.
+- `artifacts/skill_updates/`: committed skill update ledger, full update JSON,
+  and readable diffs for post-run regression analysis.
 - `history/history.jsonl`: feedback history entries used for later context and
-  contrastive reflection.
+  contrastive reflection; the evolution audit uses tagged Mediator rows to
+  report delayed same-task reward movement after each report.
 - `history/rejected_proposals.jsonl`: rejected advisor batches or validation
   failures.
+- `history/rejected_reflections.jsonl`: rejected Planner/Mediator reflection
+  candidates retained as negative evidence for future reflection prompts.
 - `skills/`: run-local skill copy.
 - `skills_snapshots/`: committed skill snapshots.
 

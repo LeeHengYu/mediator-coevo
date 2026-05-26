@@ -170,7 +170,7 @@ def select_top_quartile_candidate(
         key=lambda candidate: (candidate.audit_score, candidate.candidate_id),
         reverse=True,
     )
-    top_count = max(1, ceil(len(ranked) * 0.5))
+    top_count = max(1, ceil(len(ranked) * 0.25))
     top_quartile = ranked[:top_count]
     return random.Random(batch.selection_seed).choice(top_quartile)
 

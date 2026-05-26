@@ -22,6 +22,7 @@ from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import (
     AdvisorBatchProvenance,
     SkillUpdate,
+    SkillUpdateLedgerEntry,
 )
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
@@ -239,6 +240,76 @@ def attach_skill_identity(
         skill_updates.append(record.skill_update)
     for skill_update in skill_updates:
         skill_update.skill_version = skill_version
+
+
+def record_skill_updates(record: IterationRecord) -> list[SkillUpdate]:
+    """Return all committed skill updates attached to a record."""
+    updates = list(record.skill_updates)
+    if record.skill_update:
+        updates.append(record.skill_update)
+    return updates
+
+
+def build_skill_update_ledger_entry(
+    *,
+    record: IterationRecord,
+    update: SkillUpdate,
+    update_id: str,
+    artifact_path: str | None = None,
+    diff_path: str | None = None,
+) -> SkillUpdateLedgerEntry:
+    """Build a compact committed-update ledger entry."""
+    provenance = update.provenance
+    validation = provenance.validation if provenance is not None else None
+    return SkillUpdateLedgerEntry(
+        update_id=update_id,
+        iteration=update.iteration,
+        skill_id=update.skill_id,
+        skill_version=update.skill_version,
+        record_task_id=record.task_id,
+        update_task_id=update.task_id,
+        task_ids=list(provenance.task_ids if provenance is not None else []),
+        old_skill_hash=update.old_skill_hash,
+        new_skill_hash=update.new_skill_hash,
+        provenance_kind=provenance.kind if provenance is not None else None,
+        decision=provenance.decision if provenance is not None else None,
+        reason=provenance.reason if provenance is not None else update.reasoning,
+        rollback_snapshot=(
+            provenance.rollback_snapshot if provenance is not None else None
+        ),
+        candidate_batch_id=(
+            provenance.candidate_batch_id if provenance is not None else None
+        ),
+        candidate_batch_path=(
+            provenance.candidate_batch_path if provenance is not None else None
+        ),
+        selected_candidate_id=(
+            provenance.selected_candidate_id if provenance is not None else None
+        ),
+        selected_update_kind=(
+            provenance.selected_update_kind if provenance is not None else None
+        ),
+        candidate_count=len(provenance.candidate_refs) if provenance is not None else 0,
+        validation_decision=validation.decision if validation is not None else None,
+        validation_reason=validation.reason if validation is not None else None,
+        validation_current_mean_reward=(
+            validation.current_mean_reward if validation is not None else None
+        ),
+        validation_candidate_mean_reward=(
+            validation.candidate_mean_reward if validation is not None else None
+        ),
+        validation_mean_delta=validation.mean_delta if validation is not None else None,
+        validation_task_ids=list(validation.task_ids if validation is not None else []),
+        validation_task_count=(
+            len(validation.task_results) if validation is not None else 0
+        ),
+        reward=record.reward,
+        delta_reward=record.delta_reward,
+        success=record.success,
+        verifier_status=record.verifier_status,
+        artifact_path=artifact_path,
+        diff_path=diff_path,
+    )
 
 
 def skill_version(iteration: int) -> str:

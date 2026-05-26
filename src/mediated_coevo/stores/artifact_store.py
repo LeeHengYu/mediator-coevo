@@ -5,6 +5,8 @@ File-backed JSON store indexed by task_id and iteration.
 
 from __future__ import annotations
 
+import difflib
+import json
 import logging
 from pathlib import Path
 from typing import TypeVar
@@ -17,7 +19,7 @@ from mediated_coevo.evolution.compactor import (
     trace_header_summary,
 )
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillUpdateCandidateBatch
+from mediated_coevo.models.skill import SkillUpdate, SkillUpdateCandidateBatch
 from mediated_coevo.models.trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
@@ -34,10 +36,12 @@ class ArtifactStore:
         self._reports_dir = base_dir / "reports"
         self._validation_dir = base_dir / "validation"
         self._candidate_batches_dir = base_dir / "candidate_batches"
+        self._skill_updates_dir = base_dir / "skill_updates"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
         self._reports_dir.mkdir(parents=True, exist_ok=True)
         self._validation_dir.mkdir(parents=True, exist_ok=True)
         self._candidate_batches_dir.mkdir(parents=True, exist_ok=True)
+        self._skill_updates_dir.mkdir(parents=True, exist_ok=True)
 
     def store_trace(self, trace: ExecutionTrace, *, overwrite: bool = False) -> Path:
         """Persist an execution trace. Returns the file path."""
@@ -126,6 +130,41 @@ class ArtifactStore:
         logger.debug("Stored candidate batch: %s", path)
         return path
 
+    def store_skill_update(
+        self,
+        update_id: str,
+        update: SkillUpdate,
+        *,
+        overwrite: bool = False,
+    ) -> tuple[Path, Path | None]:
+        """Persist a committed skill update and a readable content diff."""
+        update_dir = self._skill_updates_dir / update_id
+        update_dir.mkdir(parents=True, exist_ok=True)
+        update_path = update_dir / "update.json"
+        diff_path = update_dir / "changes.diff"
+        if update_path.exists() and not overwrite:
+            raise FileExistsError(f"Skill update already exists: {update_path}")
+
+        update_path.write_text(update.model_dump_json(indent=2))
+        diff_text = _skill_update_diff(update)
+        written_diff_path = None
+        if diff_text:
+            if diff_path.exists() and not overwrite:
+                raise FileExistsError(f"Skill update diff already exists: {diff_path}")
+            diff_path.write_text(diff_text)
+            written_diff_path = diff_path
+        logger.debug("Stored skill update artifact: %s", update_path)
+        return update_path, written_diff_path
+
+    def append_skill_update_history(self, entry: BaseModel) -> Path:
+        """Append one compact committed-update ledger entry."""
+        path = self._skill_updates_dir / "skill_update_history.jsonl"
+        with path.open("a", encoding="utf-8") as history_file:
+            payload = json.dumps(entry.model_dump(mode="json"), sort_keys=True)
+            history_file.write(payload)
+            history_file.write("\n")
+        return path
+
     def load_trace(self, task_id: str, iteration: int) -> ExecutionTrace | None:
         filename = f"{task_id}_iter{iteration:04d}.json"
         path = self._traces_dir / filename
@@ -208,3 +247,15 @@ class ArtifactStore:
                 )
             summaries.append(summary)
         return summaries
+
+
+def _skill_update_diff(update: SkillUpdate) -> str:
+    old_lines = update.old_content.splitlines(keepends=True)
+    new_lines = update.new_content.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"{update.skill_id}/SKILL.md@old",
+        tofile=f"{update.skill_id}/SKILL.md@new",
+    )
+    return "".join(diff)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from mediated_coevo.evolution.reflector import Reflector
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
+from mediated_coevo.models.skill import SkillValidationResult
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
@@ -21,7 +24,11 @@ class _MarkdownLLM:
 class _CandidateBatchLLM:
     model = "test-model"
 
+    def __init__(self) -> None:
+        self.messages: list[dict[str, Any]] = []
+
     async def complete(self, *args, **kwargs):
+        self.messages = kwargs.get("messages") or args[0]
         return {
             "content": (
                 '{"candidates": ['
@@ -139,3 +146,65 @@ async def test_reflector_selects_candidate_batch_and_persists_artifact(tmp_path)
         / "reflect-planner-iter-0005.json"
     )
     assert artifact_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_reflector_records_rejected_draft_and_prompts_with_negative_history(
+    tmp_path,
+):
+    history = HistoryStore(history_dir=tmp_path / "history")
+    history.add(HistoryEntry(
+        iteration=0,
+        agent_role="planner",
+        payload=PlannerSignal(reasoning="over-edited"),
+        reward=0.2,
+        metadata={"task_id": "task-A"},
+    ))
+    history.add(HistoryEntry(
+        iteration=1,
+        agent_role="planner",
+        payload=PlannerSignal(reasoning="targeted"),
+        reward=0.8,
+        metadata={"task_id": "task-A"},
+    ))
+    skill_store = _skill_store(tmp_path, skill_name="planner", content="# Old Planner\n")
+    reflector = Reflector(history, skill_store, base_seed=42)
+    draft = await reflector.draft_reflection(
+        agent_role="planner",
+        llm_client=_CandidateBatchLLM(),
+        iteration=2,
+        select_candidate=False,
+    )
+    assert draft is not None
+
+    rejection_id = reflector.record_rejected_draft(
+        draft,
+        reason="validation_rejected_all_candidates",
+        validation=SkillValidationResult(
+            validation_id="validation-1",
+            decision="rejected",
+            reason="mean_delta_below_threshold",
+            mean_delta=-0.2,
+        ),
+        selected_candidate_id="broad",
+    )
+
+    rejected = history.query_rejected_reflections(agent_role="planner")
+    assert rejected[0].rejection_id == rejection_id
+    assert rejected[0].selected_candidate_id == "broad"
+    assert rejected[0].validation is not None
+    assert rejected[0].validation.mean_delta == pytest.approx(-0.2)
+
+    llm = _CandidateBatchLLM()
+    await reflector.draft_reflection(
+        agent_role="planner",
+        llm_client=llm,
+        iteration=3,
+        select_candidate=False,
+    )
+    user_prompt = llm.messages[1]["content"]
+
+    assert "Recently Rejected Reflection Updates" in user_prompt
+    assert "validation_rejected_all_candidates" in user_prompt
+    assert "mean_delta_below_threshold" in user_prompt
+    assert "broad" in user_prompt

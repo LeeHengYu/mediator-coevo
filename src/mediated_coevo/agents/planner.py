@@ -359,6 +359,7 @@ class PlannerAgent(BaseAgent):
         current_skill_content: str,
         feedback: str | None,
         edit_history: list[HistoryEntry],
+        rejected_update_history: list[dict[str, Any]] | None = None,
         *,
         skill_id: str,
         task_ids: list[str],
@@ -385,6 +386,8 @@ class PlannerAgent(BaseAgent):
                 for e in edit_history[-5:]
             ],
         }
+        if rejected_update_history:
+            context["rejected_update_history"] = rejected_update_history[-5:]
         result = await self.process(context)
         parsed = result["parsed"]
         raw_candidates = parsed.get("candidates")
@@ -525,6 +528,22 @@ class PlannerAgent(BaseAgent):
                         max_tokens=budgets.historical_summary_tokens,
                     )
                 )
+            if rejected_history := context.get("rejected_update_history"):
+                sections.append(
+                    BudgetSection(
+                        "rejected_update_history",
+                        (
+                            "## Recently Rejected Skill Updates\n"
+                            "Treat these as negative evidence. Do not repeat "
+                            "edits that failed empirical validation, regressed "
+                            "a validation task, or produced unusable validation "
+                            "traces unless the new candidate directly fixes "
+                            "that rejection cause.\n"
+                            f"{rejected_history}"
+                        ),
+                        max_tokens=budgets.historical_summary_tokens,
+                    )
+                )
             sections.append(
                 BudgetSection(
                     "response_schema",
@@ -544,5 +563,14 @@ class PlannerAgent(BaseAgent):
             parts.append(f"\n## Candidate Scope\nskill_id=executor task_ids={task_ids}")
         if history := context.get("edit_history"):
             parts.append(f"\n## Recent Edit History\n{history}")
+        if rejected_history := context.get("rejected_update_history"):
+            parts.append(
+                "\n## Recently Rejected Skill Updates\n"
+                "Treat these as negative evidence. Do not repeat edits that "
+                "failed empirical validation, regressed a validation task, or "
+                "produced unusable validation traces unless the new candidate "
+                "directly fixes that rejection cause.\n"
+                f"{rejected_history}"
+            )
         parts.append(f"\n{response_schema}")
         return "\n".join(parts)

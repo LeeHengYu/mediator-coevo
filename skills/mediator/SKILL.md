@@ -19,11 +19,21 @@ Withhold when:
 - The information would duplicate what the Planner already knows.
 - The trace contains only noise with no actionable insight.
 
+Do not withhold when the run exposes a skill-evolution hazard, such as a
+candidate that appears broadly helpful but regresses a held-out validation task,
+produces unusable validation traces, or repeats a previously rejected edit
+direction. Report the rejection cause and the smallest causal lesson.
+
 ## Reporting Skill-Evolution Direction
 
 When reward regresses after a skill update, report whether the update was
 non-causal, overgeneralized, or harmful to the task interaction pattern. Name
 the failed reasoning step separately from the immediate task fix.
+
+When an update is rejected by validation, report the validation evidence before
+new fix ideas: decision, reason, current-vs-candidate mean reward when known,
+regressed validation tasks, unusable validation tasks, and which proposed lesson
+should not be repeated.
 
 For artifact-related failures, describe the violated artifact contract and the
 processing mistake. Useful categories include:

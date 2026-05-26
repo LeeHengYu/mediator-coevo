@@ -6,8 +6,16 @@ import pytest
 
 from mediated_coevo.core.config import Config
 from mediated_coevo.models.history_signals import MediatorSignal
+from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillProposal
+from mediated_coevo.models.skill import (
+    AdvisorBatchProvenance,
+    SkillProposal,
+    SkillUpdate,
+    SkillUpdateCandidateRef,
+    SkillValidationResult,
+    SkillValidationTaskResult,
+)
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.experiment.orchestrator import Orchestrator
@@ -263,6 +271,103 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
         ("task-A", "category-task-A", "medium", [0.0, 1.0], "custom_pytest"),
         ("task-B", "category-task-B", "medium", [0.0, 1.0], "custom_pytest"),
     ]
+
+
+def test_snapshot_and_write_metrics_records_skill_update_ledger(tmp_path):
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        },
+        experiment=experiment_config(),
+    )
+    artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
+    skill_store = _SkillStore()
+    orchestrator = Orchestrator(
+        planner=_Planner(),  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        mediator=_Mediator(),  # type: ignore[arg-type]
+        skill_store=skill_store,  # type: ignore[arg-type]
+        artifact_store=artifact_store,
+        history_store=HistoryStore(history_dir=tmp_path / "history"),
+        benchmark_repo=_TaskRepo(),  # type: ignore[arg-type]
+        config=config,
+        experiment_dir=tmp_path,
+        skill_advisor=_Advisor(),  # type: ignore[arg-type]
+    )
+    update = SkillUpdate(
+        skill_id="executor",
+        task_id="task-A",
+        iteration=1,
+        old_content="# Executor\n\nold\n",
+        new_content="# Executor\n\nnew\n",
+        old_skill_hash="old-hash",
+        new_skill_hash="new-hash",
+        provenance=AdvisorBatchProvenance(
+            batch_id="batch-1",
+            iteration=1,
+            skill_id="executor",
+            task_ids=["task-A"],
+            base_skill_hash="old-hash",
+            decision="approved",
+            reason="validated improvement",
+            selected_candidate_id="candidate-1",
+            selected_update_kind="add_guardrail",
+            candidate_refs=[
+                SkillUpdateCandidateRef(
+                    candidate_id="candidate-1",
+                    update_kind="add_guardrail",
+                    selected=True,
+                )
+            ],
+            validation=SkillValidationResult(
+                validation_id="validation-1",
+                task_ids=["task-B"],
+                decision="accepted",
+                reason="mean_delta_met",
+                current_mean_reward=0.2,
+                candidate_mean_reward=0.5,
+                mean_delta=0.3,
+                task_results=[
+                    SkillValidationTaskResult(
+                        task_id="task-B",
+                        current_status="ok",
+                        candidate_status="ok",
+                    )
+                ],
+            ),
+        ),
+    )
+    record = IterationRecord(
+        iteration=1,
+        task_id="task-A",
+        reward=0.5,
+        delta_reward=0.25,
+        success=True,
+        verifier_status="ok",
+        skill_update=update,
+    )
+
+    orchestrator._snapshot_and_write_metrics(1, [record])
+
+    history_path = tmp_path / "artifacts" / "skill_updates" / "skill_update_history.jsonl"
+    history_rows = [json.loads(line) for line in history_path.read_text().splitlines()]
+    ledger_entry = history_rows[0]
+    assert ledger_entry["update_id"] == "iter0001-task-a-executor-candidate-1"
+    assert ledger_entry["skill_version"] == "iter_0001"
+    assert ledger_entry["selected_candidate_id"] == "candidate-1"
+    assert ledger_entry["validation_decision"] == "accepted"
+    assert ledger_entry["validation_mean_delta"] == pytest.approx(0.3)
+    assert ledger_entry["reward"] == pytest.approx(0.5)
+    assert ledger_entry["delta_reward"] == pytest.approx(0.25)
+
+    update_path = tmp_path / ledger_entry["artifact_path"]
+    diff_path = tmp_path / ledger_entry["diff_path"]
+    assert update_path.exists()
+    assert diff_path.exists()
+    assert "+new" in diff_path.read_text()
 
 
 @pytest.mark.asyncio

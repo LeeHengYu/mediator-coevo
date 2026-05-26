@@ -142,6 +142,26 @@ class RejectedProposalBatch(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class RejectedReflectionBatch(BaseModel):
+    """Rejected planner/mediator reflection batch kept as negative evidence."""
+
+    rejection_id: str = Field(default_factory=lambda: str(uuid4()))
+    batch_id: str
+    iteration: int
+    skill_id: str
+    agent_role: str
+    task_ids: list[str] = Field(default_factory=list)
+    base_skill_hash: str
+    reason: str = ""
+    validation: SkillValidationResult | None = None
+    candidate_batch_id: str | None = None
+    candidate_batch_path: str | None = None
+    selected_candidate_id: str | None = None
+    selected_update_kind: str | None = None
+    candidate_refs: list[SkillUpdateCandidateRef] = Field(default_factory=list)
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
 class ContrastivePairRef(BaseModel):
     """Compact pointer to one selected contrastive history pair."""
 
@@ -206,3 +226,40 @@ class SkillUpdate(SkillEdit):
     new_skill_hash: str | None = None
     skill_version: str | None = None
     provenance: SkillProvenance | None = None
+
+
+class SkillUpdateLedgerEntry(BaseModel):
+    """Run-local ledger entry for one committed skill update."""
+
+    update_id: str
+    iteration: int
+    skill_id: str
+    skill_version: str | None = None
+    record_task_id: str
+    update_task_id: str = ""
+    task_ids: list[str] = Field(default_factory=list)
+    old_skill_hash: str | None = None
+    new_skill_hash: str | None = None
+    provenance_kind: str | None = None
+    decision: str | None = None
+    reason: str = ""
+    rollback_snapshot: str | None = None
+    candidate_batch_id: str | None = None
+    candidate_batch_path: str | None = None
+    selected_candidate_id: str | None = None
+    selected_update_kind: str | None = None
+    candidate_count: int = 0
+    validation_decision: str | None = None
+    validation_reason: str | None = None
+    validation_current_mean_reward: float | None = None
+    validation_candidate_mean_reward: float | None = None
+    validation_mean_delta: float | None = None
+    validation_task_ids: list[str] = Field(default_factory=list)
+    validation_task_count: int = 0
+    reward: float | None = None
+    delta_reward: float | None = None
+    success: bool | None = None
+    verifier_status: str | None = None
+    artifact_path: str | None = None
+    diff_path: str | None = None
+    timestamp: datetime = Field(default_factory=datetime.now)

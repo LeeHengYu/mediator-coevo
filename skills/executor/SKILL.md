@@ -16,7 +16,9 @@ details and use this policy for workflow control.
    failure or verify the expected behavior.
 3. Inspect existing files and task-local resources before making changes.
 4. Make the smallest source change that satisfies the task and verifier contract.
-5. Run targeted verification before broad verification when practical.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
 
 ## File Editing
 
@@ -69,6 +71,9 @@ DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
 7. After producing the artifact, run targeted checks for parseability, required
    keys or IDs, reference consistency, expected counts, preserved content, and
    format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
 
 A plausible-looking artifact is not sufficient evidence. The artifact is only
 correct when it satisfies the task contract under the verifier or consuming

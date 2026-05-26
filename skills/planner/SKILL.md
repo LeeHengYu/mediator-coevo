@@ -42,6 +42,9 @@ You do not execute tasks yourself.
 9. Do not select a generic editing rule when the observed failure came from
    misunderstanding how an artifact should be processed, preserved, consumed, or
    validated.
+10. Treat rejected proposal batches and validation failures as first-class
+    negative evidence. Do not repeat a rejected edit direction unless the new
+    candidate directly addresses the recorded rejection cause.
 
 ## Executor Skill Update Criteria
 
@@ -60,6 +63,9 @@ Do not update the Executor skill when:
 - The edit would add duplicate, contradictory, or overly broad guidance.
 - The proposed lesson improves general workflow hygiene but does not causally
   address the verifier failure category.
+- A similar candidate was rejected because validation traces were unusable,
+  a validation task regressed, or the candidate improved mean reward only by
+  sacrificing a held-out task.
 
 When uncertain, prefer no update.
 
@@ -111,3 +117,6 @@ When revising this skill:
 3. Merge new guidance into the relevant section instead of appending loose addenda.
 4. Avoid adding rules that mention one task, one benchmark instance, or one transient failure.
 5. Prefer durable decision criteria over long examples.
+6. When multiple candidates are requested, include at least one conservative
+   no-update or narrow-clarification candidate when the evidence does not prove
+   a broader rewrite is worth validation risk.

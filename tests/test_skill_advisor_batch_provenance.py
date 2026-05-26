@@ -7,7 +7,11 @@ import pytest
 from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
-from mediated_coevo.models.skill import SkillProposal
+from mediated_coevo.models.skill import (
+    RejectedProposalBatch,
+    SkillProposal,
+    SkillValidationResult,
+)
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
@@ -54,6 +58,20 @@ class _SkillStore:
 class _NoCallPlanner:
     async def suggest_skill_revision(self, *args, **kwargs):
         raise AssertionError("planner should not patch when advisor rejects")
+
+
+class _RecordingBatchPlanner:
+    def __init__(self) -> None:
+        self.rejected_update_history: list[dict[str, Any]] | None = None
+
+    async def suggest_skill_revision_batch(self, *args, **kwargs):
+        self.rejected_update_history = kwargs.get("rejected_update_history")
+        return []
+
+
+class _MissingTaskRepo:
+    def resolve(self, task_id: str) -> None:
+        raise FileNotFoundError(task_id)
 
 
 _ADVISOR_REJECTION_REASON = "Proposal rewards conflict with the suggested edit."
@@ -196,3 +214,52 @@ async def test_advisor_llm_failure_clears_buffer_without_skill_update(tmp_path):
     assert gate.last_advisor_decision == "rejected"
     assert gate.last_advisor_reason == "advisor_error: advisor unavailable"
     assert gate.last_rejection_id == rejections[0].rejection_id
+
+
+@pytest.mark.asyncio
+async def test_approved_batch_forwards_rejected_validation_history_to_planner(
+    tmp_path,
+):
+    advisor = SkillAdvisor(
+        _LLM(content='{"approve": true, "feedback": "try a narrower edit"}')  # type: ignore[arg-type]
+    )
+    orch, _skill_store = _orchestrator(tmp_path, advisor)
+    planner = _RecordingBatchPlanner()
+    orch.planner = planner
+    orch.executor_skill_gate.planner = planner  # type: ignore[assignment]
+    orch.executor_skill_gate.benchmark_repo = _MissingTaskRepo()  # type: ignore[assignment]
+    orch.history_store.record_rejected_proposals(
+        RejectedProposalBatch(
+            batch_id="old-batch",
+            iteration=1,
+            skill_id="executor",
+            task_ids=["task-A"],
+            base_skill_hash=SkillStore.content_hash("# Executor\n"),
+            reason="validation: task_regression",
+            advisor_feedback="avoid broad parsing rewrite",
+            validation=SkillValidationResult(
+                validation_id="validation-old",
+                task_ids=["heldout-A"],
+                decision="rejected",
+                reason="task_regression",
+                current_mean_reward=0.8,
+                candidate_mean_reward=0.7,
+                mean_delta=-0.1,
+            ),
+        )
+    )
+
+    update = await orch.executor_skill_gate.review_and_patch(
+        iteration=3,
+        proposal_buffer=orch._proposal_buffer,
+    )
+
+    assert update is None
+    rejected_history = planner.rejected_update_history
+    assert rejected_history is not None
+    rejected_summary = rejected_history[0]
+    validation_summary = rejected_summary["validation"]
+    assert isinstance(validation_summary, dict)
+    assert rejected_summary["batch_id"] == "old-batch"
+    assert rejected_summary["reason"] == "validation: task_regression"
+    assert validation_summary["reason"] == "task_regression"

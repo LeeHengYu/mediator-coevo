@@ -26,6 +26,12 @@ from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.compactor import build_planner_signal
+from mediated_coevo.evolution.candidates import (
+    build_candidate_batch,
+    candidate_batch_artifact_path,
+    selected_candidate,
+    stable_selection_seed,
+)
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.evolution.reflector import ReflectionDraft, Reflector
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
@@ -40,7 +46,9 @@ from mediated_coevo.experiment.records import (
     build_coevolution_record,
     build_iteration_record,
     build_missing_task_record,
+    build_skill_update_ledger_entry,
     TaskMetadataFields,
+    record_skill_updates,
     rollback_snapshot,
     skill_update_from_reflection,
     skill_version,
@@ -56,6 +64,7 @@ from mediated_coevo.models.skill import (
     SkillValidationResult,
     SkillValidationTaskResult,
 )
+from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.runtime.token_budget import TokenBudgetEvent
 from mediated_coevo.stores.artifact_store import ArtifactStore
@@ -74,6 +83,16 @@ class _PlannerValidationRun:
     status: str
     trace_path: str | None
     usable: bool
+
+
+@dataclass(frozen=True)
+class _MediatorValidationContext:
+    validation_id: str
+    task_id: str
+    task_spec: TaskSpec
+    trace: ExecutionTrace
+    trace_path: str
+    task_metadata: TaskMetadataFields
 
 
 class Orchestrator:
@@ -548,18 +567,13 @@ class Orchestrator:
         reflection_seed = random.randrange(1 << 32)
 
         if self.config.experiment.skill_updates.mediator:
-            mediator_result = await reflector.reflect(
-                "mediator",
-                self.mediator.llm_client,
+            mediator_update = await self._reflect_and_validate_mediator(
+                reflector,
                 iteration=iteration,
                 selection_seed=reflection_seed,
             )
-            if mediator_result:
-                mediator_result.provenance.rollback_snapshot = rollback_snapshot(
-                    iteration
-                )
-                self.mediator.load_protocol(mediator_result.new_content)
-                skill_updates.append(skill_update_from_reflection(mediator_result))
+            if mediator_update is not None:
+                skill_updates.append(mediator_update)
         else:
             logger.info("Mediator skill evolution skipped (skill updates disabled).")
 
@@ -586,6 +600,399 @@ class Orchestrator:
             skill_hashes=self._current_skill_hashes(),
         )
 
+    async def _reflect_and_validate_mediator(
+        self,
+        reflector: Reflector,
+        *,
+        iteration: int,
+        selection_seed: int,
+    ) -> SkillUpdate | None:
+        """Reflect Mediator protocol candidates and commit only validated ones."""
+        if not self._reflection_has_pairable_history("mediator"):
+            return None
+
+        draft = await reflector.draft_reflection(
+            agent_role="mediator",
+            llm_client=self.mediator.llm_client,
+            iteration=iteration,
+            selection_seed=selection_seed,
+            candidate_count=2,
+            select_candidate=False,
+        )
+        if draft is None:
+            return None
+
+        selected = await self._validate_mediator_reflection(
+            draft,
+            iteration=iteration,
+        )
+        if selected is None:
+            return None
+
+        selected_candidate_id, validation = selected
+        mediator_result = reflector.commit_draft(
+            draft,
+            selected_candidate_id=selected_candidate_id,
+            validation=validation,
+        )
+        if mediator_result is None:
+            return None
+        mediator_result.provenance.rollback_snapshot = rollback_snapshot(iteration)
+        self.mediator.load_protocol(mediator_result.new_content)
+        return skill_update_from_reflection(mediator_result)
+
+    async def _validate_mediator_reflection(
+        self,
+        draft: ReflectionDraft,
+        *,
+        iteration: int,
+    ) -> tuple[str, SkillValidationResult] | None:
+        """Empirically select the best Mediator reflection candidate."""
+        candidates = _valid_planner_reflection_candidates(
+            draft.candidate_batch.candidates,
+        )
+        if not candidates:
+            self._record_rejected_reflection(
+                draft,
+                reason="no_valid_candidates",
+            )
+            return None
+
+        validation_id = f"{draft.candidate_batch.batch_id}-mediator-validation"
+        task_ids = self.executor_skill_gate._select_validation_task_ids(
+            contributing_tasks=draft.candidate_batch.task_ids,
+            iteration=iteration,
+            batch_id=validation_id,
+        )
+        executor_skill = self.skill_store.read_skill("executor") or ""
+        validation_contexts: dict[str, _MediatorValidationContext] = {}
+        current_runs: dict[str, _PlannerValidationRun] = {}
+        try:
+            for task_id in task_ids:
+                validation_contexts[task_id] = await self._build_mediator_validation_context(
+                    validation_id=validation_id,
+                    task_id=task_id,
+                    iteration=iteration,
+                    executor_skill=executor_skill,
+                )
+                current_runs[task_id] = await self._run_mediator_validation_task(
+                    variant="current",
+                    context=validation_contexts[task_id],
+                    mediator_skill=draft.old_content,
+                    executor_skill=executor_skill,
+                )
+
+            candidate_results = [
+                await self._validate_mediator_candidate(
+                    validation_id=validation_id,
+                    iteration=iteration,
+                    candidate=candidate,
+                    task_ids=task_ids,
+                    validation_contexts=validation_contexts,
+                    current_runs=current_runs,
+                    executor_skill=executor_skill,
+                )
+                for candidate in candidates
+            ]
+        finally:
+            self.mediator.load_protocol(draft.old_content)
+
+        accepted = _accepted_reflection_results(candidates, candidate_results)
+        if not accepted:
+            logger.info("Mediator reflection validation rejected all candidates.")
+            rejected_validation = None
+            if candidate_results:
+                best_rejected = max(
+                    candidate_results,
+                    key=lambda result: result.candidate_mean_reward
+                    if result.candidate_mean_reward is not None
+                    else float("-inf"),
+                )
+                rejected_validation = best_rejected
+                self.artifact_store.store_validation_result(
+                    validation_id,
+                    best_rejected,
+                    overwrite=True,
+                )
+            self._record_rejected_reflection(
+                draft,
+                reason="validation_rejected_all_candidates",
+                validation=rejected_validation,
+            )
+            return None
+
+        best_candidate, best_result = _best_reflection_result(accepted)
+        self.artifact_store.store_validation_result(
+            validation_id,
+            best_result,
+            overwrite=True,
+        )
+        return best_candidate.candidate_id, best_result
+
+    async def _validate_mediator_candidate(
+        self,
+        *,
+        validation_id: str,
+        iteration: int,
+        candidate: SkillUpdateCandidate,
+        task_ids: list[str],
+        validation_contexts: dict[str, _MediatorValidationContext],
+        current_runs: dict[str, _PlannerValidationRun],
+        executor_skill: str,
+    ) -> SkillValidationResult:
+        task_results = []
+        variant = f"candidate-{candidate.candidate_id}"
+        for task_id in task_ids:
+            current = current_runs[task_id]
+            candidate_run = await self._run_mediator_validation_task(
+                variant=variant,
+                context=validation_contexts[task_id],
+                mediator_skill=candidate.new_content,
+                executor_skill=executor_skill,
+            )
+            usable = current.usable and candidate_run.usable
+            regressed = (
+                usable
+                and current.reward is not None
+                and candidate_run.reward is not None
+                and candidate_run.reward
+                < current.reward - self.config.experiment.skill_validation.reward_tolerance
+            )
+            task_results.append(
+                SkillValidationTaskResult(
+                    task_id=task_id,
+                    current_reward=current.reward,
+                    candidate_reward=candidate_run.reward,
+                    current_reward_source=current.reward_source,
+                    candidate_reward_source=candidate_run.reward_source,
+                    current_verifier_reward=current.verifier_reward,
+                    candidate_verifier_reward=candidate_run.verifier_reward,
+                    current_judge_reward=current.judge_reward,
+                    candidate_judge_reward=candidate_run.judge_reward,
+                    current_status=current.status,
+                    candidate_status=candidate_run.status,
+                    current_trace_path=current.trace_path,
+                    candidate_trace_path=candidate_run.trace_path,
+                    usable=usable,
+                    regressed=regressed,
+                )
+            )
+
+        result = self.executor_skill_gate._validation_decision(
+            validation_id=f"{validation_id}-{candidate.candidate_id}",
+            task_ids=task_ids,
+            task_results=task_results,
+        )
+        self.artifact_store.store_validation_variant_result(
+            validation_id,
+            variant,
+            result,
+            overwrite=True,
+        )
+        return result
+
+    async def _build_mediator_validation_context(
+        self,
+        *,
+        validation_id: str,
+        task_id: str,
+        iteration: int,
+        executor_skill: str,
+    ) -> _MediatorValidationContext:
+        """Run the validation task once so mediator candidates replay one trace."""
+        task_metadata = task_metadata_fields(task_id=task_id, task_config=None)
+        try:
+            benchmark_task = self.benchmark_repo.resolve(task_id)
+            task_metadata = task_metadata_fields(
+                task_id=task_id,
+                task_config=benchmark_task.task_config,
+            )
+            skill_texts = [executor_skill] if executor_skill else []
+            task_spec = await self.planner.plan_task(
+                task_id=task_id,
+                base_instruction=benchmark_task.instruction,
+                prior_context=None,
+                current_skills=skill_texts,
+                iteration=iteration,
+            )
+            trace = await self.executor.execute_task(task_spec, skill_texts)
+        except FileNotFoundError as e:
+            task_spec = TaskSpec(task_id=task_id, instruction="", iteration=iteration)
+            trace = ExecutionTrace(
+                task_id=task_id,
+                iteration=iteration,
+                status="env_failure",
+                error_kind="task_not_found",
+                error_detail=str(e),
+            )
+
+        trace_path = self.artifact_store.store_validation_trace(
+            validation_id,
+            "source",
+            trace,
+            overwrite=True,
+        )
+        return _MediatorValidationContext(
+            validation_id=validation_id,
+            task_id=task_id,
+            task_spec=task_spec,
+            trace=trace,
+            trace_path=str(trace_path),
+            task_metadata=task_metadata,
+        )
+
+    async def _run_mediator_validation_task(
+        self,
+        *,
+        variant: str,
+        context: _MediatorValidationContext,
+        mediator_skill: str,
+        executor_skill: str,
+    ) -> _PlannerValidationRun:
+        """Score a mediator protocol by the executor-skill candidate it induces."""
+        trace = context.trace
+        if not trace.is_usable_feedback_signal:
+            return _mediator_validation_run_from_trace(
+                trace,
+                trace_path=context.trace_path,
+                reward=None,
+                reward_source=None,
+                judge_reward=None,
+                usable=False,
+            )
+
+        report = await self._mediate_validation_trace(
+            mediator_skill=mediator_skill,
+            trace=trace,
+            task_spec=context.task_spec,
+        )
+        if report is None:
+            return _mediator_validation_run_from_trace(
+                trace,
+                trace_path=context.trace_path,
+                reward=None,
+                reward_source=None,
+                judge_reward=None,
+                usable=False,
+            )
+
+        proposal_feedback = await get_executor_proposal_feedback(
+            condition="learned_mediator",
+            task_id=context.task_id,
+            artifact_store=self.artifact_store,
+            mediator_report=report,
+            model=self.planner.llm_client.model,
+            budgets=self.config.budgets,
+            condition_name=self.config.experiment.condition_name,
+        )
+        candidate_score = await self._score_mediator_feedback_candidate(
+            validation_id=context.validation_id,
+            variant=variant,
+            task_id=context.task_id,
+            iteration=trace.iteration,
+            executor_skill=executor_skill,
+            feedback=proposal_feedback,
+        )
+        if candidate_score is not None:
+            return candidate_score
+
+        judge_record = await self._judge_evolution_reward(
+            trace=trace,
+            task_metadata=context.task_metadata,
+            trace_path=Path(context.trace_path),
+        )
+        reward, reward_source, judge_reward = _validation_reward(trace, judge_record)
+        return _mediator_validation_run_from_trace(
+            trace,
+            trace_path=context.trace_path,
+            reward=reward,
+            reward_source=reward_source,
+            judge_reward=judge_reward,
+            usable=trace.is_usable_feedback_signal,
+        )
+
+    async def _mediate_validation_trace(
+        self,
+        *,
+        mediator_skill: str,
+        trace: ExecutionTrace,
+        task_spec: TaskSpec,
+    ) -> MediatorReport | None:
+        self.mediator.load_protocol(mediator_skill)
+        return await self.mediator.mediate_trace(
+            "learned_mediator",
+            trace,
+            task_spec,
+        )
+
+    async def _score_mediator_feedback_candidate(
+        self,
+        *,
+        validation_id: str,
+        variant: str,
+        task_id: str,
+        iteration: int,
+        executor_skill: str,
+        feedback: str | None,
+    ) -> _PlannerValidationRun | None:
+        if not feedback:
+            return None
+        candidates = await self.planner.suggest_skill_revision_batch(
+            current_skill_content=executor_skill,
+            feedback=feedback,
+            edit_history=self.history_store.query(
+                agent_role="planner",
+                tagged_only=True,
+            ),
+            rejected_update_history=(
+                self.executor_skill_gate._compact_rejected_update_history()
+            ),
+            skill_id="executor",
+            task_ids=[task_id],
+            iteration=iteration,
+        )
+        if not candidates:
+            return None
+
+        batch_id = f"{validation_id}-{variant}-{task_id}-feedback-candidates"
+        selection_seed = stable_selection_seed(
+            base_seed=self.config.experiment.seed,
+            iteration=iteration,
+            skill_id="executor",
+            batch_id=batch_id,
+        )
+        batch = build_candidate_batch(
+            batch_id=batch_id,
+            iteration=iteration,
+            skill_id="executor",
+            agent_role="mediator_validation",
+            task_ids=[task_id],
+            current_skill=executor_skill,
+            candidates=candidates,
+            selection_seed=selection_seed,
+        )
+        self.artifact_store.store_candidate_batch(batch, overwrite=True)
+        selected = selected_candidate(batch)
+        if selected is None:
+            return None
+
+        validation = await self.executor_skill_gate._validate_candidate(
+            validation_id=f"{validation_id}-{variant}-{task_id}",
+            iteration=iteration,
+            task_ids=[task_id],
+            current_skill=executor_skill,
+            candidate_skill=selected.new_content,
+        )
+        return _PlannerValidationRun(
+            reward=validation.candidate_mean_reward,
+            reward_source="feedback_candidate_validation",
+            verifier_reward=None,
+            judge_reward=validation.candidate_mean_reward,
+            status=validation.reason,
+            trace_path=candidate_batch_artifact_path(batch.batch_id),
+            usable=validation.candidate_mean_reward is not None,
+        )
+
     async def _reflect_and_validate_planner(
         self,
         reflector: Reflector,
@@ -594,6 +1001,9 @@ class Orchestrator:
         selection_seed: int,
     ) -> SkillUpdate | None:
         """Reflect Planner skill candidates and commit the best validated one."""
+        if not self._reflection_has_pairable_history("planner"):
+            return None
+
         draft = await reflector.draft_reflection(
             agent_role="planner",
             llm_client=self.planner.llm_client,
@@ -634,6 +1044,10 @@ class Orchestrator:
             draft.candidate_batch.candidates,
         )
         if not candidates:
+            self._record_rejected_reflection(
+                draft,
+                reason="no_valid_candidates",
+            )
             return None
 
         validation_id = f"{draft.candidate_batch.batch_id}-planner-validation"
@@ -672,13 +1086,10 @@ class Orchestrator:
                 skill_refiner=draft.old_content,
             )
 
-        accepted = [
-            (candidate, result)
-            for candidate, result in zip(candidates, candidate_results, strict=True)
-            if result.decision == "accepted" and result.candidate_mean_reward is not None
-        ]
+        accepted = _accepted_reflection_results(candidates, candidate_results)
         if not accepted:
             logger.info("Planner reflection validation rejected all candidates.")
+            rejected_validation = None
             if candidate_results:
                 best_rejected = max(
                     candidate_results,
@@ -686,24 +1097,20 @@ class Orchestrator:
                     if result.candidate_mean_reward is not None
                     else float("-inf"),
                 )
+                rejected_validation = best_rejected
                 self.artifact_store.store_validation_result(
                     validation_id,
                     best_rejected,
                     overwrite=True,
                 )
+            self._record_rejected_reflection(
+                draft,
+                reason="validation_rejected_all_candidates",
+                validation=rejected_validation,
+            )
             return None
 
-        best_candidate, best_result = max(
-            accepted,
-            key=lambda item: (
-                item[1].candidate_mean_reward
-                if item[1].candidate_mean_reward is not None
-                else float("-inf"),
-                item[1].mean_delta if item[1].mean_delta is not None else float("-inf"),
-                item[0].audit_score,
-                item[0].candidate_id,
-            ),
-        )
+        best_candidate, best_result = _best_reflection_result(accepted)
         self.artifact_store.store_validation_result(
             validation_id,
             best_result,
@@ -861,7 +1268,78 @@ class Orchestrator:
             records_to_write.append(coevolution_record)
         for record in records_to_write:
             attach_skill_identity(record, skill_hashes, current_skill_version)
+            self._store_skill_update_ledger_entries(record)
             self._write_metric(record)
+
+    def _store_skill_update_ledger_entries(self, record: IterationRecord) -> None:
+        """Persist SkillFlow-style committed-update artifacts for one record."""
+        for index, update in enumerate(record_skill_updates(record)):
+            update_id = _skill_update_artifact_id(record, update, index)
+            update_path, diff_path = self.artifact_store.store_skill_update(
+                update_id,
+                update,
+            )
+            ledger_entry = build_skill_update_ledger_entry(
+                record=record,
+                update=update,
+                update_id=update_id,
+                artifact_path=self._experiment_relative_path(update_path),
+                diff_path=(
+                    self._experiment_relative_path(diff_path)
+                    if diff_path is not None
+                    else None
+                ),
+            )
+            self.artifact_store.append_skill_update_history(ledger_entry)
+
+    def _experiment_relative_path(self, path: Path) -> str:
+        try:
+            return path.relative_to(self.experiment_dir).as_posix()
+        except ValueError:
+            return str(path)
+
+    def _record_rejected_reflection(
+        self,
+        draft: ReflectionDraft,
+        *,
+        reason: str,
+        validation: SkillValidationResult | None = None,
+    ) -> str:
+        reflector = Reflector(
+            self.history_store,
+            self.skill_store,
+            budgets=self.config.budgets,
+            condition_name=self.config.experiment.condition_name,
+            artifact_store=getattr(self, "artifact_store", None),
+            base_seed=self.config.experiment.seed,
+        )
+        return reflector.record_rejected_draft(
+            draft,
+            reason=reason,
+            validation=validation,
+        )
+
+    def _reflection_has_pairable_history(self, agent_role: str) -> bool:
+        """Return whether contrastive reflection has at least one same-task pair."""
+        counts = self.history_store.tagged_task_counts(agent_role)
+        if any(count >= 2 for count in counts.values()):
+            return True
+
+        tagged_count = sum(counts.values())
+        entry_label = "entry" if tagged_count == 1 else "entries"
+        task_label = "task" if len(counts) == 1 else "tasks"
+        logger.info(
+            "%s reflection deferred: need at least two tagged same-task "
+            "history entries; found %d tagged %s across %d %s. "
+            "Increase --iterations/--coevo-interval or use tasks with usable "
+            "feedback to create contrastive pairs.",
+            agent_role.capitalize(),
+            tagged_count,
+            entry_label,
+            len(counts),
+            task_label,
+        )
+        return False
 
     def _current_skill_hashes(self) -> dict[str, str]:
         """Return hashes for current SkillStore contents."""
@@ -891,6 +1369,61 @@ def _valid_planner_reflection_candidates(
     ]
 
 
+def _skill_update_artifact_id(
+    record: IterationRecord,
+    update: SkillUpdate,
+    index: int,
+) -> str:
+    selected_candidate_id = None
+    if update.provenance is not None:
+        selected_candidate_id = update.provenance.selected_candidate_id
+    parts = [
+        f"iter{update.iteration:04d}",
+        _artifact_slug(update.skill_id),
+        _artifact_slug(selected_candidate_id or update.new_skill_hash or str(index)),
+    ]
+    if record.task_id == "__coevolution__":
+        parts.insert(1, "coevolution")
+    else:
+        parts.insert(1, _artifact_slug(record.task_id))
+    if index:
+        parts.append(str(index))
+    return "-".join(parts)
+
+
+def _artifact_slug(value: str) -> str:
+    chars = [char if char.isalnum() else "-" for char in value.lower()]
+    slug = "-".join(part for part in "".join(chars).split("-") if part)
+    return slug[:80] or "unknown"
+
+
+def _accepted_reflection_results(
+    candidates: list[SkillUpdateCandidate],
+    results: list[SkillValidationResult],
+) -> list[tuple[SkillUpdateCandidate, SkillValidationResult]]:
+    return [
+        (candidate, result)
+        for candidate, result in zip(candidates, results, strict=True)
+        if result.decision == "accepted" and result.candidate_mean_reward is not None
+    ]
+
+
+def _best_reflection_result(
+    accepted: list[tuple[SkillUpdateCandidate, SkillValidationResult]],
+) -> tuple[SkillUpdateCandidate, SkillValidationResult]:
+    return max(
+        accepted,
+        key=lambda item: (
+            item[1].candidate_mean_reward
+            if item[1].candidate_mean_reward is not None
+            else float("-inf"),
+            item[1].mean_delta if item[1].mean_delta is not None else float("-inf"),
+            item[0].audit_score,
+            item[0].candidate_id,
+        ),
+    )
+
+
 def _validation_reward(
     trace: ExecutionTrace,
     judge_record: JudgeRewardRecord | None,
@@ -903,6 +1436,26 @@ def _validation_reward(
         judge_record.judge_reward,
         str(metadata["reward_source"]),
         judge_record.judge_reward,
+    )
+
+
+def _mediator_validation_run_from_trace(
+    trace: ExecutionTrace,
+    *,
+    trace_path: str | None,
+    reward: float | None,
+    reward_source: str | None,
+    judge_reward: float | None,
+    usable: bool,
+) -> _PlannerValidationRun:
+    return _PlannerValidationRun(
+        reward=reward,
+        reward_source=reward_source,
+        verifier_reward=trace.reward,
+        judge_reward=judge_reward,
+        status=trace.status,
+        trace_path=trace_path,
+        usable=usable,
     )
 
 

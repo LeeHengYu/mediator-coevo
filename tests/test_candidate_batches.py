@@ -59,6 +59,28 @@ def test_random_top_quartile_selection_is_seeded_and_bounded():
     assert [candidate.selected for candidate in first.candidates].count(True) == 1
 
 
+def test_top_quartile_selection_excludes_lower_half_when_batch_is_small():
+    candidates = [
+        _candidate("best", 0.95),
+        _candidate("second", 0.90),
+        _candidate("third", 0.50),
+        _candidate("fourth", 0.40),
+    ]
+
+    batch = build_candidate_batch(
+        batch_id="batch-1",
+        iteration=3,
+        skill_id="planner",
+        agent_role="planner",
+        task_ids=["task-A"],
+        current_skill="# Skill\n",
+        candidates=candidates,
+        selection_seed=123,
+    )
+
+    assert batch.selected_candidate_id == "best"
+
+
 def test_candidate_batch_artifact_round_trips(tmp_path):
     batch = build_candidate_batch(
         batch_id="batch-1",

@@ -28,7 +28,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from mediated_coevo.models.history_signals import HistorySignal
-from mediated_coevo.models.skill import RejectedProposalBatch
+from mediated_coevo.models.skill import RejectedProposalBatch, RejectedReflectionBatch
 
 if TYPE_CHECKING:
     from mediated_coevo.models.skill import SkillProposal
@@ -88,12 +88,14 @@ class HistoryStore:
 
     _HISTORY_FILE = "history.jsonl"
     _REJECTED_PROPOSALS_FILE = "rejected_proposals.jsonl"
+    _REJECTED_REFLECTIONS_FILE = "rejected_reflections.jsonl"
 
     def __init__(self, history_dir: Path) -> None:
         self._history_dir = history_dir
         self._history_dir.mkdir(parents=True, exist_ok=True)
         self._entries: list[HistoryEntry] = []
         self._rejected_proposal_batches: list[RejectedProposalBatch] = []
+        self._rejected_reflection_batches: list[RejectedReflectionBatch] = []
         self._pending_mediator_entry_id_by_task: dict[str, str] = {}
         self._pending_planner_entry_id_by_task: dict[str, str] = {}
         self._load()
@@ -120,6 +122,20 @@ class HistoryStore:
                     except Exception as e:
                         logger.warning("Failed to parse rejected proposal batch: %s", e)
 
+        rejected_reflections_path = self._history_dir / self._REJECTED_REFLECTIONS_FILE
+        if rejected_reflections_path.exists():
+            for line in rejected_reflections_path.read_text().strip().split("\n"):
+                if line.strip():
+                    try:
+                        self._rejected_reflection_batches.append(
+                            RejectedReflectionBatch.model_validate_json(line)
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to parse rejected reflection batch: %s",
+                            e,
+                        )
+
     def _save(self) -> None:
         """Persist all entries to disk."""
         path = self._history_dir / self._HISTORY_FILE
@@ -132,6 +148,12 @@ class HistoryStore:
         lines = [batch.model_dump_json() for batch in self._rejected_proposal_batches]
         path.write_text("\n".join(lines) + "\n")
 
+    def _save_rejected_reflections(self) -> None:
+        """Persist rejected reflection batches to disk."""
+        path = self._history_dir / self._REJECTED_REFLECTIONS_FILE
+        lines = [batch.model_dump_json() for batch in self._rejected_reflection_batches]
+        path.write_text("\n".join(lines) + "\n")
+
     def add(self, entry: HistoryEntry) -> str:
         self._entries.append(entry)
         self._save()
@@ -141,6 +163,12 @@ class HistoryStore:
         """Persist a reviewed proposal batch that was not committed."""
         self._rejected_proposal_batches.append(batch)
         self._save_rejected_proposals()
+        return batch.rejection_id
+
+    def record_rejected_reflection(self, batch: RejectedReflectionBatch) -> str:
+        """Persist a reflected meta-skill batch that was not committed."""
+        self._rejected_reflection_batches.append(batch)
+        self._save_rejected_reflections()
         return batch.rejection_id
 
     def record_signal(
@@ -307,6 +335,17 @@ class HistoryStore:
             entries = [e for e in entries if e.reward is not None]
         return entries[-recent:]
 
+    def tagged_task_counts(self, agent_role: str) -> dict[str, int]:
+        """Return tagged same-role history counts grouped by task ID."""
+        counts: dict[str, int] = defaultdict(int)
+        for entry in self._entries:
+            if entry.agent_role != agent_role or entry.reward is None:
+                continue
+            task_id = entry.metadata.get("task_id")
+            if isinstance(task_id, str) and task_id:
+                counts[task_id] += 1
+        return dict(counts)
+
     def query_rejected_proposals(
         self,
         *,
@@ -317,6 +356,18 @@ class HistoryStore:
         batches = self._rejected_proposal_batches
         if skill_id:
             batches = [batch for batch in batches if batch.skill_id == skill_id]
+        return batches[-recent:]
+
+    def query_rejected_reflections(
+        self,
+        *,
+        agent_role: str | None = None,
+        recent: int = 20,
+    ) -> list[RejectedReflectionBatch]:
+        """Query rejected reflection batches, oldest-to-newest within the window."""
+        batches = self._rejected_reflection_batches
+        if agent_role:
+            batches = [batch for batch in batches if batch.agent_role == agent_role]
         return batches[-recent:]
 
     def contrastive_pairs(

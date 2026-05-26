@@ -30,6 +30,7 @@ from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 from mediated_coevo.models.skill import (
     ContrastivePairRef,
     ContrastiveReflectionProvenance,
+    RejectedReflectionBatch,
     SkillUpdateCandidate,
     SkillUpdateCandidateBatch,
     SkillValidationResult,
@@ -76,6 +77,20 @@ class ReflectionDraft:
     iteration: int
     max_pairs: int
     selection_seed: int | None
+
+
+@dataclass(frozen=True)
+class RejectedReflectionSummary:
+    """Compact negative evidence from a prior rejected reflection."""
+
+    iteration: int
+    skill_id: str
+    reason: str
+    selected_candidate_id: str | None
+    selected_update_kind: str | None
+    validation_reason: str | None
+    validation_mean_delta: float | None
+    task_ids: list[str]
 
 
 class Reflector:
@@ -303,20 +318,77 @@ class Reflector:
         model: str = "",
         candidate_count: int | None = None,
     ) -> list[dict[str, Any]]:
+        rejected_history = self._compact_rejected_reflection_history(agent_role)
         if agent_role == "mediator":
             return self._build_mediator_prompt(
                 current_skill,
                 pairs,
+                rejected_history=rejected_history,
                 model=model,
                 budgets=self._budgets,
             )
         return self._build_planner_prompt(
             current_skill,
             pairs,
+            rejected_history=rejected_history,
             model=model,
             budgets=self._budgets,
             candidate_count=candidate_count,
         )
+
+    def record_rejected_draft(
+        self,
+        draft: ReflectionDraft,
+        *,
+        reason: str,
+        validation: SkillValidationResult | None = None,
+        selected_candidate_id: str | None = None,
+    ) -> str:
+        """Persist a rejected reflection draft as future negative evidence."""
+        selected = _candidate_by_id(draft.candidate_batch, selected_candidate_id)
+        if selected is None:
+            selected = selected_candidate(draft.candidate_batch)
+        rejected = RejectedReflectionBatch(
+            batch_id=draft.candidate_batch.batch_id,
+            iteration=draft.iteration,
+            skill_id=draft.agent_role,
+            agent_role=draft.agent_role,
+            task_ids=_task_ids_from_pairs(draft.pairs),
+            base_skill_hash=draft.base_skill_hash,
+            reason=reason,
+            validation=validation,
+            candidate_batch_id=draft.candidate_batch.batch_id,
+            candidate_batch_path=draft.candidate_batch_path,
+            selected_candidate_id=selected.candidate_id if selected else None,
+            selected_update_kind=selected.update_kind if selected else None,
+            candidate_refs=candidate_refs(draft.candidate_batch),
+        )
+        return self._history_store.record_rejected_reflection(rejected)
+
+    def _compact_rejected_reflection_history(
+        self,
+        agent_role: str,
+    ) -> list[RejectedReflectionSummary]:
+        return [
+            RejectedReflectionSummary(
+                iteration=batch.iteration,
+                skill_id=batch.skill_id,
+                reason=batch.reason,
+                selected_candidate_id=batch.selected_candidate_id,
+                selected_update_kind=batch.selected_update_kind,
+                validation_reason=(
+                    batch.validation.reason if batch.validation is not None else None
+                ),
+                validation_mean_delta=(
+                    batch.validation.mean_delta if batch.validation is not None else None
+                ),
+                task_ids=list(batch.task_ids),
+            )
+            for batch in self._history_store.query_rejected_reflections(
+                agent_role=agent_role,
+                recent=5,
+            )
+        ]
 
     async def _complete_reflection(
         self,
@@ -397,6 +469,7 @@ class Reflector:
         instructions: str,
         pairs: list[ContrastivePair],
         formatter: Callable[[HistoryEntry], str],
+        rejected_history: list[RejectedReflectionSummary] | None = None,
         model: str = "",
         budgets: BudgetsConfig | None = None,
     ) -> list[dict[str, str]]:
@@ -419,6 +492,7 @@ class Reflector:
                 f"**Better outcome** ({better_context}):\n"
                 f"{formatter(pair.better)}"
             )
+        rejected_section = _format_rejected_reflection_history(rejected_history or [])
 
         user_content = (
             f"## {current_skill_heading}\n\n"
@@ -426,33 +500,46 @@ class Reflector:
             "## Contrastive Evidence\n\n"
             f"{evidence_intro}\n\n"
             + "\n\n".join(contrastive_parts)
+            + rejected_section
             + f"\n\n## Instructions\n\n{instructions}"
         )
         if budgets:
             from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
 
+            sections = [
+                BudgetSection(
+                    current_skill_heading,
+                    f"## {current_skill_heading}\n\n{current_skill}",
+                    required=True,
+                    max_tokens=budgets.max_skill_tokens,
+                ),
+                BudgetSection(
+                    "contrastive_evidence",
+                    "## Contrastive Evidence\n\n"
+                    f"{evidence_intro}\n\n" + "\n\n".join(contrastive_parts),
+                    required=True,
+                    max_tokens=budgets.historical_summary_tokens,
+                ),
+            ]
+            if rejected_section:
+                sections.append(
+                    BudgetSection(
+                        "rejected_reflection_history",
+                        rejected_section.strip(),
+                        required=True,
+                        max_tokens=min(1200, budgets.historical_summary_tokens),
+                    )
+                )
+            sections.append(
+                BudgetSection(
+                    "instructions",
+                    f"## Instructions\n\n{instructions}",
+                    required=True,
+                )
+            )
             user_content = pack_sections(
                 model,
-                [
-                    BudgetSection(
-                        current_skill_heading,
-                        f"## {current_skill_heading}\n\n{current_skill}",
-                        required=True,
-                        max_tokens=budgets.max_skill_tokens,
-                    ),
-                    BudgetSection(
-                        "contrastive_evidence",
-                        "## Contrastive Evidence\n\n"
-                        f"{evidence_intro}\n\n" + "\n\n".join(contrastive_parts),
-                        required=True,
-                        max_tokens=budgets.historical_summary_tokens,
-                    ),
-                    BudgetSection(
-                        "instructions",
-                        f"## Instructions\n\n{instructions}",
-                        required=True,
-                    ),
-                ],
+                sections,
                 budgets.reflector_prompt_tokens,
             )
 
@@ -466,6 +553,7 @@ class Reflector:
         current_skill: str,
         pairs: list[ContrastivePair],
         *,
+        rejected_history: list[RejectedReflectionSummary] | None = None,
         model: str = "",
         budgets: BudgetsConfig | None = None,
     ) -> list[dict[str, str]]:
@@ -506,6 +594,7 @@ class Reflector:
             ),
             pairs=pairs,
             formatter=_format_mediator_entry,
+            rejected_history=rejected_history,
             model=model,
             budgets=budgets,
         )
@@ -515,6 +604,7 @@ class Reflector:
         current_skill: str,
         pairs: list[ContrastivePair],
         *,
+        rejected_history: list[RejectedReflectionSummary] | None = None,
         model: str = "",
         budgets: BudgetsConfig | None = None,
         candidate_count: int | None = None,
@@ -561,6 +651,7 @@ class Reflector:
             ),
             pairs=pairs,
             formatter=_format_planner_entry,
+            rejected_history=rejected_history,
             model=model,
             budgets=budgets,
         )
@@ -653,6 +744,49 @@ def _task_ids_from_pairs(pairs: list[ContrastivePair]) -> list[str]:
             if pair.worse.metadata.get("task_id") or pair.better.metadata.get("task_id")
         }
     )
+
+
+def _candidate_by_id(
+    batch: SkillUpdateCandidateBatch,
+    candidate_id: str | None,
+) -> SkillUpdateCandidate | None:
+    if candidate_id is None:
+        return None
+    for candidate in batch.candidates:
+        if candidate.candidate_id == candidate_id:
+            return candidate
+    return None
+
+
+def _format_rejected_reflection_history(
+    rejected_history: list[RejectedReflectionSummary],
+) -> str:
+    if not rejected_history:
+        return ""
+
+    lines = [
+        "\n\n## Recently Rejected Reflection Updates",
+        "Treat these as negative evidence. Do not repeat the same update "
+        "direction unless the new contrastive evidence directly resolves the "
+        "recorded failure.",
+    ]
+    for item in rejected_history:
+        task_ids = ",".join(item.task_ids) if item.task_ids else "n/a"
+        lines.append(
+            f"- iteration={item.iteration} skill={item.skill_id} "
+            f"candidate={item.selected_candidate_id or 'n/a'} "
+            f"kind={item.selected_update_kind or 'n/a'} tasks={task_ids} "
+            f"reason={item.reason or 'n/a'} "
+            f"validation_reason={item.validation_reason or 'n/a'} "
+            f"mean_delta={_format_optional_delta(item.validation_mean_delta)}"
+        )
+    return "\n".join(lines)
+
+
+def _format_optional_delta(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:+.3f}"
 
 
 def _format_reward_context(reward: float, relative_reward: float) -> str:

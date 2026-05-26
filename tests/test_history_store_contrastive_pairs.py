@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from mediated_coevo.models.history_signals import PlannerSignal
+from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
+from mediated_coevo.models.skill import RejectedReflectionBatch, SkillValidationResult
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 
@@ -117,6 +118,25 @@ def test_contrastive_pairs_use_judge_evolution_reward_over_verifier_metadata(
     assert _reward_gap(pairs[0]) == pytest.approx(0.3)
 
 
+def test_tagged_task_counts_group_by_role_and_task(tmp_path):
+    store = HistoryStore(history_dir=tmp_path / "history")
+    _add_entry(store, task_id="task-A", reward=0.1, iteration=0)
+    _add_entry(store, task_id="task-A", reward=0.2, iteration=1)
+    _add_entry(store, task_id="task-B", reward=0.3, iteration=2)
+    _add_entry(store, task_id="task-B", reward=None, iteration=3)
+    store.add(
+        HistoryEntry(
+            iteration=4,
+            agent_role="mediator",
+            payload=MediatorSignal(headline="wrong role"),
+            reward=0.9,
+            metadata={"task_id": "task-A"},
+        )
+    )
+
+    assert store.tagged_task_counts("planner") == {"task-A": 2, "task-B": 1}
+
+
 def test_contrastive_pair_sampling_is_seeded_bounded_and_sorted(tmp_path):
     store = HistoryStore(history_dir=tmp_path / "history")
     for index, reward in enumerate([0.0, 0.1, 0.2, 0.8, 0.9, 1.0]):
@@ -145,3 +165,35 @@ def test_contrastive_pair_sampling_is_seeded_bounded_and_sorted(tmp_path):
         [_reward_gap(pair) for pair in first],
         reverse=True,
     )
+
+
+def test_rejected_reflections_are_persisted_and_queryable(tmp_path):
+    store = HistoryStore(history_dir=tmp_path / "history")
+    rejection_id = store.record_rejected_reflection(
+        RejectedReflectionBatch(
+            batch_id="reflect-planner-iter-0002",
+            iteration=2,
+            skill_id="planner",
+            agent_role="planner",
+            task_ids=["task-A"],
+            base_skill_hash="old-hash",
+            reason="validation_rejected_all_candidates",
+            selected_candidate_id="candidate-1",
+            selected_update_kind="broad_rewrite",
+            validation=SkillValidationResult(
+                validation_id="validation-1",
+                decision="rejected",
+                reason="mean_delta_below_threshold",
+                mean_delta=-0.2,
+            ),
+        )
+    )
+
+    reloaded = HistoryStore(history_dir=tmp_path / "history")
+    rejected = reloaded.query_rejected_reflections(agent_role="planner")
+
+    assert rejected[0].rejection_id == rejection_id
+    assert rejected[0].selected_candidate_id == "candidate-1"
+    assert rejected[0].validation is not None
+    assert rejected[0].validation.reason == "mean_delta_below_threshold"
+    assert reloaded.query_rejected_reflections(agent_role="mediator") == []
