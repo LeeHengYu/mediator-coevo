@@ -38,6 +38,10 @@ from mediated_coevo.analysis.reporting import (
     build_score_summary,
     write_score_summary,
 )
+from mediated_coevo.analysis.task_similarity import (
+    build_task_graph_precompute,
+    write_task_graph_artifacts,
+)
 from mediated_coevo.benchmarks import (
     HarborRunner,
     SkillsBenchFetchError,
@@ -323,7 +327,9 @@ def _run_config_overrides(
         experiment["condition_name"] = _validate_condition_name(condition)
     if skill_updates is not None:
         try:
-            experiment["skill_updates"] = parse_skill_updates(skill_updates).model_dump()
+            experiment["skill_updates"] = parse_skill_updates(
+                skill_updates
+            ).model_dump()
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
 
@@ -413,9 +419,7 @@ def _skillsbench_task_ids_from_unified_cli(
         return _task_ids_from_cli_with_repo(legacy_tasks, None, benchmark_repo)
 
     task_set = (
-        skillsbench_task_set
-        if skillsbench_task_set is not None
-        else legacy_task_set
+        skillsbench_task_set if skillsbench_task_set is not None else legacy_task_set
     )
     if task_set is not None:
         return _task_ids_from_cli_with_repo(None, task_set, benchmark_repo)
@@ -1243,9 +1247,7 @@ def _build_unified_runtime(
     needs_skillsbench = _needs_runtime_skillsbench(selection, config)
     needs_swebench = _needs_runtime_swebench(selection, config)
     skillsbench_repo = (
-        _build_benchmark_repo(PROJECT_ROOT, config)
-        if needs_skillsbench
-        else None
+        _build_benchmark_repo(PROJECT_ROOT, config) if needs_skillsbench else None
     )
     swebench_repo = (
         swebench_helpers.SWEbenchRepository(dataset_name=dataset_name, split=split)
@@ -1336,7 +1338,9 @@ def _print_unified_task_selection(selection: BenchmarkTaskSelection) -> None:
     if selection.skillsbench_task_ids:
         console.print(f"[bold]SkillsBench tasks:[/] {selection.skillsbench_task_ids}")
     if selection.swebench_instance_ids:
-        console.print(f"[bold]SWE-bench instances:[/] {selection.swebench_instance_ids}")
+        console.print(
+            f"[bold]SWE-bench instances:[/] {selection.swebench_instance_ids}"
+        )
     console.print(f"[bold]Executor backend:[/] {selection.backend_name}")
 
 
@@ -1606,8 +1610,7 @@ def run(
         typer.Option(
             "--skillsbench-task-set",
             help=(
-                "Named SkillsBench task set. "
-                f"Available: {_available_task_set_help()}"
+                f"Named SkillsBench task set. Available: {_available_task_set_help()}"
             ),
         ),
     ] = None,
@@ -1857,6 +1860,7 @@ def run(
         remote_harbor_config=remote_harbor_config,
     )
 
+
 @app.command()
 def matrix(
     tasks: str | None = typer.Option(
@@ -2001,6 +2005,44 @@ def inspect_experiment(
     _print_inspection_payload(payload)
 
 
+@app.command("create-graph")
+def create_graph(
+    threshold: float = typer.Option(
+        0.05,
+        "--threshold",
+        min=0.0,
+        help="Minimum similarity score required to keep an edge.",
+    ),
+    tasks_root: Path = typer.Option(
+        PROJECT_ROOT / "benchmarks" / "skillsbench" / "tasks",
+        "--tasks-root",
+        help="Local SkillsBench task directory to analyze.",
+    ),
+    output_dir: Path = typer.Option(
+        PROJECT_ROOT / "data" / "task_graphs" / "skillsbench-local",
+        "--output-dir",
+        help="Directory where graph precompute JSON artifacts are written.",
+    ),
+) -> None:
+    """Create a metadata similarity graph from local SkillsBench tasks."""
+    try:
+        precompute = build_task_graph_precompute(
+            tasks_root,
+            edge_score_threshold=threshold,
+        )
+        write_task_graph_artifacts(precompute, output_dir)
+    except (OSError, ValueError) as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[bold]Tasks:[/] {precompute.task_count}")
+    console.print(f"[bold]Pairs:[/] {precompute.pair_count}")
+    console.print(f"[bold]Threshold:[/] {precompute.active_threshold}")
+    console.print(f"[bold]Kept edges:[/] {precompute.kept_edge_count}")
+    console.print(f"[bold]Cut edges:[/] {precompute.cut_edge_count}")
+    console.print(f"[bold]Output:[/] {output_dir}")
+
+
 @swebench_app.command("list-instances")
 def list_swebench_instances(
     dataset_name: str = typer.Option(
@@ -2072,8 +2114,7 @@ def smoke_swebench(
         None,
         "--run-id",
         help=(
-            "Run ID suffix. The actual SWE-bench run ID is prefixed with "
-            "a timestamp."
+            "Run ID suffix. The actual SWE-bench run ID is prefixed with a timestamp."
         ),
     ),
     timeout: int = typer.Option(
