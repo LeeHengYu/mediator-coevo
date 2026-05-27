@@ -16,7 +16,7 @@ from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
-from tests.config_helpers import experiment_config
+from tests.config_helpers import diffusion_config, experiment_config
 
 
 def _models_config() -> ModelsConfig:
@@ -99,6 +99,7 @@ def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _Skill
             judge="test-judge",
         ),
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     orch.config.experiment.advisor_buffer_max = 2
     orch.skill_store = skill_store

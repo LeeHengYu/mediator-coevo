@@ -18,7 +18,7 @@ from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.main import ExperimentRuntime, MatrixRuntime, app
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
-from tests.config_helpers import experiment_config
+from tests.config_helpers import diffusion_config, experiment_config
 
 
 @dataclass
@@ -79,6 +79,7 @@ def _experiment_root_config() -> Config:
             judge="test-judge",
         ),
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     config.paths.skills_dir = "skills"
     config.paths.data_dir = "data"
@@ -122,6 +123,7 @@ def test_runtime_routing_includes_validation_only_swebench_when_enabled():
             "judge": "test-judge",
         },
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
     config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = True
@@ -148,6 +150,7 @@ def test_runtime_routing_ignores_validation_only_swebench_when_disabled():
             "judge": "test-judge",
         },
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     config.experiment.skill_validation.swebench_instances = ["django__django-11099"]
     config.experiment.skill_validation.allow_swebench_replacement_for_skillsbench = (
@@ -214,6 +217,7 @@ def test_swebench_executor_uses_openrouter_model_for_llm_patch_generation(
             "judge": "openrouter/test/judge",
         },
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
 
     executor = main_module._build_swebench_executor(
@@ -457,6 +461,7 @@ def test_unified_experiment_invokes_judge_after_summary(monkeypatch, tmp_path):
                 "judge": "j",
             },
             experiment=experiment_config(),
+            diffusion=diffusion_config(),
         )
 
         async def run_experiment(self, task_ids, iterations):
@@ -525,6 +530,7 @@ def test_matrix_invokes_judge_for_each_row(monkeypatch):
                 "judge": "j",
             },
             experiment=experiment_config(),
+            diffusion=diffusion_config(),
         )
         history_store = object()
 

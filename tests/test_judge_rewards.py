@@ -24,7 +24,7 @@ from mediated_coevo.models.judge import (
 )
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
-from tests.config_helpers import experiment_config
+from tests.config_helpers import diffusion_config, experiment_config
 
 
 class _FakeJudgeClient:
@@ -73,6 +73,7 @@ def _config() -> Config:
             judge="openrouter/test/judge",
         ),
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
 
 

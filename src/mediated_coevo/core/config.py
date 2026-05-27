@@ -35,6 +35,7 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("experiment", "skill_updates", "executor"),
     ("experiment", "skill_updates", "planner"),
     ("experiment", "skill_updates", "mediator"),
+    ("diffusion", "enabled"),
 )
 
 CONFIG_CLI_HINTS: dict[str, str] = {
@@ -184,12 +185,19 @@ class ExecutorRuntimeConfig(BaseModel):
     harbor_required: bool = True
 
 
+class DiffusionConfig(BaseModel):
+    """Config gate for future graph-aware context diffusion."""
+
+    enabled: bool
+
+
 class Config(BaseModel):
     """Top-level configuration. Loaded from TOML."""
 
     models: ModelsConfig
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     experiment: ExperimentConfig
+    diffusion: DiffusionConfig
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     executor_runtime: ExecutorRuntimeConfig = Field(

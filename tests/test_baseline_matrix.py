@@ -35,7 +35,7 @@ from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
-from tests.config_helpers import experiment_config
+from tests.config_helpers import diffusion_config, experiment_config
 
 
 def _config() -> Config:
@@ -47,6 +47,7 @@ def _config() -> Config:
             judge="test-judge",
         ),
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
 
 
@@ -214,6 +215,9 @@ def _write_minimal_config(config_dir) -> None:
         executor = true
         planner = true
         mediator = true
+
+        [diffusion]
+        enabled = false
         """
     )
 
@@ -249,7 +253,8 @@ def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
                     "planner": True,
                     "mediator": True,
                 },
-            }
+            },
+            "diffusion": {"enabled": False},
         },
     )
 

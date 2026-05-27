@@ -18,7 +18,7 @@ from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
-from tests.config_helpers import experiment_config
+from tests.config_helpers import diffusion_config, experiment_config
 
 
 class _Task:
@@ -260,6 +260,7 @@ def _orchestrator(
             judge="test-judge",
         ),
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     orch.config.experiment.condition_name = condition
     orch.config.experiment.shared_notes = "shared note"
@@ -551,6 +552,27 @@ async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_same_task_prior_context_is_unchanged_without_diffusion_integration(
+    tmp_path,
+):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch._previous_report_by_task["task-A"] = MediatorReport(
+        task_id="task-A",
+        iteration=0,
+        content="same-task report",
+    )
+
+    context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context == "same-task report"
+    assert "Diffused Cross-Task Context" not in context
+
+
+@pytest.mark.asyncio
 async def test_cross_task_full_traces_exclude_target_task(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "full_traces")
     orch.config.experiment.allow_cross_task_feedback = True
@@ -716,6 +738,7 @@ def test_condition_assignment_and_cli_validation_reject_unknown_names():
             "judge": "test-judge",
         },
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     with pytest.raises(ValidationError):
         config.experiment.condition_name = "bad-condition"

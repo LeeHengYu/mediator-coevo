@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-import random
 from collections.abc import Mapping
-from math import ceil
 from typing import Any
 
+from mediated_coevo.core.selection import (
+    choose_seeded_top_fraction,
+    deterministic_seed,
+)
 from mediated_coevo.core.utils import as_optional_float
 from mediated_coevo.models.skill import (
     SkillProposal,
@@ -28,9 +29,7 @@ def stable_selection_seed(
     batch_id: str,
 ) -> int:
     """Derive a deterministic seed for a candidate batch."""
-    raw = f"{base_seed or 0}:{iteration}:{skill_id}:{batch_id}".encode()
-    digest = hashlib.sha256(raw).digest()
-    return int.from_bytes(digest[:8], "big")
+    return deterministic_seed(base_seed or 0, iteration, skill_id, batch_id)
 
 
 def proposal_to_candidate(
@@ -165,14 +164,13 @@ def select_top_quartile_candidate(
     if not valid:
         return None
 
-    ranked = sorted(
+    return choose_seeded_top_fraction(
         valid,
-        key=lambda candidate: (candidate.audit_score, candidate.candidate_id),
-        reverse=True,
+        rank_key=lambda candidate: (candidate.audit_score, candidate.candidate_id),
+        seed=batch.selection_seed,
+        fraction=0.25,
+        minimum=1,
     )
-    top_count = max(1, ceil(len(ranked) * 0.25))
-    top_quartile = ranked[:top_count]
-    return random.Random(batch.selection_seed).choice(top_quartile)
 
 
 def candidate_refs(

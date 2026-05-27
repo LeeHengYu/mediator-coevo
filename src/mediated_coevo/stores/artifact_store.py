@@ -6,7 +6,6 @@ File-backed JSON store indexed by task_id and iteration.
 from __future__ import annotations
 
 import difflib
-import json
 import logging
 from pathlib import Path
 from typing import TypeVar
@@ -21,6 +20,12 @@ from mediated_coevo.evolution.compactor import (
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.skill import SkillUpdate, SkillUpdateCandidateBatch
 from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.stores.json_store import (
+    append_jsonl,
+    load_directory_models,
+    load_model,
+    write_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +52,12 @@ class ArtifactStore:
         """Persist an execution trace. Returns the file path."""
         filename = f"{trace.task_id}_iter{trace.iteration:04d}.json"
         path = self._traces_dir / filename
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"Trace already exists: {path}")
-        path.write_text(trace.model_dump_json(indent=2))
+        write_model(
+            path,
+            trace,
+            overwrite=overwrite,
+            exists_error_prefix="Trace",
+        )
         logger.debug("Stored trace: %s", path)
         return path
 
@@ -59,9 +67,12 @@ class ArtifactStore:
             f"{report.task_id}_iter{report.iteration:04d}_{report.report_id}.json"
         )
         path = self._reports_dir / filename
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"Report already exists: {path}")
-        path.write_text(report.model_dump_json(indent=2))
+        write_model(
+            path,
+            report,
+            overwrite=overwrite,
+            exists_error_prefix="Report",
+        )
         logger.debug("Stored report: %s", path)
         return path
 
@@ -76,10 +87,12 @@ class ArtifactStore:
         """Persist an empirical validation trace outside normal run traces."""
         filename = f"{trace.task_id}_iter{trace.iteration:04d}.json"
         path = self._validation_dir / validation_id / variant / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"Validation trace already exists: {path}")
-        path.write_text(trace.model_dump_json(indent=2))
+        write_model(
+            path,
+            trace,
+            overwrite=overwrite,
+            exists_error_prefix="Validation trace",
+        )
         logger.debug("Stored validation trace: %s", path)
         return path
 
@@ -92,10 +105,12 @@ class ArtifactStore:
     ) -> Path:
         """Persist empirical validation summary evidence."""
         path = self._validation_dir / validation_id / "result.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"Validation result already exists: {path}")
-        path.write_text(result.model_dump_json(indent=2))
+        write_model(
+            path,
+            result,
+            overwrite=overwrite,
+            exists_error_prefix="Validation result",
+        )
         logger.debug("Stored validation result: %s", path)
         return path
 
@@ -109,10 +124,12 @@ class ArtifactStore:
     ) -> Path:
         """Persist validation summary evidence for one candidate variant."""
         path = self._validation_dir / validation_id / variant / "result.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"Validation result already exists: {path}")
-        path.write_text(result.model_dump_json(indent=2))
+        write_model(
+            path,
+            result,
+            overwrite=overwrite,
+            exists_error_prefix="Validation result",
+        )
         logger.debug("Stored validation variant result: %s", path)
         return path
 
@@ -124,9 +141,12 @@ class ArtifactStore:
     ) -> Path:
         """Persist a full candidate batch audit artifact."""
         path = self._candidate_batches_dir / f"{batch.batch_id}.json"
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"Candidate batch already exists: {path}")
-        path.write_text(batch.model_dump_json(indent=2))
+        write_model(
+            path,
+            batch,
+            overwrite=overwrite,
+            exists_error_prefix="Candidate batch",
+        )
         logger.debug("Stored candidate batch: %s", path)
         return path
 
@@ -142,10 +162,12 @@ class ArtifactStore:
         update_dir.mkdir(parents=True, exist_ok=True)
         update_path = update_dir / "update.json"
         diff_path = update_dir / "changes.diff"
-        if update_path.exists() and not overwrite:
-            raise FileExistsError(f"Skill update already exists: {update_path}")
-
-        update_path.write_text(update.model_dump_json(indent=2))
+        write_model(
+            update_path,
+            update,
+            overwrite=overwrite,
+            exists_error_prefix="Skill update",
+        )
         diff_text = _skill_update_diff(update)
         written_diff_path = None
         if diff_text:
@@ -159,18 +181,12 @@ class ArtifactStore:
     def append_skill_update_history(self, entry: BaseModel) -> Path:
         """Append one compact committed-update ledger entry."""
         path = self._skill_updates_dir / "skill_update_history.jsonl"
-        with path.open("a", encoding="utf-8") as history_file:
-            payload = json.dumps(entry.model_dump(mode="json"), sort_keys=True)
-            history_file.write(payload)
-            history_file.write("\n")
-        return path
+        return append_jsonl(path, entry)
 
     def load_trace(self, task_id: str, iteration: int) -> ExecutionTrace | None:
         filename = f"{task_id}_iter{iteration:04d}.json"
         path = self._traces_dir / filename
-        if not path.exists():
-            return None
-        return ExecutionTrace.model_validate_json(path.read_text())
+        return load_model(path, ExecutionTrace)
 
     def _query_artifacts(
         self,
@@ -182,12 +198,7 @@ class ArtifactStore:
     ) -> list[_T]:
         """Generic query: load JSON artifacts, filtered before recent slicing."""
         results: list[_T] = []
-        for path in directory.glob("*.json"):
-            try:
-                artifact = model_cls.model_validate_json(path.read_text())
-            except Exception as e:
-                logger.warning("Failed to load %s %s: %s", model_cls.__name__, path, e)
-                continue
+        for artifact in load_directory_models(directory, model_cls, logger=logger):
             if task_id is not None and artifact.task_id != task_id:
                 continue
             if before_iteration is not None and artifact.iteration >= before_iteration:

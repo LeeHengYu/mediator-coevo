@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from mediated_coevo.core.config import ExperimentConfig, SkillUpdateConfig
+from mediated_coevo.core.config import (
+    DiffusionConfig,
+    ExperimentConfig,
+    SkillUpdateConfig,
+)
+
+
+def diffusion_config() -> DiffusionConfig:
+    return DiffusionConfig(enabled=False)
 
 
 def experiment_config() -> ExperimentConfig:

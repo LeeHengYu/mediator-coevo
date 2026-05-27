@@ -22,7 +22,7 @@ from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
-from tests.config_helpers import experiment_config
+from tests.config_helpers import diffusion_config, experiment_config
 
 
 class _LLM:
@@ -163,6 +163,7 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
             "judge": "test-judge",
         },
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     config.experiment.condition_name = "learned_mediator"
     config.experiment.coevo_interval = 99
@@ -282,6 +283,7 @@ def test_snapshot_and_write_metrics_records_skill_update_ledger(tmp_path):
             "judge": "test-judge",
         },
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     skill_store = _SkillStore()
@@ -380,6 +382,7 @@ async def test_full_traces_cross_task_feedback_is_round_causal(tmp_path):
             "judge": "test-judge",
         },
         experiment=experiment_config(),
+        diffusion=diffusion_config(),
     )
     config.experiment.condition_name = "full_traces"
     config.experiment.allow_cross_task_feedback = True
