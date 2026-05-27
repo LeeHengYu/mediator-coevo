@@ -48,6 +48,7 @@ def _snapshot(
         snapshot_id=snapshot_id,
         run_id=run_id,
         iteration=iteration,
+        task_ids=["task-a", "task-b"],
         graph_policy="same-benchmark-family",
         seed=42,
         edge_records=[

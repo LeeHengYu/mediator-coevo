@@ -68,6 +68,7 @@ class TaskGraphSnapshot(BaseModel):
     snapshot_id: str = Field(default_factory=_record_id)
     run_id: str
     iteration: int = Field(ge=0)
+    task_ids: list[str] = Field(default_factory=list)
     feature_cutoff: datetime | None = None
     edge_records: list[TaskGraphEdgeRecord] = Field(default_factory=list)
     graph_policy: str
