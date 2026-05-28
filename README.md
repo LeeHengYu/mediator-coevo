@@ -433,12 +433,32 @@ Core run options:
 Feedback conditions:
 
 - `no_feedback`: no prior feedback; cannot enable skill updates.
-- `full_traces`: Planner receives compact same-task trace summaries.
-- `shared_notes`: Planner receives configured shared notes configured in config file.
+- `full_traces`: Planner receives compact trace summaries from prior runs.
+- `shared_notes`: Planner receives shared notes configured in the config file.
 - `static_mediator`: Mediator reports are used, but Mediator skill updates are
   invalid.
 - `learned_mediator`: Mediator reports are used, and Mediator/Planner
   co-evolution can be enabled.
+
+Feedback scope terms used in this repo:
+
+- same-task memory: prior context sourced from earlier iterations of the same
+  task only.
+- explicit flat cross-task feedback: prior context sourced from other tasks by
+  the existing condition router when
+  `experiment.allow_cross_task_feedback = true`.
+- graph-aware diffusion: diffusion artifacts stored under the run `diffusion/`
+  directory for later graph-based routing.
+- learned diffusion policy: a future policy layer that would learn which
+  diffusion artifacts to route, rather than relying only on the current
+  explicit condition-based routing.
+
+By default, `config/default.toml` enables explicit flat cross-task feedback with
+`experiment.allow_cross_task_feedback = true`. That default applies before and
+alongside any diffusion work. In other words, cross-task planner context is
+already part of the baseline runtime when the selected condition supports prior
+context; diffusion is an additional mechanism, not the feature that first turns
+on cross-task sharing.
 
 Skill update values:
 
@@ -480,6 +500,12 @@ Baseline rows:
 
 Each row gets an isolated copy of the skill tree under its experiment
 directory.
+
+The `_same_task` names in the preset table are retained as stable row labels.
+Under the current default `experiment.allow_cross_task_feedback = true`, those
+rows still permit explicit flat cross-task feedback whenever the selected
+condition exposes prior context. Disable cross-task feedback explicitly if you
+need strictly same-task-only routing semantics.
 
 ## `inspect`
 
@@ -703,7 +729,9 @@ Current config defaults include:
 - `experiment.advisor_buffer_max = 2`
 - `experiment.seed = 42`
 - `experiment.condition_name = "learned_mediator"`
-- `experiment.allow_cross_task_feedback = true`
+- `experiment.allow_cross_task_feedback = true`, so eligible conditions append
+  explicit flat cross-task context by default, including in runs that also
+  enable diffusion.
 - `executor_runtime.agent_name = "hermes"`
 - `executor_runtime.harbor_timeout_sec = 5400`
 - `executor_runtime.injected_skill_name = "executor"` names the Executor policy

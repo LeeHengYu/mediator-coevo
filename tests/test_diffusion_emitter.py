@@ -215,7 +215,12 @@ async def test_orchestrator_emits_diffusion_artifacts_only_when_enabled(tmp_path
         trace=trace,
         report=report,
         record=_record(iteration=1, reward=0.6),
-        task_metadata={"task_category": "cli", "verifier_type": "pytest"},
+        task_metadata={
+            "task_category": "cli",
+            "task_difficulty": "medium",
+            "expected_reward_range": (0.0, 1.0),
+            "verifier_type": "pytest",
+        },
         judge_reward=0.7,
     )
 
@@ -244,7 +249,12 @@ async def test_orchestrator_emits_diffusion_artifacts_only_when_enabled(tmp_path
         trace=trace,
         report=report,
         record=_record(iteration=1, reward=0.6),
-        task_metadata={"task_category": "cli", "verifier_type": "pytest"},
+        task_metadata={
+            "task_category": "cli",
+            "task_difficulty": "medium",
+            "expected_reward_range": (0.0, 1.0),
+            "verifier_type": "pytest",
+        },
         judge_reward=0.7,
     )
 
