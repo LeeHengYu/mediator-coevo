@@ -268,6 +268,8 @@ def _orchestrator(
     orch.skill_advisor = _Advisor()
     orch._proposal_buffer = []
     orch._previous_report_by_task = {}
+    orch._released_cross_task_reports_by_task = {}
+    orch._staged_cross_task_reports_by_task = {}
     orch._previous_reward_by_task = {}
     orch.executor_skill_gate = ExecutorSkillGate(
         config=orch.config,
@@ -522,7 +524,7 @@ async def test_withheld_mediator_report_is_recorded_for_reflection(tmp_path):
 @pytest.mark.asyncio
 async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch._previous_report_by_task["task-B"] = MediatorReport(
+    orch._released_cross_task_reports_by_task["task-B"] = MediatorReport(
         task_id="task-B",
         iteration=2,
         content="cross-task report",
@@ -549,6 +551,62 @@ async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
     assert "allow_cross_task_feedback=true" in context
     assert "source_task=task-B" in context
     assert "cross-task report" in context
+
+
+@pytest.mark.asyncio
+async def test_cross_task_mediator_reports_are_staged_until_next_iteration(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch._staged_cross_task_reports_by_task["task-B"] = MediatorReport(
+        task_id="task-B",
+        iteration=0,
+        content="staged cross-task report",
+    )
+
+    same_iteration_context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=0,
+    )
+    orch._release_staged_cross_task_reports()
+    next_iteration_context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert same_iteration_context is None
+    assert next_iteration_context is not None
+    assert "source_task=task-B iter=0" in next_iteration_context
+    assert "staged cross-task report" in next_iteration_context
+
+
+@pytest.mark.asyncio
+async def test_cross_task_mediator_reports_exclude_current_iteration(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch._released_cross_task_reports_by_task["task-B"] = MediatorReport(
+        task_id="task-B",
+        iteration=1,
+        content="same-iteration report",
+    )
+    orch._released_cross_task_reports_by_task["task-C"] = MediatorReport(
+        task_id="task-C",
+        iteration=0,
+        content="previous-iteration report",
+    )
+
+    context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context is not None
+    assert "source_task=task-C iter=0" in context
+    assert "previous-iteration report" in context
+    assert "source_task=task-B iter=1" not in context
+    assert "same-iteration report" not in context
 
 
 @pytest.mark.asyncio

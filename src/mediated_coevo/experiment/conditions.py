@@ -184,7 +184,7 @@ async def get_cross_task_prior_context(
     condition: ConditionName,
     task_id: str,
     artifact_store: ArtifactStore,
-    previous_reports_by_task: dict[str, MediatorReport],
+    released_reports_by_task: dict[str, MediatorReport],
     *,
     model: str,
     recent: int = 3,
@@ -234,8 +234,10 @@ async def get_cross_task_prior_context(
     if condition in MEDIATOR_CONDITIONS:
         reports = [
             report
-            for source_task, report in previous_reports_by_task.items()
-            if source_task != task_id and not report.withheld
+            for source_task, report in released_reports_by_task.items()
+            if source_task != task_id
+            and not report.withheld
+            and (current_iteration is None or report.iteration < current_iteration)
         ]
         if not reports:
             return None

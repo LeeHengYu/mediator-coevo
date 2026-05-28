@@ -141,6 +141,8 @@ class Orchestrator:
 
         self._metrics_path = experiment_dir / "metrics.jsonl"
         self._previous_report_by_task: dict[str, MediatorReport] = {}
+        self._released_cross_task_reports_by_task: dict[str, MediatorReport] = {}
+        self._staged_cross_task_reports_by_task: dict[str, MediatorReport] = {}
         self._previous_reward_by_task: dict[str, float] = {}
 
     async def run_experiment(
@@ -160,6 +162,7 @@ class Orchestrator:
         ]
 
         for iteration in range(num_iterations):
+            self._release_staged_cross_task_reports()
             iteration_records: list[IterationRecord] = []
             for task_id in task_ids:
                 logger.info(
@@ -192,6 +195,15 @@ class Orchestrator:
             len(records),
         )
         return records
+
+    def _release_staged_cross_task_reports(self) -> None:
+        """Promote cross-task reports only at iteration boundaries."""
+        if not self._staged_cross_task_reports_by_task:
+            return
+        self._released_cross_task_reports_by_task.update(
+            self._staged_cross_task_reports_by_task
+        )
+        self._staged_cross_task_reports_by_task.clear()
 
     async def _run_iteration(
         self,
@@ -486,6 +498,7 @@ class Orchestrator:
         )
         if report is not None and report.is_exposed:
             self._previous_report_by_task[task_id] = report
+            self._staged_cross_task_reports_by_task[task_id] = report
         return mediator_entry_id, planner_entry_id
 
     async def _build_prior_context(
@@ -516,7 +529,7 @@ class Orchestrator:
             condition=condition,
             task_id=task_id,
             artifact_store=self.artifact_store,
-            previous_reports_by_task=self._previous_report_by_task,
+            released_reports_by_task=self._released_cross_task_reports_by_task,
             llm_client=llm_client,
             model=self.planner.llm_client.model,
             budgets=self.config.budgets,
