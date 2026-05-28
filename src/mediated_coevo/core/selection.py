@@ -6,14 +6,9 @@ import hashlib
 import random
 from collections.abc import Callable, Sequence
 from math import ceil
-from typing import Any, Protocol, TypeVar
+from typing import Any, TypeVar
 
 _TItem = TypeVar("_TItem")
-_TRankKey = TypeVar("_TRankKey", bound="_SupportsLessThan")
-
-
-class _SupportsLessThan(Protocol):
-    def __lt__(self, other: Any, /) -> bool: ...
 
 
 def deterministic_seed(*parts: object) -> int:
@@ -26,7 +21,7 @@ def deterministic_seed(*parts: object) -> int:
 def choose_seeded_top_fraction(
     items: Sequence[_TItem],
     *,
-    rank_key: Callable[[_TItem], _TRankKey],
+    rank_key: Callable[[_TItem], Any],
     seed: int | None,
     fraction: float,
     minimum: int = 1,

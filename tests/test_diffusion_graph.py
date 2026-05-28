@@ -9,39 +9,45 @@ import pytest
 
 from mediated_coevo.diffusion import (
     DiffusionStore,
-    construct_edge_records,
-    construct_feature_index,
-    construct_snapshot,
-    construct_snapshot_from_artifacts,
-    load_precomputed_similarity_artifacts,
+    DiffusionNetwork,
+    GraphBuildSpec,
 )
 
 
-def test_construct_feature_index_filters_selected_task_ids() -> None:
-    index = construct_feature_index(
-        task_profiles=_task_profiles()["profiles"],
+def test_diffusion_network_filters_selected_task_ids(tmp_path: Path) -> None:
+    network = _build_network(
+        tmp_path,
         task_ids=["task-b", "task-a"],
+        run_id="run-filter",
+        iteration=1,
     )
 
-    assert list(index) == ["task-b", "task-a"]
-    assert index["task-a"].category == "build"
-    assert index["task-b"].tags == ["python", "build"]
+    assert [node.task_id for node in network.get_nodes()] == ["task-b", "task-a"]
+    assert network.get_node("task-a").profile.category == "build"
+    assert network.get_node("task-b").profile.tags == ["python", "build"]
 
 
-def test_construct_feature_index_rejects_unknown_task_ids() -> None:
+def test_diffusion_network_rejects_unknown_task_ids(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown task IDs"):
-        construct_feature_index(
-            task_profiles=_task_profiles()["profiles"],
+        _build_network(
+            tmp_path,
             task_ids=["missing-task"],
+            run_id="run-missing",
+            iteration=1,
         )
 
 
-def test_construct_edge_records_respects_threshold_cut_and_is_bidirectional() -> None:
-    edges = construct_edge_records(
-        pairwise_similarity=_pairwise_similarity()["pairs"],
+def test_diffusion_network_respects_threshold_cut_and_is_bidirectional(
+    tmp_path: Path,
+) -> None:
+    network = _build_network(
+        tmp_path,
         task_ids=["task-a", "task-b", "task-c"],
+        run_id="run-threshold",
+        iteration=2,
         use_threshold_cut=True,
     )
+    edges = network.get_edge_records()
 
     assert [(edge.source_task_id, edge.target_task_id) for edge in edges] == [
         ("task-a", "task-b"),
@@ -52,12 +58,15 @@ def test_construct_edge_records_respects_threshold_cut_and_is_bidirectional() ->
     assert all(edge.metadata["threshold_filter_applied"] is True for edge in edges)
 
 
-def test_construct_edge_records_can_include_unkept_pairs() -> None:
-    edges = construct_edge_records(
-        pairwise_similarity=_pairwise_similarity()["pairs"],
+def test_diffusion_network_can_include_unkept_pairs(tmp_path: Path) -> None:
+    network = _build_network(
+        tmp_path,
         task_ids=["task-a", "task-b", "task-c"],
+        run_id="run-unkept",
+        iteration=2,
         use_threshold_cut=False,
     )
+    edges = network.get_edge_records()
 
     assert [(edge.source_task_id, edge.target_task_id) for edge in edges] == [
         ("task-a", "task-b"),
@@ -68,20 +77,16 @@ def test_construct_edge_records_can_include_unkept_pairs() -> None:
     assert all(edge.metadata["threshold_filter_applied"] is False for edge in edges)
 
 
-def test_construct_snapshot_records_task_ids_and_isolated_nodes() -> None:
-    edges = construct_edge_records(
-        pairwise_similarity=_pairwise_similarity()["pairs"],
+def test_diffusion_network_snapshot_records_task_ids_and_isolated_nodes(
+    tmp_path: Path,
+) -> None:
+    network = _build_network(
+        tmp_path,
         task_ids=["task-a", "task-b", "task-c"],
-        use_threshold_cut=True,
-    )
-
-    snapshot = construct_snapshot(
         run_id="run-1",
         iteration=3,
-        task_ids=["task-a", "task-b", "task-c"],
-        graph_policy="precomputed_similarity",
-        edge_records=edges,
     )
+    snapshot = network.to_snapshot()
 
     assert snapshot.task_ids == ["task-a", "task-b", "task-c"]
     assert snapshot.metadata["task_count"] == 3
@@ -89,30 +94,41 @@ def test_construct_snapshot_records_task_ids_and_isolated_nodes() -> None:
     assert snapshot.metadata["isolated_task_ids"] == ["task-c"]
 
 
-def test_construct_snapshot_from_artifacts_round_trips_through_store(
+def test_diffusion_network_builds_nodes_neighbors_and_snapshot(tmp_path: Path) -> None:
+    network = _build_network(
+        tmp_path,
+        task_ids=["task-b", "task-a", "task-c"],
+        run_id="run-oo",
+        iteration=5,
+    )
+
+    assert [node.task_id for node in network.get_nodes()] == [
+        "task-b",
+        "task-a",
+        "task-c",
+    ]
+    assert [node.task_id for node in network.get_neighbors("task-a")] == ["task-b"]
+    assert network.get_isolated_task_ids() == ["task-c"]
+
+    snapshot = network.to_snapshot()
+    assert snapshot.run_id == "run-oo"
+    assert snapshot.iteration == 5
+    assert snapshot.task_ids == ["task-b", "task-a", "task-c"]
+    assert snapshot.metadata["edge_count"] == 2
+
+
+def test_diffusion_network_snapshot_round_trips_through_store(
     tmp_path: Path,
 ) -> None:
-    graph_dir = tmp_path / "graph"
-    graph_dir.mkdir()
-    (graph_dir / "task_profiles.json").write_text(json.dumps(_task_profiles()))
-    (graph_dir / "pairwise_similarity.json").write_text(
-        json.dumps(_pairwise_similarity())
-    )
-
-    profiles_artifact, pairwise_artifact = load_precomputed_similarity_artifacts(
-        graph_dir
-    )
-    assert profiles_artifact.task_count == 3
-    assert pairwise_artifact.pair_count == 2
-
-    snapshot = construct_snapshot_from_artifacts(
-        graph_dir=graph_dir,
+    network = _build_network(
+        tmp_path,
         task_ids=["task-a", "task-b", "task-c"],
         run_id="run-2",
         iteration=4,
         feature_cutoff=datetime(2026, 5, 27, 12, 0, 0),
         seed=42,
     )
+    snapshot = network.to_snapshot()
 
     store = DiffusionStore(tmp_path / "diffusion")
     store.store_graph_snapshot(snapshot)
@@ -126,7 +142,35 @@ def test_construct_snapshot_from_artifacts_round_trips_through_store(
     assert loaded.metadata["active_threshold"] == pytest.approx(0.05)
     assert loaded.metadata["threshold_kind"] == "absolute_score"
 
-
+def _build_network(
+    tmp_path: Path,
+    *,
+    task_ids: list[str],
+    run_id: str,
+    iteration: int,
+    graph_policy: str = "precomputed_similarity",
+    feature_cutoff: datetime | None = None,
+    seed: int | None = None,
+    use_threshold_cut: bool = True,
+) -> DiffusionNetwork:
+    graph_dir = tmp_path / f"graph-{run_id}-{iteration}"
+    graph_dir.mkdir()
+    (graph_dir / "task_profiles.json").write_text(json.dumps(_task_profiles()))
+    (graph_dir / "pairwise_similarity.json").write_text(
+        json.dumps(_pairwise_similarity())
+    )
+    return DiffusionNetwork.from_graph_dir(
+        GraphBuildSpec(
+            graph_dir=graph_dir,
+            task_ids=task_ids,
+            run_id=run_id,
+            iteration=iteration,
+            graph_policy=graph_policy,
+            feature_cutoff=feature_cutoff,
+            seed=seed,
+            use_threshold_cut=use_threshold_cut,
+        )
+    )
 def _task_profiles() -> dict[str, Any]:
     return {
         "task_count": 3,

@@ -1,13 +1,11 @@
 """Diffusion models, graph constructors, and storage primitives."""
 
 from .graph import (
+    DiffusionNetwork,
+    GraphBuildSpec,
     PairwiseSimilarityArtifact,
+    TaskGraphNode,
     TaskProfilesArtifact,
-    construct_edge_records,
-    construct_feature_index,
-    construct_snapshot,
-    construct_snapshot_from_artifacts,
-    load_precomputed_similarity_artifacts,
 )
 from .models import (
     CandidateRecord,
@@ -28,18 +26,16 @@ __all__ = [
     "DiffusionArtifact",
     "DiffusionArtifactType",
     "DiffusionRiskLevel",
+    "DiffusionNetwork",
     "DiffusionStore",
+    "GraphBuildSpec",
     "OutcomeAssociation",
     "PairwiseSimilarityArtifact",
     "RenderRecord",
     "SelectionRecord",
     "TaskProfilesArtifact",
     "TaskGraphEdgeRecord",
+    "TaskGraphNode",
     "TaskGraphSnapshot",
     "UseCitationRecord",
-    "construct_edge_records",
-    "construct_feature_index",
-    "construct_snapshot",
-    "construct_snapshot_from_artifacts",
-    "load_precomputed_similarity_artifacts",
 ]
