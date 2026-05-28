@@ -1,5 +1,6 @@
 """Diffusion models, graph constructors, and storage primitives."""
 
+from .emitter import DiffusionEmitter, emit_diffusion_artifacts
 from .graph import (
     DiffusionNetwork,
     GraphBuildSpec,
@@ -23,11 +24,13 @@ from .store import DiffusionStore
 
 __all__ = [
     "CandidateRecord",
+    "DiffusionEmitter",
     "DiffusionArtifact",
     "DiffusionArtifactType",
     "DiffusionRiskLevel",
     "DiffusionNetwork",
     "DiffusionStore",
+    "emit_diffusion_artifacts",
     "GraphBuildSpec",
     "OutcomeAssociation",
     "PairwiseSimilarityArtifact",

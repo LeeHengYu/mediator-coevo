@@ -25,6 +25,7 @@ from mediated_coevo.analysis.judge_rewards import (
 from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
+from mediated_coevo.diffusion import DiffusionStore, emit_diffusion_artifacts
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.candidates import (
     build_candidate_batch,
@@ -118,6 +119,7 @@ class Orchestrator:
         self.skill_store = skill_store
         self.artifact_store = artifact_store
         self.history_store = history_store
+        self._diffusion_store = DiffusionStore(experiment_dir / "diffusion")
         self.benchmark_repo = benchmark_repo
         self.config = config
         self.experiment_dir = experiment_dir
@@ -359,6 +361,13 @@ class Orchestrator:
             record.advisor_reason = self.executor_skill_gate.last_advisor_reason
             record.advisor_rejection_id = self.executor_skill_gate.last_rejection_id
             record.proposal_ids = list(self.executor_skill_gate.last_proposal_ids)
+        await self._emit_diffusion_artifacts(
+            trace=trace,
+            report=report,
+            record=record,
+            task_metadata=task_metadata,
+            judge_reward=outcome_reward,
+        )
         return record
 
     async def _judge_evolution_reward(
@@ -554,6 +563,35 @@ class Orchestrator:
         if prior_context:
             return f"{prior_context}\n\n{header}\n\n{cross_context}"
         return f"{header}\n\n{cross_context}"
+
+    async def _emit_diffusion_artifacts(
+        self,
+        *,
+        trace: ExecutionTrace,
+        report: MediatorReport | None,
+        record: IterationRecord,
+        task_metadata: TaskMetadataFields,
+        judge_reward: float | None,
+    ) -> None:
+        if not self.config.diffusion.enabled:
+            return
+
+        if not hasattr(self, "_diffusion_store"):
+            self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
+
+        artifacts = await emit_diffusion_artifacts(
+            trace=trace,
+            report=report,
+            record=record,
+            model=self.planner.llm_client.model,
+            llm_client=self.mediator.llm_client,
+            budgets=self.config.budgets,
+            condition_name=self.config.experiment.condition_name,
+            task_metadata=task_metadata,
+            judge_reward=judge_reward,
+        )
+        for artifact in artifacts:
+            self._diffusion_store.store_artifact(artifact, overwrite=True)
 
     async def _coevolve(
         self,
