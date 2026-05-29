@@ -46,6 +46,7 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "seed": record.seed,
         "baseline_preset": record.baseline_preset,
         "cross_task_feedback_enabled": record.cross_task_feedback_enabled,
+        "diffusion_policy": record.diffusion_policy,
         "skill_update_policy": record.skill_update_policy,
         "planner_model": record.models.get("planner"),
         "executor_model": record.models.get("executor"),

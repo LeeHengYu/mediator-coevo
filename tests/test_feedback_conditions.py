@@ -437,6 +437,7 @@ async def test_feedback_conditions_control_planner_context_and_mediator_calls(
     assert mediator.process_calls == expected_mediator_calls
     assert record.condition_name == condition
     assert record.cross_task_feedback_enabled is False
+    assert record.diffusion_policy == "none"
     assert record.execution_trace is not None
     assert record.execution_trace.iteration == 1
 

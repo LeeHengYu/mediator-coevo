@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 class ExperimentRecordFields(TypedDict):
     baseline_preset: str | None
     cross_task_feedback_enabled: bool
+    diffusion_policy: str
     skill_update_policy: dict[str, bool]
 
 
@@ -177,6 +178,7 @@ def experiment_record_fields(config: Config) -> ExperimentRecordFields:
     return {
         "baseline_preset": config.experiment.baseline_preset,
         "cross_task_feedback_enabled": (config.experiment.allow_cross_task_feedback),
+        "diffusion_policy": config.diffusion.policy,
         "skill_update_policy": config.experiment.skill_updates.model_dump(),
     }
 

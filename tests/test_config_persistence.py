@@ -36,6 +36,7 @@ def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
     assert "shared_notes" not in saved["experiment"]
     assert saved["experiment"]["allow_cross_task_feedback"] is False
     assert saved["diffusion"]["enabled"] is False
+    assert saved["diffusion"]["policy"] == "none"
     assert saved["experiment"]["skill_updates"] == {
         "executor": True,
         "planner": True,

@@ -8,7 +8,7 @@ from mediated_coevo.core.config import (
 
 
 def diffusion_config() -> DiffusionConfig:
-    return DiffusionConfig(enabled=False)
+    return DiffusionConfig(enabled=False, policy="none")
 
 
 def experiment_config() -> ExperimentConfig:

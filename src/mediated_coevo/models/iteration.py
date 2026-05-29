@@ -45,6 +45,7 @@ class IterationRecord(BaseModel):
     executor_agent: str | None = None
     baseline_preset: str | None = None
     cross_task_feedback_enabled: bool = False
+    diffusion_policy: str = "none"
     skill_update_policy: dict[str, bool] = Field(default_factory=dict)
     skill_hashes: dict[str, str] = Field(default_factory=dict)
     skill_version: str | None = None

@@ -218,6 +218,7 @@ def _write_minimal_config(config_dir) -> None:
 
         [diffusion]
         enabled = false
+        policy = "none"
         """
     )
 
@@ -254,12 +255,52 @@ def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
                     "mediator": True,
                 },
             },
-            "diffusion": {"enabled": False},
+            "diffusion": {"enabled": False, "policy": "none"},
         },
     )
 
     assert config.experiment.num_iterations == 3
     assert config.experiment.seed == 7
+
+
+def test_load_config_requires_diffusion_policy_from_toml_or_overrides(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "default.toml").write_text(
+        """
+        [models]
+        planner = "test-planner"
+        executor = "test-executor"
+        mediator = "test-mediator"
+        judge = "test-judge"
+
+        [experiment]
+        num_iterations = 2
+        coevo_interval = 2
+        advisor_buffer_max = 2
+        seed = 42
+        condition_name = "learned_mediator"
+        allow_cross_task_feedback = false
+
+        [experiment.skill_updates]
+        executor = true
+        planner = true
+        mediator = true
+
+        [diffusion]
+        enabled = false
+        """
+    )
+
+    with pytest.raises(ConfigLoadError, match="diffusion.policy"):
+        load_config(config_dir)
+
+    config = load_config(
+        config_dir,
+        overrides={"diffusion": {"policy": "none"}},
+    )
+
+    assert config.diffusion.policy == "none"
 
 
 def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):

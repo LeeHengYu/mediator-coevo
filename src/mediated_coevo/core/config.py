@@ -5,7 +5,7 @@ from __future__ import annotations
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,6 +36,7 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("experiment", "skill_updates", "planner"),
     ("experiment", "skill_updates", "mediator"),
     ("diffusion", "enabled"),
+    ("diffusion", "policy"),
 )
 
 CONFIG_CLI_HINTS: dict[str, str] = {
@@ -189,6 +190,7 @@ class DiffusionConfig(BaseModel):
     """Config gate for future graph-aware context diffusion."""
 
     enabled: bool
+    policy: Literal["none"]
 
 
 class Config(BaseModel):
