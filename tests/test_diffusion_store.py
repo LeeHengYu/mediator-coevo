@@ -3,17 +3,13 @@ from __future__ import annotations
 import pytest
 
 from mediated_coevo.diffusion import (
-    CandidateRecord,
+    DiffusedRecord,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
     DiffusionStore,
-    OutcomeAssociation,
-    RenderRecord,
-    SelectionRecord,
     TaskGraphEdgeRecord,
     TaskGraphSnapshot,
-    UseCitationRecord,
 )
 
 
@@ -62,13 +58,13 @@ def _snapshot(
     )
 
 
-def _candidate_record(
+def _diffused_record(
     artifact_id: str,
     *,
     target_task_id: str = "task-b",
     target_iteration: int = 3,
-) -> CandidateRecord:
-    return CandidateRecord(
+) -> DiffusedRecord:
+    return DiffusedRecord(
         artifact_id=artifact_id,
         source_task_id="task-a",
         source_iteration=1,
@@ -77,10 +73,21 @@ def _candidate_record(
         target_iteration=target_iteration,
         target_run_id="run-1",
         snapshot_id="snapshot-1",
-        policy_name="top_k_similarity",
-        relation="same-benchmark-family",
+        policy_name="capped_broadcast",
+        relation="broadcast",
+        reason="selected_in_top_3_by_recency",
         eligible=True,
-        reason="score above threshold",
+        selected=True,
+        rendered=True,
+        rendered_section="Diffused Cross-Task Context",
+        token_count=24,
+        cited_by="planner",
+        citation_text="artifact_id=artifact-1",
+        verifier_reward=1.0,
+        judge_reward=0.8,
+        success=True,
+        regression=False,
+        notes="rendered artifact preceded a clean solve",
     )
 
 
@@ -128,94 +135,33 @@ def test_store_graph_snapshot_overwrite_replaces_existing_snapshot(tmp_path):
     assert loaded.iteration == 4
 
 
-def test_append_record_ledgers_round_trip(tmp_path):
+def test_append_diffused_records_round_trip(tmp_path):
     store = DiffusionStore(tmp_path / "diffusion")
     artifact = _artifact("artifact-1")
     store.store_artifact(artifact)
 
-    candidate = _candidate_record("artifact-1")
-    selection = SelectionRecord(
-        artifact_id="artifact-1",
-        source_task_id="task-a",
-        source_iteration=1,
-        source_run_id="run-1",
-        target_task_id="task-b",
-        target_iteration=3,
-        target_run_id="run-1",
-        snapshot_id="snapshot-1",
-        policy_name="top_k_similarity",
-        relation="same-benchmark-family",
-        selected=True,
-        reason="highest score",
-    )
-    render = RenderRecord(
-        artifact_id="artifact-1",
-        source_task_id="task-a",
-        source_iteration=1,
-        source_run_id="run-1",
-        target_task_id="task-b",
-        target_iteration=3,
-        target_run_id="run-1",
-        snapshot_id="snapshot-1",
-        policy_name="top_k_similarity",
-        relation="same-benchmark-family",
-        rendered_section="Diffused Cross-Task Context",
-        token_count=24,
-    )
-    citation = UseCitationRecord(
-        artifact_id="artifact-1",
-        source_task_id="task-a",
-        source_iteration=1,
-        source_run_id="run-1",
-        target_task_id="task-b",
-        target_iteration=3,
-        target_run_id="run-1",
-        snapshot_id="snapshot-1",
-        cited_by="planner",
-        citation_text="artifact_id=artifact-1",
-    )
-    outcome = OutcomeAssociation(
-        artifact_id="artifact-1",
-        source_task_id="task-a",
-        source_iteration=1,
-        source_run_id="run-1",
-        target_task_id="task-b",
-        target_iteration=3,
-        target_run_id="run-1",
-        snapshot_id="snapshot-1",
-        verifier_reward=1.0,
-        judge_reward=0.8,
-        success=True,
-        regression=False,
-        notes="rendered artifact preceded a clean solve",
-    )
+    record = _diffused_record("artifact-1")
+    store.append_diffused_record(record)
 
-    store.append_candidate_record(candidate)
-    store.append_selection_record(selection)
-    store.append_render_record(render)
-    store.append_use_citation_record(citation)
-    store.append_outcome_association(outcome)
+    loaded = store.query_diffused_records(target_task_id="task-b")
 
-    assert store.query_candidate_records(target_task_id="task-b")[0].eligible is True
-    assert store.query_selection_records(artifact_id="artifact-1")[0].selected is True
-    assert store.query_render_records(target_task_id="task-b")[0].token_count == 24
-    assert (
-        store.query_use_citation_records(artifact_id="artifact-1")[0].cited_by
-        == "planner"
-    )
-    assert store.query_outcome_associations(target_task_id="task-b")[0].success is True
+    assert loaded[0].eligible is True
+    assert loaded[0].selected is True
+    assert loaded[0].rendered is True
+    assert loaded[0].token_count == 24
+    assert loaded[0].cited_by == "planner"
+    assert loaded[0].success is True
 
 
-def test_query_candidate_records_skips_malformed_jsonl_lines(tmp_path, caplog):
+def test_query_diffused_records_skips_malformed_jsonl_lines(tmp_path, caplog):
     store = DiffusionStore(tmp_path / "diffusion")
-    store.append_candidate_record(_candidate_record("artifact-1", target_iteration=2))
-    path = tmp_path / "diffusion" / "candidate_records.jsonl"
+    store.append_diffused_record(_diffused_record("artifact-1", target_iteration=2))
+    path = tmp_path / "diffusion" / "diffused_records.jsonl"
     path.write_text(
-        path.read_text()
-        + '{"artifact_id": "artifact-2", "target_iteration": "bad"}\n'
+        path.read_text() + '{"artifact_id": "artifact-2", "target_iteration": "bad"}\n'
     )
 
-    records = store.query_candidate_records(target_task_id="task-b", recent=10)
+    records = store.query_diffused_records(target_task_id="task-b", recent=10)
 
     assert [record.artifact_id for record in records] == ["artifact-1"]
-    assert "Failed to load CandidateRecord" in caplog.text
+    assert "Failed to load DiffusedRecord" in caplog.text

@@ -25,7 +25,12 @@ from mediated_coevo.analysis.judge_rewards import (
 from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
-from mediated_coevo.diffusion import DiffusionStore, emit_diffusion_artifacts
+from mediated_coevo.diffusion import (
+    DiffusionStore,
+    TaskGraphSnapshot,
+    build_capped_broadcast_context,
+    emit_diffusion_artifacts,
+)
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.candidates import (
     build_candidate_batch,
@@ -146,6 +151,7 @@ class Orchestrator:
         self._released_cross_task_reports_by_task: dict[str, MediatorReport] = {}
         self._staged_cross_task_reports_by_task: dict[str, MediatorReport] = {}
         self._previous_reward_by_task: dict[str, float] = {}
+        self._diffusion_context_by_target: dict[tuple[str, int], dict[str, Any]] = {}
 
     async def run_experiment(
         self,
@@ -361,6 +367,7 @@ class Orchestrator:
             record.advisor_reason = self.executor_skill_gate.last_advisor_reason
             record.advisor_rejection_id = self.executor_skill_gate.last_rejection_id
             record.proposal_ids = list(self.executor_skill_gate.last_proposal_ids)
+        self._attach_diffusion_context_metrics(record)
         await self._emit_diffusion_artifacts(
             trace=trace,
             report=report,
@@ -518,6 +525,7 @@ class Orchestrator:
         current_iteration: int | None = None,
     ) -> str | None:
         """Build same-task prior context, with explicit opt-in cross-task context."""
+        self._ensure_diffusion_runtime_state()
         llm_client = self.mediator.llm_client if condition == "full_traces" else None
         prior_context = await get_prior_context(
             condition=condition,
@@ -533,6 +541,20 @@ class Orchestrator:
         )
         if not self.config.experiment.allow_cross_task_feedback:
             return prior_context
+
+        diffusion_context = self._build_diffusion_context(
+            task_id=task_id,
+            current_iteration=current_iteration,
+        )
+        if diffusion_context is not None:
+            logger.info(
+                "Diffusion context injected: policy=%s target_task=%s",
+                self.config.diffusion.policy,
+                task_id,
+            )
+            if prior_context:
+                return f"{prior_context}\n\n{diffusion_context}"
+            return diffusion_context
 
         cross_context = await get_cross_task_prior_context(
             condition=condition,
@@ -573,11 +595,9 @@ class Orchestrator:
         task_metadata: TaskMetadataFields,
         judge_reward: float | None,
     ) -> None:
+        self._ensure_diffusion_runtime_state()
         if not self.config.diffusion.enabled:
             return
-
-        if not hasattr(self, "_diffusion_store"):
-            self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
 
         artifacts = await emit_diffusion_artifacts(
             trace=trace,
@@ -592,6 +612,107 @@ class Orchestrator:
         )
         for artifact in artifacts:
             self._diffusion_store.store_artifact(artifact, overwrite=True)
+
+    def _build_diffusion_context(
+        self,
+        *,
+        task_id: str,
+        current_iteration: int | None,
+    ) -> str | None:
+        self._ensure_diffusion_runtime_state()
+        if not self.config.diffusion.enabled:
+            return None
+        if self.config.diffusion.policy != "capped_broadcast":
+            return None
+        if current_iteration is None:
+            return None
+
+        graph_dir = self.experiment_dir / "task-graph"
+        task_ids = self._known_task_ids(task_id)
+        if len(task_ids) < 2:
+            self._diffusion_context_by_target[(task_id, current_iteration)] = {
+                "graph_snapshot_id": None,
+                "graph_policy": None,
+                "selected_count": 0,
+                "rendered_count": 0,
+                "context_tokens": 0,
+                "source_task_ids": [],
+            }
+            return None
+
+        snapshot = self._diffusion_snapshot(
+            graph_dir=graph_dir,
+            task_ids=task_ids,
+            iteration=current_iteration,
+        )
+        bundle = build_capped_broadcast_context(
+            store=self._diffusion_store,
+            snapshot=snapshot,
+            model=self.planner.llm_client.model,
+            target_task_id=task_id,
+            target_iteration=current_iteration,
+            target_run_id=None,
+            max_artifacts=self.config.diffusion.max_artifacts,
+        )
+        self._diffusion_context_by_target[(task_id, current_iteration)] = {
+            "graph_snapshot_id": bundle.snapshot_id,
+            "graph_policy": bundle.graph_policy,
+            "selected_count": bundle.selected_count,
+            "rendered_count": bundle.rendered_count,
+            "context_tokens": bundle.context_tokens,
+            "source_task_ids": bundle.source_task_ids,
+        }
+        return bundle.text
+
+    def _diffusion_snapshot(
+        self,
+        *,
+        graph_dir: Path,
+        task_ids: list[str],
+        iteration: int,
+    ) -> TaskGraphSnapshot:
+        if graph_dir.exists():
+            from mediated_coevo.diffusion import DiffusionNetwork, GraphBuildSpec
+
+            network = DiffusionNetwork.from_graph_dir(
+                GraphBuildSpec(
+                    graph_dir=graph_dir,
+                    task_ids=task_ids,
+                    run_id=self.experiment_dir.name,
+                    iteration=iteration,
+                )
+            )
+            return network.to_snapshot()
+        return TaskGraphSnapshot(
+            run_id=self.experiment_dir.name,
+            iteration=iteration,
+            task_ids=task_ids,
+            graph_policy="broadcast",
+        )
+
+    def _known_task_ids(self, target_task_id: str) -> list[str]:
+        task_ids = {target_task_id}
+        for artifact in self._diffusion_store.query_artifacts(recent=None):
+            task_ids.add(artifact.source_task_id)
+        return sorted(task_ids)
+
+    def _attach_diffusion_context_metrics(self, record: IterationRecord) -> None:
+        self._ensure_diffusion_runtime_state()
+        context = self._diffusion_context_by_target.get((record.task_id, record.iteration))
+        if context is None:
+            return
+        record.graph_snapshot_id = context["graph_snapshot_id"]
+        record.diffusion_graph = context["graph_policy"]
+        record.diffusion_artifacts_selected = context["selected_count"]
+        record.diffusion_artifacts_rendered = context["rendered_count"]
+        record.diffusion_context_tokens = context["context_tokens"]
+        record.source_task_ids = list(context["source_task_ids"])
+
+    def _ensure_diffusion_runtime_state(self) -> None:
+        if not hasattr(self, "_diffusion_store"):
+            self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
+        if not hasattr(self, "_diffusion_context_by_target"):
+            self._diffusion_context_by_target = {}
 
     async def _coevolve(
         self,

@@ -80,6 +80,9 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
         seed=123,
         coevo_interval=2,
         advisor_buffer_max=1,
+        diffusion_enabled=True,
+        diffusion_policy="capped_broadcast",
+        diffusion_max_artifacts=5,
         harbor_agent_setup_timeout_multiplier=2.5,
     )
 
@@ -88,6 +91,9 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
     assert config.experiment.seed == 123
     assert config.experiment.coevo_interval == 2
     assert config.experiment.advisor_buffer_max == 1
+    assert config.diffusion.enabled is True
+    assert config.diffusion.policy == "capped_broadcast"
+    assert config.diffusion.max_artifacts == 5
     assert config.executor_runtime.harbor_agent_setup_timeout_multiplier == 2.5
 
 
@@ -219,6 +225,7 @@ def _write_minimal_config(config_dir) -> None:
         [diffusion]
         enabled = false
         policy = "none"
+        max_artifacts = 3
         """
     )
 
@@ -255,7 +262,11 @@ def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
                     "mediator": True,
                 },
             },
-            "diffusion": {"enabled": False, "policy": "none"},
+            "diffusion": {
+                "enabled": False,
+                "policy": "none",
+                "max_artifacts": 3,
+            },
         },
     )
 
@@ -289,6 +300,7 @@ def test_load_config_requires_diffusion_policy_from_toml_or_overrides(tmp_path):
 
         [diffusion]
         enabled = false
+        max_artifacts = 3
         """
     )
 
@@ -301,6 +313,47 @@ def test_load_config_requires_diffusion_policy_from_toml_or_overrides(tmp_path):
     )
 
     assert config.diffusion.policy == "none"
+
+
+def test_load_config_requires_diffusion_max_artifacts_from_toml_or_overrides(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "default.toml").write_text(
+        """
+        [models]
+        planner = "test-planner"
+        executor = "test-executor"
+        mediator = "test-mediator"
+        judge = "test-judge"
+
+        [experiment]
+        num_iterations = 2
+        coevo_interval = 2
+        advisor_buffer_max = 2
+        seed = 42
+        condition_name = "learned_mediator"
+        allow_cross_task_feedback = false
+
+        [experiment.skill_updates]
+        executor = true
+        planner = true
+        mediator = true
+
+        [diffusion]
+        enabled = false
+        policy = "none"
+        """
+    )
+
+    with pytest.raises(ConfigLoadError, match="diffusion.max_artifacts"):
+        load_config(config_dir)
+
+    config = load_config(
+        config_dir,
+        overrides={"diffusion": {"max_artifacts": 5}},
+    )
+
+    assert config.diffusion.max_artifacts == 5
 
 
 def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):

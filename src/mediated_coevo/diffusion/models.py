@@ -77,8 +77,8 @@ class TaskGraphSnapshot(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class _TargetArtifactRecord(BaseModel):
-    """Shared fields for artifact-to-target audit records."""
+class DiffusedRecord(BaseModel):
+    """Unified audit record for one artifact routed toward one target task."""
 
     record_id: str = Field(default_factory=_record_id)
     artifact_id: str
@@ -89,49 +89,20 @@ class _TargetArtifactRecord(BaseModel):
     source_run_id: str | None = None
     target_run_id: str | None = None
     snapshot_id: str | None = None
-    created_at: datetime = Field(default_factory=datetime.now)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class CandidateRecord(_TargetArtifactRecord):
-    """Artifact was eligible for a target under a graph and policy prefilter."""
-
     policy_name: str
     relation: str | None = None
+    reason: str = ""
     eligible: bool = True
-    reason: str = ""
-
-
-class SelectionRecord(_TargetArtifactRecord):
-    """Policy either selected or withheld an eligible artifact."""
-
-    policy_name: str
-    relation: str | None = None
-    selected: bool
-    reason: str = ""
-
-
-class RenderRecord(_TargetArtifactRecord):
-    """Artifact actually rendered into planner context."""
-
-    policy_name: str
-    relation: str | None = None
+    selected: bool = False
+    rendered: bool = False
     rendered_section: str = ""
     token_count: int = Field(default=0, ge=0)
-
-
-class UseCitationRecord(_TargetArtifactRecord):
-    """Planner or mediator explicitly cited a previously rendered artifact."""
-
-    cited_by: str
+    cited_by: str | None = None
     citation_text: str = ""
-
-
-class OutcomeAssociation(_TargetArtifactRecord):
-    """Outcome observed after rendering a diffusion artifact to a target task."""
-
     verifier_reward: float | None = None
     judge_reward: float | None = None
     success: bool | None = None
     regression: bool | None = None
     notes: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+    metadata: dict[str, Any] = Field(default_factory=dict)

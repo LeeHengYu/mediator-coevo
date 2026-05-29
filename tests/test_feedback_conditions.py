@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,11 @@ import typer
 from pydantic import ValidationError
 
 from mediated_coevo.core.config import Config, ModelsConfig
+from mediated_coevo.diffusion import (
+    DiffusionArtifact,
+    DiffusionArtifactType,
+    DiffusionRiskLevel,
+)
 from mediated_coevo.experiment.conditions import get_executor_proposal_feedback
 from mediated_coevo.main import _validate_condition_name
 from mediated_coevo.models.history_signals import MediatorSignal
@@ -24,6 +30,55 @@ from tests.config_helpers import diffusion_config, experiment_config
 class _Task:
     instruction = "base instruction"
     task_config: dict = {}
+
+
+def _write_graph_artifacts(graph_dir: Path, task_ids: list[str]) -> None:
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    profiles = {
+        task_id: {
+            "task_id": task_id,
+            "category": "build",
+            "difficulty": "easy",
+            "tags": ["python", task_id],
+            "skills": [],
+            "environment_files": [],
+            "output_types": ["patch"],
+            "domain_terms": ["python", task_id],
+            "capability_labels": ["build-debugging"],
+        }
+        for task_id in task_ids
+    }
+    pairs = []
+    for source_task_id in task_ids:
+        for target_task_id in task_ids:
+            if source_task_id == target_task_id:
+                continue
+            pairs.append(
+                {
+                    "source": source_task_id,
+                    "target": target_task_id,
+                    "score": 0.6,
+                    "components": {"category": 1.0, "tags": 0.5},
+                    "shared": {"tags": ["python"]},
+                    "kept_after_p20_cut": True,
+                    "kept_after_threshold_cut": True,
+                }
+            )
+    (graph_dir / "task_profiles.json").write_text(
+        json.dumps({"task_count": len(task_ids), "profiles": profiles})
+    )
+    (graph_dir / "pairwise_similarity.json").write_text(
+        json.dumps(
+            {
+                "pair_count": len(pairs),
+                "p20_threshold": 0.01,
+                "edge_score_threshold": 0.05,
+                "active_threshold": 0.05,
+                "threshold_kind": "absolute_score",
+                "pairs": pairs,
+            }
+        )
+    )
 
 
 def _models_config() -> ModelsConfig:
@@ -271,6 +326,7 @@ def _orchestrator(
     orch._released_cross_task_reports_by_task = {}
     orch._staged_cross_task_reports_by_task = {}
     orch._previous_reward_by_task = {}
+    orch._diffusion_context_by_target = {}
     orch.executor_skill_gate = ExecutorSkillGate(
         config=orch.config,
         skill_store=orch.skill_store,
@@ -629,6 +685,102 @@ async def test_same_task_prior_context_is_unchanged_without_diffusion_integratio
 
     assert context == "same-task report"
     assert "Diffused Cross-Task Context" not in context
+
+
+@pytest.mark.asyncio
+async def test_capped_broadcast_builds_diffused_cross_task_context(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "capped_broadcast"
+    orch.config.diffusion.max_artifacts = 1
+    _write_graph_artifacts(tmp_path / "task-graph", ["task-A", "task-B", "task-C"])
+    orch._ensure_diffusion_runtime_state()
+    orch._diffusion_store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="task-b-artifact",
+            source_task_id="task-B",
+            source_iteration=0,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="hint from task-B",
+        )
+    )
+    orch._diffusion_store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="task-c-artifact",
+            source_task_id="task-C",
+            source_iteration=0,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="hint from task-C",
+        )
+    )
+
+    context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context is not None
+    assert "Diffused Cross-Task Context" in context
+    assert "policy=capped_broadcast" in context
+    assert "hint from task-B" in context or "hint from task-C" in context
+    records = orch._diffusion_store.query_diffused_records(target_task_id="task-A")
+    assert len([record for record in records if record.selected]) == 1
+
+
+@pytest.mark.asyncio
+async def test_capped_broadcast_excludes_same_task_and_same_iteration_artifacts(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "capped_broadcast"
+    orch.config.diffusion.max_artifacts = 3
+    _write_graph_artifacts(tmp_path / "task-graph", ["task-A", "task-B"])
+    orch._ensure_diffusion_runtime_state()
+    orch._diffusion_store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="same-task",
+            source_task_id="task-A",
+            source_iteration=0,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="same task",
+        )
+    )
+    orch._diffusion_store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="same-iteration",
+            source_task_id="task-B",
+            source_iteration=1,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="same iteration",
+        )
+    )
+    orch._diffusion_store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="eligible",
+            source_task_id="task-B",
+            source_iteration=0,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="eligible artifact",
+        )
+    )
+
+    context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context is not None
+    assert "eligible artifact" in context
+    assert "same task" not in context
+    assert "same iteration" not in context
 
 
 @pytest.mark.asyncio

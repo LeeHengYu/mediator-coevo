@@ -37,6 +37,7 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("experiment", "skill_updates", "mediator"),
     ("diffusion", "enabled"),
     ("diffusion", "policy"),
+    ("diffusion", "max_artifacts"),
 )
 
 CONFIG_CLI_HINTS: dict[str, str] = {
@@ -48,6 +49,9 @@ CONFIG_CLI_HINTS: dict[str, str] = {
     "experiment.skill_updates.executor": "--skill-updates",
     "experiment.skill_updates.planner": "--skill-updates",
     "experiment.skill_updates.mediator": "--skill-updates",
+    "diffusion.enabled": "--diffusion-enabled/--no-diffusion-enabled",
+    "diffusion.policy": "--diffusion-policy",
+    "diffusion.max_artifacts": "--diffusion-max-artifacts",
 }
 
 
@@ -190,7 +194,8 @@ class DiffusionConfig(BaseModel):
     """Config gate for future graph-aware context diffusion."""
 
     enabled: bool
-    policy: Literal["none"]
+    policy: Literal["none", "capped_broadcast"]
+    max_artifacts: int = Field(ge=1)
 
 
 class Config(BaseModel):

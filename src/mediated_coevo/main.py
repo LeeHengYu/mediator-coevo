@@ -316,6 +316,9 @@ def _run_config_overrides(
     skill_updates: str | None,
     coevo_interval: int | None,
     advisor_buffer_max: int | None,
+    diffusion_enabled: bool | None,
+    diffusion_policy: str | None,
+    diffusion_max_artifacts: int | None,
     harbor_agent_setup_timeout_multiplier: float | None,
 ) -> dict[str, Any]:
     experiment: dict[str, Any] = {}
@@ -343,6 +346,12 @@ def _run_config_overrides(
     overrides: dict[str, Any] = {}
     if experiment:
         overrides["experiment"] = experiment
+    diffusion: dict[str, Any] = {}
+    _nested_override(diffusion, "enabled", diffusion_enabled)
+    _nested_override(diffusion, "policy", diffusion_policy)
+    _nested_override(diffusion, "max_artifacts", diffusion_max_artifacts)
+    if diffusion:
+        overrides["diffusion"] = diffusion
     if executor_runtime:
         overrides["executor_runtime"] = executor_runtime
     return overrides
@@ -574,6 +583,9 @@ def _apply_experiment_settings(
     baseline_preset: str | None = None,
     coevo_interval: int | None = None,
     advisor_buffer_max: int | None = None,
+    diffusion_enabled: bool | None = None,
+    diffusion_policy: str | None = None,
+    diffusion_max_artifacts: int | None = None,
     harbor_agent_setup_timeout_multiplier: float | None = None,
 ) -> Config:
     """Apply CLI experiment settings to a loaded config object."""
@@ -590,6 +602,12 @@ def _apply_experiment_settings(
         config.experiment.coevo_interval = coevo_interval
     if advisor_buffer_max is not None:
         config.experiment.advisor_buffer_max = advisor_buffer_max
+    if diffusion_enabled is not None:
+        config.diffusion.enabled = diffusion_enabled
+    if diffusion_policy is not None:
+        config.diffusion.policy = diffusion_policy
+    if diffusion_max_artifacts is not None:
+        config.diffusion.max_artifacts = diffusion_max_artifacts
     if harbor_agent_setup_timeout_multiplier is not None:
         config.executor_runtime.harbor_agent_setup_timeout_multiplier = (
             harbor_agent_setup_timeout_multiplier
@@ -1729,6 +1747,30 @@ def run(
             help="Override experiment.advisor_buffer_max for this run.",
         ),
     ] = None,
+    diffusion_enabled: Annotated[
+        bool | None,
+        typer.Option(
+            "--diffusion-enabled/--no-diffusion-enabled",
+            help="Override diffusion.enabled for this run.",
+        ),
+    ] = None,
+    diffusion_policy: Annotated[
+        str | None,
+        typer.Option(
+            "--diffusion-policy",
+            help=(
+                "Override diffusion.policy. Allowed: none | capped_broadcast."
+            ),
+        ),
+    ] = None,
+    diffusion_max_artifacts: Annotated[
+        int | None,
+        typer.Option(
+            "--diffusion-max-artifacts",
+            min=1,
+            help="Override diffusion.max_artifacts for this run.",
+        ),
+    ] = None,
     harbor_agent_setup_timeout_multiplier: Annotated[
         float | None,
         typer.Option(
@@ -1798,6 +1840,9 @@ def run(
             skill_updates=skill_updates,
             coevo_interval=coevo_interval,
             advisor_buffer_max=advisor_buffer_max,
+            diffusion_enabled=diffusion_enabled,
+            diffusion_policy=diffusion_policy,
+            diffusion_max_artifacts=diffusion_max_artifacts,
             harbor_agent_setup_timeout_multiplier=(
                 harbor_agent_setup_timeout_multiplier
             ),
@@ -1900,6 +1945,31 @@ def matrix(
             help="Override experiment.advisor_buffer_max for every matrix row.",
         ),
     ] = None,
+    diffusion_enabled: Annotated[
+        bool | None,
+        typer.Option(
+            "--diffusion-enabled/--no-diffusion-enabled",
+            help="Override diffusion.enabled for every matrix row.",
+        ),
+    ] = None,
+    diffusion_policy: Annotated[
+        str | None,
+        typer.Option(
+            "--diffusion-policy",
+            help=(
+                "Override diffusion.policy for every matrix row. Allowed: none | "
+                "capped_broadcast."
+            ),
+        ),
+    ] = None,
+    diffusion_max_artifacts: Annotated[
+        int | None,
+        typer.Option(
+            "--diffusion-max-artifacts",
+            min=1,
+            help="Override diffusion.max_artifacts for every matrix row.",
+        ),
+    ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -1915,6 +1985,9 @@ def matrix(
             skill_updates=None,
             coevo_interval=coevo_interval,
             advisor_buffer_max=advisor_buffer_max,
+            diffusion_enabled=diffusion_enabled,
+            diffusion_policy=diffusion_policy,
+            diffusion_max_artifacts=diffusion_max_artifacts,
             harbor_agent_setup_timeout_multiplier=None,
         ),
     )

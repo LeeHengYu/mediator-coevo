@@ -1,4 +1,4 @@
-"""Diffusion models, graph constructors, and storage primitives."""
+"""Diffusion models, graph constructors, policy helpers, and storage primitives."""
 
 from .emitter import DiffusionEmitter, emit_diffusion_artifacts
 from .graph import (
@@ -9,36 +9,32 @@ from .graph import (
     TaskProfilesArtifact,
 )
 from .models import (
-    CandidateRecord,
+    DiffusedRecord,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
-    OutcomeAssociation,
-    RenderRecord,
-    SelectionRecord,
     TaskGraphEdgeRecord,
     TaskGraphSnapshot,
-    UseCitationRecord,
 )
+from .policy import DIFFUSED_SECTION_NAME, DiffusionContextBundle, build_capped_broadcast_context
 from .store import DiffusionStore
 
 __all__ = [
-    "CandidateRecord",
+    "DIFFUSED_SECTION_NAME",
     "DiffusionEmitter",
     "DiffusionArtifact",
     "DiffusionArtifactType",
     "DiffusionRiskLevel",
     "DiffusionNetwork",
+    "DiffusionContextBundle",
+    "DiffusedRecord",
     "DiffusionStore",
+    "build_capped_broadcast_context",
     "emit_diffusion_artifacts",
     "GraphBuildSpec",
-    "OutcomeAssociation",
     "PairwiseSimilarityArtifact",
-    "RenderRecord",
-    "SelectionRecord",
     "TaskProfilesArtifact",
     "TaskGraphEdgeRecord",
     "TaskGraphNode",
     "TaskGraphSnapshot",
-    "UseCitationRecord",
 ]

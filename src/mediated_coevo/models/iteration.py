@@ -46,6 +46,13 @@ class IterationRecord(BaseModel):
     baseline_preset: str | None = None
     cross_task_feedback_enabled: bool = False
     diffusion_policy: str = "none"
+    diffusion_enabled: bool = False
+    diffusion_graph: str | None = None
+    graph_snapshot_id: str | None = None
+    diffusion_artifacts_selected: int = 0
+    diffusion_artifacts_rendered: int = 0
+    diffusion_context_tokens: int = 0
+    source_task_ids: list[str] = Field(default_factory=list)
     skill_update_policy: dict[str, bool] = Field(default_factory=dict)
     skill_hashes: dict[str, str] = Field(default_factory=dict)
     skill_version: str | None = None
