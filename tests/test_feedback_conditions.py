@@ -748,7 +748,8 @@ async def test_capped_broadcast_builds_diffused_cross_task_context(tmp_path):
     assert "policy=capped_broadcast" in context
     assert "hint from task-B" in context or "hint from task-C" in context
     records = orch._diffusion_store.query_diffused_records(target_task_id="task-A")
-    assert len([record for record in records if record.selected]) == 1
+    assert len(records) == 1
+    assert records[0].selected is True
 
 
 @pytest.mark.asyncio
@@ -901,7 +902,78 @@ async def test_random_k_excludes_same_task_and_same_iteration_artifacts(tmp_path
     assert "same iteration" not in context
     records = orch._diffusion_store.query_diffused_records(target_task_id="task-A")
     assert all(record.policy_name == "random_k" for record in records)
-    assert len([record for record in records if record.selected]) == 1
+    assert len(records) == 1
+    assert records[0].selected is True
+
+
+@pytest.mark.asyncio
+async def test_diffusion_subscription_board_consumes_target_entry(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "capped_broadcast"
+    orch.config.diffusion.max_artifacts = 1
+    orch._diffusion_target_task_ids = ["task-A", "task-C"]
+    orch._ensure_diffusion_runtime_state()
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-artifact",
+        source_task_id="task-B",
+        content="hint from task-B",
+    )
+
+    context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context is not None
+    assert "hint from task-B" in context
+    assert (1, "task-A") not in orch._diffusion_sub_board
+    assert (1, "task-C") in orch._diffusion_sub_board
+
+
+@pytest.mark.asyncio
+async def test_diffusion_subscription_board_queries_artifacts_once_per_iteration(
+    tmp_path,
+):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "capped_broadcast"
+    orch.config.diffusion.max_artifacts = 1
+    orch._diffusion_target_task_ids = ["task-A", "task-C"]
+    orch._ensure_diffusion_runtime_state()
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-artifact",
+        source_task_id="task-B",
+        content="hint from task-B",
+    )
+
+    original_query_artifacts = orch._diffusion_store.query_artifacts
+    query_count = 0
+
+    def counting_query_artifacts(**kwargs):
+        nonlocal query_count
+        query_count += 1
+        return original_query_artifacts(**kwargs)
+
+    orch._diffusion_store.query_artifacts = counting_query_artifacts
+
+    await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+    await orch._build_prior_context(
+        "learned_mediator",
+        "task-C",
+        current_iteration=1,
+    )
+
+    assert query_count == 1
 
 
 @pytest.mark.asyncio

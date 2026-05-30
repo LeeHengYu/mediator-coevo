@@ -19,8 +19,12 @@ from .models import (
 from .policy import (
     DIFFUSED_SECTION_NAME,
     DiffusionContextBundle,
+    DiffusionSubscription,
     build_capped_broadcast_context,
     build_random_k_context,
+    render_diffusion_subscriptions,
+    select_capped_broadcast_subscriptions,
+    select_random_k_subscriptions,
 )
 from .store import DiffusionStore
 
@@ -32,11 +36,15 @@ __all__ = [
     "DiffusionRiskLevel",
     "DiffusionNetwork",
     "DiffusionContextBundle",
+    "DiffusionSubscription",
     "DiffusedRecord",
     "DiffusionStore",
     "build_capped_broadcast_context",
     "build_random_k_context",
     "emit_diffusion_artifacts",
+    "render_diffusion_subscriptions",
+    "select_capped_broadcast_subscriptions",
+    "select_random_k_subscriptions",
     "GraphBuildSpec",
     "PairwiseSimilarityArtifact",
     "TaskProfilesArtifact",

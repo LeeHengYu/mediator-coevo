@@ -26,11 +26,14 @@ from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.benchmarks import SkillsBenchRepository
 from mediated_coevo.core.config import Config
 from mediated_coevo.diffusion import (
+    DiffusionArtifact,
     DiffusionStore,
+    DiffusionSubscription,
     TaskGraphSnapshot,
-    build_capped_broadcast_context,
-    build_random_k_context,
     emit_diffusion_artifacts,
+    render_diffusion_subscriptions,
+    select_capped_broadcast_subscriptions,
+    select_random_k_subscriptions,
 )
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.candidates import (
@@ -153,6 +156,13 @@ class Orchestrator:
         self._staged_cross_task_reports_by_task: dict[str, MediatorReport] = {}
         self._previous_reward_by_task: dict[str, float] = {}
         self._diffusion_context_by_target: dict[tuple[str, int], dict[str, Any]] = {}
+        self._diffusion_sub_board: dict[
+            tuple[int, str],
+            list[DiffusionSubscription],
+        ] = {}
+        self._diffusion_prepared_iterations: set[int] = set()
+        self._diffusion_snapshot_by_iteration: dict[int, TaskGraphSnapshot] = {}
+        self._diffusion_target_task_ids: list[str] = []
 
     async def run_experiment(
         self,
@@ -164,6 +174,10 @@ class Orchestrator:
             num_iterations = self.config.experiment.num_iterations
         records: list[IterationRecord] = []
         selection = self.config.experiment.benchmark_selection
+        self._diffusion_target_task_ids = list(task_ids)
+        self._diffusion_sub_board.clear()
+        self._diffusion_prepared_iterations.clear()
+        self._diffusion_snapshot_by_iteration.clear()
         self.executor_skill_gate.validation_task_pool = [
             *selection.skillsbench_tasks,
             *selection.swebench_instances,
@@ -629,47 +643,36 @@ class Orchestrator:
         ):
             return None
 
-        graph_dir = self.experiment_dir / "task-graph"
-        task_ids = self._known_task_ids(task_id)
-        if len(task_ids) < 2:
-            self._diffusion_context_by_target[(task_id, current_iteration)] = {
-                "graph_snapshot_id": None,
-                "graph_policy": None,
-                "selected_count": 0,
-                "rendered_count": 0,
-                "context_tokens": 0,
-                "source_task_ids": [],
-            }
+        self._prepare_diffusion_subscriptions(
+            target_task_id=task_id,
+            current_iteration=current_iteration,
+        )
+        subscriptions = self._diffusion_sub_board.pop(
+            (current_iteration, task_id),
+            [],
+        )
+        snapshot = self._diffusion_snapshot_by_iteration.get(current_iteration)
+        if snapshot is None:
+            self._record_empty_diffusion_context(task_id, current_iteration)
             return None
 
-        snapshot = self._diffusion_snapshot(
-            graph_dir=graph_dir,
-            task_ids=task_ids,
-            iteration=current_iteration,
-        )
-        if policy_name == "capped_broadcast":
-            bundle = build_capped_broadcast_context(
-                store=self._diffusion_store,
+        if not subscriptions:
+            self._record_empty_diffusion_context(
+                task_id,
+                current_iteration,
                 snapshot=snapshot,
-                model=self.planner.llm_client.model,
-                target_task_id=task_id,
-                target_iteration=current_iteration,
-                target_run_id=None,
-                max_artifacts=self.config.diffusion.max_artifacts,
             )
-        elif policy_name == "random_k":
-            bundle = build_random_k_context(
-                store=self._diffusion_store,
-                snapshot=snapshot,
-                model=self.planner.llm_client.model,
-                target_task_id=task_id,
-                target_iteration=current_iteration,
-                target_run_id=None,
-                max_artifacts=self.config.diffusion.max_artifacts,
-                seed=self.config.experiment.seed,
-            )
-        else:
             return None
+
+        bundle = render_diffusion_subscriptions(
+            store=self._diffusion_store,
+            snapshot=snapshot,
+            model=self.planner.llm_client.model,
+            target_task_id=task_id,
+            target_iteration=current_iteration,
+            target_run_id=None,
+            subscriptions=subscriptions,
+        )
         self._diffusion_context_by_target[(task_id, current_iteration)] = {
             "graph_snapshot_id": bundle.snapshot_id,
             "graph_policy": bundle.graph_policy,
@@ -679,6 +682,118 @@ class Orchestrator:
             "source_task_ids": bundle.source_task_ids,
         }
         return bundle.text
+
+    def _prepare_diffusion_subscriptions(
+        self,
+        *,
+        target_task_id: str,
+        current_iteration: int,
+    ) -> None:
+        if current_iteration in self._diffusion_prepared_iterations:
+            return
+
+        artifacts = self._diffusion_store.query_artifacts(
+            recent=None,
+            before_source_iteration=current_iteration,
+        )
+        target_task_ids = self._target_task_ids_for_diffusion(
+            fallback_task_id=target_task_id,
+            artifacts=artifacts,
+        )
+        snapshot_task_ids = self._snapshot_task_ids_for_diffusion(
+            target_task_ids=target_task_ids,
+            artifacts=artifacts,
+        )
+        if len(snapshot_task_ids) < 2:
+            self._diffusion_prepared_iterations.add(current_iteration)
+            return
+
+        snapshot = self._diffusion_snapshot(
+            graph_dir=self.experiment_dir / "task-graph",
+            task_ids=snapshot_task_ids,
+            iteration=current_iteration,
+        )
+        self._diffusion_store.store_graph_snapshot(snapshot, overwrite=True)
+        self._diffusion_snapshot_by_iteration[current_iteration] = snapshot
+
+        for target_id in target_task_ids:
+            eligible_artifacts = [
+                artifact
+                for artifact in artifacts
+                if artifact.source_task_id != target_id
+            ]
+            subscriptions = self._select_diffusion_subscriptions(
+                target_task_id=target_id,
+                current_iteration=current_iteration,
+                eligible_artifacts=eligible_artifacts,
+            )
+            if subscriptions:
+                self._diffusion_sub_board[(current_iteration, target_id)] = (
+                    subscriptions
+                )
+
+        self._diffusion_prepared_iterations.add(current_iteration)
+
+    def _select_diffusion_subscriptions(
+        self,
+        *,
+        target_task_id: str,
+        current_iteration: int,
+        eligible_artifacts: list[DiffusionArtifact],
+    ) -> list[DiffusionSubscription]:
+        policy_name = self.config.diffusion.policy
+        if policy_name == "capped_broadcast":
+            return select_capped_broadcast_subscriptions(
+                eligible_artifacts=eligible_artifacts,
+                max_artifacts=self.config.diffusion.max_artifacts,
+            )
+        if policy_name == "random_k":
+            return select_random_k_subscriptions(
+                eligible_artifacts=eligible_artifacts,
+                target_task_id=target_task_id,
+                target_iteration=current_iteration,
+                max_artifacts=self.config.diffusion.max_artifacts,
+                seed=self.config.experiment.seed,
+            )
+        return []
+
+    def _target_task_ids_for_diffusion(
+        self,
+        *,
+        fallback_task_id: str,
+        artifacts: list[DiffusionArtifact],
+    ) -> list[str]:
+        if self._diffusion_target_task_ids:
+            return list(dict.fromkeys(self._diffusion_target_task_ids))
+        task_ids = {fallback_task_id}
+        task_ids.update(artifact.source_task_id for artifact in artifacts)
+        return sorted(task_ids)
+
+    @staticmethod
+    def _snapshot_task_ids_for_diffusion(
+        *,
+        target_task_ids: list[str],
+        artifacts: list[DiffusionArtifact],
+    ) -> list[str]:
+        task_ids = set(target_task_ids)
+        task_ids.update(artifact.source_task_id for artifact in artifacts)
+        return sorted(task_ids)
+
+    def _record_empty_diffusion_context(
+        self,
+        task_id: str,
+        current_iteration: int,
+        *,
+        snapshot: TaskGraphSnapshot | None = None,
+    ) -> None:
+        self._diffusion_context_by_target[(task_id, current_iteration)] = {
+            "graph_snapshot_id": snapshot.snapshot_id if snapshot is not None else None,
+            "graph_policy": snapshot.graph_policy if snapshot is not None else None,
+            "selected_count": 0,
+            "rendered_count": 0,
+            "context_tokens": 0,
+            "source_task_ids": [],
+        }
 
     def _diffusion_snapshot(
         self,
@@ -706,12 +821,6 @@ class Orchestrator:
             graph_policy="broadcast",
         )
 
-    def _known_task_ids(self, target_task_id: str) -> list[str]:
-        task_ids = {target_task_id}
-        for artifact in self._diffusion_store.query_artifacts(recent=None):
-            task_ids.add(artifact.source_task_id)
-        return sorted(task_ids)
-
     def _attach_diffusion_context_metrics(self, record: IterationRecord) -> None:
         self._ensure_diffusion_runtime_state()
         context = self._diffusion_context_by_target.get((record.task_id, record.iteration))
@@ -729,6 +838,14 @@ class Orchestrator:
             self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
         if not hasattr(self, "_diffusion_context_by_target"):
             self._diffusion_context_by_target = {}
+        if not hasattr(self, "_diffusion_sub_board"):
+            self._diffusion_sub_board = {}
+        if not hasattr(self, "_diffusion_prepared_iterations"):
+            self._diffusion_prepared_iterations = set()
+        if not hasattr(self, "_diffusion_snapshot_by_iteration"):
+            self._diffusion_snapshot_by_iteration = {}
+        if not hasattr(self, "_diffusion_target_task_ids"):
+            self._diffusion_target_task_ids = []
 
     async def _coevolve(
         self,

@@ -461,6 +461,13 @@ Current diffusion policy values:
 - `random_k`: render a deterministic seeded random sample of eligible
   cross-task artifacts up to `diffusion.max_artifacts`.
 
+At runtime, diffusion uses an ephemeral per-iteration subscription board. Durable
+artifacts remain in the run `diffusion/` store, while the current policy
+materializes target-specific subscriptions such as `(iteration, target_task_id)
+-> artifacts`. When a target task builds planner context, its board entry is
+consumed; the source artifacts remain in the store for future iterations and
+audit/replay.
+
 By default, `config/default.toml` enables explicit flat cross-task feedback with
 `experiment.allow_cross_task_feedback = true`. That default applies before and
 alongside any diffusion work. In other words, cross-task planner context is
