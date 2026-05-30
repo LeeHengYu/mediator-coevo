@@ -194,7 +194,7 @@ class DiffusionConfig(BaseModel):
     """Config gate for future graph-aware context diffusion."""
 
     enabled: bool
-    policy: Literal["none", "capped_broadcast"]
+    policy: Literal["none", "capped_broadcast", "random_k"]
     max_artifacts: int = Field(ge=1)
 
 

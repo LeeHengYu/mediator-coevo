@@ -16,7 +16,12 @@ from .models import (
     TaskGraphEdgeRecord,
     TaskGraphSnapshot,
 )
-from .policy import DIFFUSED_SECTION_NAME, DiffusionContextBundle, build_capped_broadcast_context
+from .policy import (
+    DIFFUSED_SECTION_NAME,
+    DiffusionContextBundle,
+    build_capped_broadcast_context,
+    build_random_k_context,
+)
 from .store import DiffusionStore
 
 __all__ = [
@@ -30,6 +35,7 @@ __all__ = [
     "DiffusedRecord",
     "DiffusionStore",
     "build_capped_broadcast_context",
+    "build_random_k_context",
     "emit_diffusion_artifacts",
     "GraphBuildSpec",
     "PairwiseSimilarityArtifact",

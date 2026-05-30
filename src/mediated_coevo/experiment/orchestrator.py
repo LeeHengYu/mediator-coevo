@@ -29,6 +29,7 @@ from mediated_coevo.diffusion import (
     DiffusionStore,
     TaskGraphSnapshot,
     build_capped_broadcast_context,
+    build_random_k_context,
     emit_diffusion_artifacts,
 )
 from mediated_coevo.evolution.compactor import build_planner_signal
@@ -620,11 +621,12 @@ class Orchestrator:
         current_iteration: int | None,
     ) -> str | None:
         self._ensure_diffusion_runtime_state()
-        if not self.config.diffusion.enabled:
-            return None
-        if self.config.diffusion.policy != "capped_broadcast":
-            return None
-        if current_iteration is None:
+        policy_name = self.config.diffusion.policy
+        if (
+            not self.config.diffusion.enabled
+            or policy_name == "none"
+            or current_iteration is None
+        ):
             return None
 
         graph_dir = self.experiment_dir / "task-graph"
@@ -645,15 +647,29 @@ class Orchestrator:
             task_ids=task_ids,
             iteration=current_iteration,
         )
-        bundle = build_capped_broadcast_context(
-            store=self._diffusion_store,
-            snapshot=snapshot,
-            model=self.planner.llm_client.model,
-            target_task_id=task_id,
-            target_iteration=current_iteration,
-            target_run_id=None,
-            max_artifacts=self.config.diffusion.max_artifacts,
-        )
+        if policy_name == "capped_broadcast":
+            bundle = build_capped_broadcast_context(
+                store=self._diffusion_store,
+                snapshot=snapshot,
+                model=self.planner.llm_client.model,
+                target_task_id=task_id,
+                target_iteration=current_iteration,
+                target_run_id=None,
+                max_artifacts=self.config.diffusion.max_artifacts,
+            )
+        elif policy_name == "random_k":
+            bundle = build_random_k_context(
+                store=self._diffusion_store,
+                snapshot=snapshot,
+                model=self.planner.llm_client.model,
+                target_task_id=task_id,
+                target_iteration=current_iteration,
+                target_run_id=None,
+                max_artifacts=self.config.diffusion.max_artifacts,
+                seed=self.config.experiment.seed,
+            )
+        else:
+            return None
         self._diffusion_context_by_target[(task_id, current_iteration)] = {
             "graph_snapshot_id": bundle.snapshot_id,
             "graph_policy": bundle.graph_policy,

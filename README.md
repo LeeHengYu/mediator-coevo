@@ -453,6 +453,14 @@ Feedback scope terms used in this repo:
   diffusion artifacts to route, rather than relying only on the current
   explicit condition-based routing.
 
+Current diffusion policy values:
+
+- `none`: do not render diffusion context.
+- `capped_broadcast`: render the most recent eligible cross-task artifacts up
+  to `diffusion.max_artifacts`.
+- `random_k`: render a deterministic seeded random sample of eligible
+  cross-task artifacts up to `diffusion.max_artifacts`.
+
 By default, `config/default.toml` enables explicit flat cross-task feedback with
 `experiment.allow_cross_task_feedback = true`. That default applies before and
 alongside any diffusion work. In other words, cross-task planner context is
@@ -732,6 +740,9 @@ Current config defaults include:
 - `experiment.allow_cross_task_feedback = true`, so eligible conditions append
   explicit flat cross-task context by default, including in runs that also
   enable diffusion.
+- `diffusion.enabled = false`
+- `diffusion.policy = "none"`
+- `diffusion.max_artifacts = 3`
 - `executor_runtime.agent_name = "hermes"`
 - `executor_runtime.harbor_timeout_sec = 5400`
 - `executor_runtime.injected_skill_name = "executor"` names the Executor policy

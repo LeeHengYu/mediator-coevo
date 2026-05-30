@@ -1759,7 +1759,8 @@ def run(
         typer.Option(
             "--diffusion-policy",
             help=(
-                "Override diffusion.policy. Allowed: none | capped_broadcast."
+                "Override diffusion.policy. Allowed: none | capped_broadcast | "
+                "random_k."
             ),
         ),
     ] = None,
@@ -1958,7 +1959,7 @@ def matrix(
             "--diffusion-policy",
             help=(
                 "Override diffusion.policy for every matrix row. Allowed: none | "
-                "capped_broadcast."
+                "capped_broadcast | random_k."
             ),
         ),
     ] = None,
