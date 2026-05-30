@@ -460,6 +460,9 @@ Current diffusion policy values:
   to `diffusion.max_artifacts`.
 - `random_k`: render a deterministic seeded random sample of eligible
   cross-task artifacts up to `diffusion.max_artifacts`.
+- `top_k_similarity`: render eligible artifacts from the strongest incoming
+  graph neighbors for the target task, capped by `diffusion.max_artifacts` and
+  `diffusion.top_k_neighbors`.
 
 At runtime, diffusion uses an ephemeral per-iteration subscription board. Durable
 artifacts remain in the run `diffusion/` store, while the current policy
@@ -750,6 +753,7 @@ Current config defaults include:
 - `diffusion.enabled = false`
 - `diffusion.policy = "none"`
 - `diffusion.max_artifacts = 3`
+- `diffusion.top_k_neighbors = 3`
 - `executor_runtime.agent_name = "hermes"`
 - `executor_runtime.harbor_timeout_sec = 5400`
 - `executor_runtime.injected_skill_name = "executor"` names the Executor policy

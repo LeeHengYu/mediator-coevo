@@ -11,6 +11,7 @@ from mediated_coevo.diffusion import (
     DiffusionStore,
     DiffusionNetwork,
     GraphBuildSpec,
+    adjacency_from_snapshot,
 )
 
 
@@ -108,6 +109,12 @@ def test_diffusion_network_builds_nodes_neighbors_and_snapshot(tmp_path: Path) -
         "task-c",
     ]
     assert [node.task_id for node in network.get_neighbors("task-a")] == ["task-b"]
+    adj_list = network.get_adj_list()
+    assert list(adj_list) == ["task-b", "task-a", "task-c"]
+    assert [(edge.source_task_id, edge.target_task_id) for edge in adj_list["task-a"]] == [
+        ("task-a", "task-b"),
+    ]
+    assert adj_list["task-c"] == []
     assert network.get_isolated_task_ids() == ["task-c"]
 
     snapshot = network.to_snapshot()
@@ -115,6 +122,8 @@ def test_diffusion_network_builds_nodes_neighbors_and_snapshot(tmp_path: Path) -
     assert snapshot.iteration == 5
     assert snapshot.task_ids == ["task-b", "task-a", "task-c"]
     assert snapshot.metadata["edge_count"] == 2
+    snapshot_adj_list = adjacency_from_snapshot(snapshot)
+    assert snapshot_adj_list == adj_list
 
 
 def test_diffusion_network_snapshot_round_trips_through_store(

@@ -81,6 +81,56 @@ def _write_graph_artifacts(graph_dir: Path, task_ids: list[str]) -> None:
     )
 
 
+def _write_weighted_graph_artifacts(
+    graph_dir: Path,
+    *,
+    task_ids: list[str],
+    weighted_pairs: list[tuple[str, str, float]],
+) -> None:
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    profiles = {
+        task_id: {
+            "task_id": task_id,
+            "category": "build",
+            "difficulty": "easy",
+            "tags": ["python", task_id],
+            "skills": [],
+            "environment_files": [],
+            "output_types": ["patch"],
+            "domain_terms": ["python", task_id],
+            "capability_labels": ["build-debugging"],
+        }
+        for task_id in task_ids
+    }
+    pairs = [
+        {
+            "source": source_task_id,
+            "target": target_task_id,
+            "score": score,
+            "components": {"category": 1.0, "tags": 0.5},
+            "shared": {"tags": ["python"]},
+            "kept_after_p20_cut": True,
+            "kept_after_threshold_cut": True,
+        }
+        for source_task_id, target_task_id, score in weighted_pairs
+    ]
+    (graph_dir / "task_profiles.json").write_text(
+        json.dumps({"task_count": len(task_ids), "profiles": profiles})
+    )
+    (graph_dir / "pairwise_similarity.json").write_text(
+        json.dumps(
+            {
+                "pair_count": len(pairs),
+                "p20_threshold": 0.01,
+                "edge_score_threshold": 0.05,
+                "active_threshold": 0.05,
+                "threshold_kind": "absolute_score",
+                "pairs": pairs,
+            }
+        )
+    )
+
+
 def _store_diffusion_artifact(
     orch: Any,
     *,
@@ -716,25 +766,17 @@ async def test_capped_broadcast_builds_diffused_cross_task_context(tmp_path):
     orch.config.diffusion.max_artifacts = 1
     _write_graph_artifacts(tmp_path / "task-graph", ["task-A", "task-B", "task-C"])
     orch._ensure_diffusion_runtime_state()
-    orch._diffusion_store.store_artifact(
-        DiffusionArtifact(
-            artifact_id="task-b-artifact",
-            source_task_id="task-B",
-            source_iteration=0,
-            artifact_type=DiffusionArtifactType.DEBUG_HINT,
-            risk_level=DiffusionRiskLevel.LOW,
-            content="hint from task-B",
-        )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-artifact",
+        source_task_id="task-B",
+        content="hint from task-B",
     )
-    orch._diffusion_store.store_artifact(
-        DiffusionArtifact(
-            artifact_id="task-c-artifact",
-            source_task_id="task-C",
-            source_iteration=0,
-            artifact_type=DiffusionArtifactType.DEBUG_HINT,
-            risk_level=DiffusionRiskLevel.LOW,
-            content="hint from task-C",
-        )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-c-artifact",
+        source_task_id="task-C",
+        content="hint from task-C",
     )
 
     context = await orch._build_prior_context(
@@ -761,35 +803,24 @@ async def test_capped_broadcast_excludes_same_task_and_same_iteration_artifacts(
     orch.config.diffusion.max_artifacts = 3
     _write_graph_artifacts(tmp_path / "task-graph", ["task-A", "task-B"])
     orch._ensure_diffusion_runtime_state()
-    orch._diffusion_store.store_artifact(
-        DiffusionArtifact(
-            artifact_id="same-task",
-            source_task_id="task-A",
-            source_iteration=0,
-            artifact_type=DiffusionArtifactType.DEBUG_HINT,
-            risk_level=DiffusionRiskLevel.LOW,
-            content="same task",
-        )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="same-task",
+        source_task_id="task-A",
+        content="same task",
     )
-    orch._diffusion_store.store_artifact(
-        DiffusionArtifact(
-            artifact_id="same-iteration",
-            source_task_id="task-B",
-            source_iteration=1,
-            artifact_type=DiffusionArtifactType.DEBUG_HINT,
-            risk_level=DiffusionRiskLevel.LOW,
-            content="same iteration",
-        )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="same-iteration",
+        source_task_id="task-B",
+        source_iteration=1,
+        content="same iteration",
     )
-    orch._diffusion_store.store_artifact(
-        DiffusionArtifact(
-            artifact_id="eligible",
-            source_task_id="task-B",
-            source_iteration=0,
-            artifact_type=DiffusionArtifactType.DEBUG_HINT,
-            risk_level=DiffusionRiskLevel.LOW,
-            content="eligible artifact",
-        )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="eligible",
+        source_task_id="task-B",
+        content="eligible artifact",
     )
 
     context = await orch._build_prior_context(

@@ -10,6 +10,7 @@ from mediated_coevo.core.selection import deterministic_seed
 from mediated_coevo.diffusion.models import (
     DiffusedRecord,
     DiffusionArtifact,
+    TaskGraphEdgeRecord,
     TaskGraphSnapshot,
 )
 from mediated_coevo.diffusion.store import DiffusionStore
@@ -158,6 +159,82 @@ def select_random_k_subscriptions(
         )
         for artifact in selected_artifacts
     ]
+
+
+def select_top_k_similarity_subscriptions(
+    *,
+    eligible_artifacts: list[DiffusionArtifact],
+    snapshot: TaskGraphSnapshot,
+    target_task_id: str,
+    max_artifacts: int,
+    top_k_neighbors: int,
+) -> list[DiffusionSubscription]:
+    """Subscribe the target to artifacts from its strongest incoming graph edges."""
+    edges_by_source_task = _top_similarity_edges_by_source_task(
+        snapshot=snapshot,
+        target_task_id=target_task_id,
+        top_k_neighbors=top_k_neighbors,
+    )
+    if not edges_by_source_task:
+        return []
+
+    subscriptions: list[DiffusionSubscription] = []
+    for artifact in eligible_artifacts:
+        edge = edges_by_source_task.get(artifact.source_task_id)
+        if edge is None:
+            continue
+        subscriptions.append(
+            DiffusionSubscription(
+                artifact=artifact,
+                policy_name="top_k_similarity",
+                relation=edge.relation,
+                reason=f"selected_from_top_{top_k_neighbors}_similarity_neighbor",
+                metadata={
+                    "edge_weight": edge.weight,
+                    "edge_rank": edge.metadata["top_k_similarity_rank"],
+                    "edge_relation": edge.relation,
+                },
+            )
+        )
+        if len(subscriptions) >= max_artifacts:
+            break
+    return subscriptions
+
+
+def _top_similarity_edges_by_source_task(
+    *,
+    snapshot: TaskGraphSnapshot,
+    target_task_id: str,
+    top_k_neighbors: int,
+) -> dict[str, TaskGraphEdgeRecord]:
+    ranked_edges = sorted(
+        (
+            edge
+            for edge in snapshot.edge_records
+            if edge.target_task_id == target_task_id
+        ),
+        key=lambda edge: (
+            -edge.weight,
+            edge.source_task_id,
+            edge.target_task_id,
+            edge.relation,
+        ),
+    )
+    selected_edges: dict[str, TaskGraphEdgeRecord] = {}
+    for edge in ranked_edges:
+        if edge.source_task_id in selected_edges:
+            continue
+        selected_edges[edge.source_task_id] = edge.model_copy(
+            update={
+                "metadata": {
+                    **edge.metadata,
+                    "top_k_similarity_rank": len(selected_edges) + 1,
+                },
+            }
+        )
+        if len(selected_edges) >= top_k_neighbors:
+            break
+    return selected_edges
 
 
 def _eligible_artifacts(

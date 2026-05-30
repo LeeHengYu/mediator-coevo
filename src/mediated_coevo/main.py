@@ -69,6 +69,7 @@ from mediated_coevo.cloud.vm import (
 from mediated_coevo.core.config import (
     Config,
     ConfigLoadError,
+    DiffusionPolicyName,
     SkillUpdateConfig,
     load_config,
     normalize_openrouter_model_name,
@@ -102,6 +103,7 @@ console = Console()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 VALID_CONDITION_NAMES = set(get_args(ConditionName))
+VALID_DIFFUSION_POLICY_NAMES = set(get_args(DiffusionPolicyName))
 SKILLSBENCH_ALL_TASK_SET = "skillsbench-all"
 
 
@@ -246,6 +248,16 @@ def _validate_condition_name(condition: str) -> ConditionName:
     return cast(ConditionName, condition)
 
 
+def _validate_diffusion_policy_name(policy: str) -> DiffusionPolicyName:
+    """Validate CLI diffusion policy names before mutating the config object."""
+    if policy not in VALID_DIFFUSION_POLICY_NAMES:
+        allowed = ", ".join(sorted(VALID_DIFFUSION_POLICY_NAMES))
+        raise typer.BadParameter(
+            f"invalid diffusion policy {policy!r}; expected one of: {allowed}"
+        )
+    return cast(DiffusionPolicyName, policy)
+
+
 def _task_ids_from_cli(tasks: str | None, task_set: str | None) -> list[str]:
     try:
         return resolve_task_selection(
@@ -319,6 +331,7 @@ def _run_config_overrides(
     diffusion_enabled: bool | None,
     diffusion_policy: str | None,
     diffusion_max_artifacts: int | None,
+    diffusion_top_k_neighbors: int | None,
     harbor_agent_setup_timeout_multiplier: float | None,
 ) -> dict[str, Any]:
     experiment: dict[str, Any] = {}
@@ -348,8 +361,10 @@ def _run_config_overrides(
         overrides["experiment"] = experiment
     diffusion: dict[str, Any] = {}
     _nested_override(diffusion, "enabled", diffusion_enabled)
-    _nested_override(diffusion, "policy", diffusion_policy)
+    if diffusion_policy is not None:
+        diffusion["policy"] = _validate_diffusion_policy_name(diffusion_policy)
     _nested_override(diffusion, "max_artifacts", diffusion_max_artifacts)
+    _nested_override(diffusion, "top_k_neighbors", diffusion_top_k_neighbors)
     if diffusion:
         overrides["diffusion"] = diffusion
     if executor_runtime:
@@ -586,6 +601,7 @@ def _apply_experiment_settings(
     diffusion_enabled: bool | None = None,
     diffusion_policy: str | None = None,
     diffusion_max_artifacts: int | None = None,
+    diffusion_top_k_neighbors: int | None = None,
     harbor_agent_setup_timeout_multiplier: float | None = None,
 ) -> Config:
     """Apply CLI experiment settings to a loaded config object."""
@@ -605,9 +621,11 @@ def _apply_experiment_settings(
     if diffusion_enabled is not None:
         config.diffusion.enabled = diffusion_enabled
     if diffusion_policy is not None:
-        config.diffusion.policy = diffusion_policy
+        config.diffusion.policy = _validate_diffusion_policy_name(diffusion_policy)
     if diffusion_max_artifacts is not None:
         config.diffusion.max_artifacts = diffusion_max_artifacts
+    if diffusion_top_k_neighbors is not None:
+        config.diffusion.top_k_neighbors = diffusion_top_k_neighbors
     if harbor_agent_setup_timeout_multiplier is not None:
         config.executor_runtime.harbor_agent_setup_timeout_multiplier = (
             harbor_agent_setup_timeout_multiplier
@@ -1760,7 +1778,7 @@ def run(
             "--diffusion-policy",
             help=(
                 "Override diffusion.policy. Allowed: none | capped_broadcast | "
-                "random_k."
+                "random_k | top_k_similarity."
             ),
         ),
     ] = None,
@@ -1770,6 +1788,14 @@ def run(
             "--diffusion-max-artifacts",
             min=1,
             help="Override diffusion.max_artifacts for this run.",
+        ),
+    ] = None,
+    diffusion_top_k_neighbors: Annotated[
+        int | None,
+        typer.Option(
+            "--diffusion-top-k-neighbors",
+            min=1,
+            help="Override diffusion.top_k_neighbors for this run.",
         ),
     ] = None,
     harbor_agent_setup_timeout_multiplier: Annotated[
@@ -1844,6 +1870,7 @@ def run(
             diffusion_enabled=diffusion_enabled,
             diffusion_policy=diffusion_policy,
             diffusion_max_artifacts=diffusion_max_artifacts,
+            diffusion_top_k_neighbors=diffusion_top_k_neighbors,
             harbor_agent_setup_timeout_multiplier=(
                 harbor_agent_setup_timeout_multiplier
             ),
@@ -1959,7 +1986,7 @@ def matrix(
             "--diffusion-policy",
             help=(
                 "Override diffusion.policy for every matrix row. Allowed: none | "
-                "capped_broadcast | random_k."
+                "capped_broadcast | random_k | top_k_similarity."
             ),
         ),
     ] = None,
@@ -1969,6 +1996,14 @@ def matrix(
             "--diffusion-max-artifacts",
             min=1,
             help="Override diffusion.max_artifacts for every matrix row.",
+        ),
+    ] = None,
+    diffusion_top_k_neighbors: Annotated[
+        int | None,
+        typer.Option(
+            "--diffusion-top-k-neighbors",
+            min=1,
+            help="Override diffusion.top_k_neighbors for every matrix row.",
         ),
     ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
@@ -1989,6 +2024,7 @@ def matrix(
             diffusion_enabled=diffusion_enabled,
             diffusion_policy=diffusion_policy,
             diffusion_max_artifacts=diffusion_max_artifacts,
+            diffusion_top_k_neighbors=diffusion_top_k_neighbors,
             harbor_agent_setup_timeout_multiplier=None,
         ),
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,6 +15,12 @@ OPENROUTER_MODEL_PREFIX = "openrouter/"
 DEFAULT_SKILLSBENCH_ARCHIVE_URL = (
     "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
 )
+DiffusionPolicyName: TypeAlias = Literal[
+    "none",
+    "capped_broadcast",
+    "random_k",
+    "top_k_similarity",
+]
 
 
 class ModelConfigError(ValueError):
@@ -38,6 +44,7 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("diffusion", "enabled"),
     ("diffusion", "policy"),
     ("diffusion", "max_artifacts"),
+    ("diffusion", "top_k_neighbors"),
 )
 
 CONFIG_CLI_HINTS: dict[str, str] = {
@@ -52,6 +59,7 @@ CONFIG_CLI_HINTS: dict[str, str] = {
     "diffusion.enabled": "--diffusion-enabled/--no-diffusion-enabled",
     "diffusion.policy": "--diffusion-policy",
     "diffusion.max_artifacts": "--diffusion-max-artifacts",
+    "diffusion.top_k_neighbors": "--diffusion-top-k-neighbors",
 }
 
 
@@ -194,8 +202,9 @@ class DiffusionConfig(BaseModel):
     """Config gate for future graph-aware context diffusion."""
 
     enabled: bool
-    policy: Literal["none", "capped_broadcast", "random_k"]
+    policy: DiffusionPolicyName
     max_artifacts: int = Field(ge=1)
+    top_k_neighbors: int = Field(ge=1)
 
 
 class Config(BaseModel):

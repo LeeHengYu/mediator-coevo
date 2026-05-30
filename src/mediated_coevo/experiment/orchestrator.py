@@ -34,6 +34,7 @@ from mediated_coevo.diffusion import (
     render_diffusion_subscriptions,
     select_capped_broadcast_subscriptions,
     select_random_k_subscriptions,
+    select_top_k_similarity_subscriptions,
 )
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.candidates import (
@@ -726,6 +727,7 @@ class Orchestrator:
                 target_task_id=target_id,
                 current_iteration=current_iteration,
                 eligible_artifacts=eligible_artifacts,
+                snapshot=snapshot,
             )
             if subscriptions:
                 self._diffusion_sub_board[(current_iteration, target_id)] = (
@@ -740,6 +742,7 @@ class Orchestrator:
         target_task_id: str,
         current_iteration: int,
         eligible_artifacts: list[DiffusionArtifact],
+        snapshot: TaskGraphSnapshot,
     ) -> list[DiffusionSubscription]:
         policy_name = self.config.diffusion.policy
         if policy_name == "capped_broadcast":
@@ -754,6 +757,14 @@ class Orchestrator:
                 target_iteration=current_iteration,
                 max_artifacts=self.config.diffusion.max_artifacts,
                 seed=self.config.experiment.seed,
+            )
+        if policy_name == "top_k_similarity":
+            return select_top_k_similarity_subscriptions(
+                eligible_artifacts=eligible_artifacts,
+                snapshot=snapshot,
+                target_task_id=target_task_id,
+                max_artifacts=self.config.diffusion.max_artifacts,
+                top_k_neighbors=self.config.diffusion.top_k_neighbors,
             )
         return []
 

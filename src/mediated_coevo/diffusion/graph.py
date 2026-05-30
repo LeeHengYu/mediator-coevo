@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -68,8 +69,7 @@ class DiffusionNetwork:
         self._pairwise_artifact: PairwiseSimilarityArtifact | None = None
         self._task_ids: list[str] = []
         self._nodes_by_task_id: dict[str, TaskGraphNode] = {}
-        self._edge_records: list[TaskGraphEdgeRecord] = []
-        self._adjacency_by_task_id: dict[str, list[TaskGraphEdgeRecord]] = {}
+        self._adj_list: defaultdict[str, list[TaskGraphEdgeRecord]] = defaultdict(list)
         self._snapshot: TaskGraphSnapshot | None = None
 
     @classmethod
@@ -124,8 +124,11 @@ class DiffusionNetwork:
         self._load_artifacts()
         self._task_ids = self._select_task_ids()
         self._nodes_by_task_id = self._build_nodes()
-        self._edge_records = self._build_edge_records()
-        self._adjacency_by_task_id = self._build_adjacency()
+        edge_records = self._build_edge_records()
+        self._adj_list = self._build_adj_list(
+            task_ids=self._task_ids,
+            edge_records=edge_records,
+        )
         self._snapshot = None
         return self
 
@@ -145,13 +148,18 @@ class DiffusionNetwork:
     def get_edge_records(self) -> list[TaskGraphEdgeRecord]:
         """Return all directed edge records in stable order."""
         self._require_built()
-        return list(self._edge_records)
+        return _flatten_adj_list(self._adj_list)
 
     def get_edges_for(self, task_id: str) -> list[TaskGraphEdgeRecord]:
         """Return outgoing edges for one task."""
         self._require_built()
         self.get_node(task_id)
-        return list(self._adjacency_by_task_id[task_id])
+        return list(self._adj_list[task_id])
+
+    def get_adj_list(self) -> dict[str, list[TaskGraphEdgeRecord]]:
+        """Return outgoing graph adjacency keyed by source task ID."""
+        self._require_built()
+        return _copy_adj_list(self._adj_list, self._task_ids)
 
     def get_neighbors(self, task_id: str) -> list[TaskGraphNode]:
         """Return neighboring nodes reachable by one outgoing edge."""
@@ -162,23 +170,19 @@ class DiffusionNetwork:
     def get_isolated_task_ids(self) -> list[str]:
         """Return selected task IDs with no visible edges."""
         self._require_built()
-        connected_task_ids = {
-            edge.source_task_id for edge in self._edge_records
-        } | {edge.target_task_id for edge in self._edge_records}
-        return [
-            task_id for task_id in self._task_ids if task_id not in connected_task_ids
-        ]
+        return [task_id for task_id in self._task_ids if not self._adj_list[task_id]]
 
     def to_snapshot(self) -> TaskGraphSnapshot:
         """Return the frozen graph snapshot for the current build."""
         self._require_built()
         if self._snapshot is None:
+            edge_records = self.get_edge_records()
             self._snapshot = self._freeze_snapshot(
                 run_id=self.spec.run_id,
                 iteration=self.spec.iteration,
                 task_ids=self._task_ids,
                 graph_policy=self.spec.graph_policy,
-                edge_records=self._edge_records,
+                edge_records=edge_records,
                 feature_cutoff=self.spec.feature_cutoff,
                 seed=self.spec.seed,
                 metadata=self._snapshot_metadata(),
@@ -226,11 +230,16 @@ class DiffusionNetwork:
             use_threshold_cut=self.spec.use_threshold_cut,
         )
 
-    def _build_adjacency(self) -> dict[str, list[TaskGraphEdgeRecord]]:
-        adjacency: dict[str, list[TaskGraphEdgeRecord]] = {
-            task_id: [] for task_id in self._task_ids
-        }
-        for edge in self._edge_records:
+    @staticmethod
+    def _build_adj_list(
+        *,
+        task_ids: Sequence[str],
+        edge_records: Sequence[TaskGraphEdgeRecord],
+    ) -> defaultdict[str, list[TaskGraphEdgeRecord]]:
+        adjacency: defaultdict[str, list[TaskGraphEdgeRecord]] = defaultdict(list)
+        for task_id in task_ids:
+            adjacency[task_id]
+        for edge in edge_records:
             adjacency[edge.source_task_id].append(edge)
         return adjacency
 
@@ -378,3 +387,31 @@ class DiffusionNetwork:
                 metadata=metadata,
             ),
         ]
+
+
+def adjacency_from_snapshot(
+    snapshot: TaskGraphSnapshot,
+) -> dict[str, list[TaskGraphEdgeRecord]]:
+    """Return outgoing adjacency from a persisted graph snapshot."""
+    adjacency = DiffusionNetwork._build_adj_list(
+        task_ids=snapshot.task_ids,
+        edge_records=snapshot.edge_records,
+    )
+    return _copy_adj_list(adjacency, snapshot.task_ids)
+
+
+def _copy_adj_list(
+    adjacency: Mapping[str, Sequence[TaskGraphEdgeRecord]],
+    task_ids: Sequence[str],
+) -> dict[str, list[TaskGraphEdgeRecord]]:
+    return {task_id: list(adjacency[task_id]) for task_id in task_ids}
+
+
+def _flatten_adj_list(
+    adjacency: Mapping[str, Sequence[TaskGraphEdgeRecord]],
+) -> list[TaskGraphEdgeRecord]:
+    edges = [edge for edge_records in adjacency.values() for edge in edge_records]
+    return sorted(
+        edges,
+        key=lambda edge: (edge.source_task_id, edge.target_task_id, edge.relation),
+    )

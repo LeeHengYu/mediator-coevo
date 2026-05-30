@@ -8,7 +8,12 @@ from mediated_coevo.core.config import (
 
 
 def diffusion_config() -> DiffusionConfig:
-    return DiffusionConfig(enabled=False, policy="none", max_artifacts=3)
+    return DiffusionConfig(
+        enabled=False,
+        policy="none",
+        max_artifacts=3,
+        top_k_neighbors=3,
+    )
 
 
 def experiment_config() -> ExperimentConfig:

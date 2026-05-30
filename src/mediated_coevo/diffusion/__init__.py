@@ -7,6 +7,7 @@ from .graph import (
     PairwiseSimilarityArtifact,
     TaskGraphNode,
     TaskProfilesArtifact,
+    adjacency_from_snapshot,
 )
 from .models import (
     DiffusedRecord,
@@ -25,6 +26,7 @@ from .policy import (
     render_diffusion_subscriptions,
     select_capped_broadcast_subscriptions,
     select_random_k_subscriptions,
+    select_top_k_similarity_subscriptions,
 )
 from .store import DiffusionStore
 
@@ -39,12 +41,14 @@ __all__ = [
     "DiffusionSubscription",
     "DiffusedRecord",
     "DiffusionStore",
+    "adjacency_from_snapshot",
     "build_capped_broadcast_context",
     "build_random_k_context",
     "emit_diffusion_artifacts",
     "render_diffusion_subscriptions",
     "select_capped_broadcast_subscriptions",
     "select_random_k_subscriptions",
+    "select_top_k_similarity_subscriptions",
     "GraphBuildSpec",
     "PairwiseSimilarityArtifact",
     "TaskProfilesArtifact",
