@@ -153,10 +153,11 @@ Current diffusion policy values:
   graph neighbors for the target task, capped by `diffusion.max_artifacts` and
   `diffusion.top_k_neighbors`.
 
-The graph precompute command scores all local SkillFlow task pairs using
-metadata, task resources, output shape, and instruction text. It writes profiles,
-pairwise weights, thresholds, kept edges, cut edges, and connected components
-for later inspection.
+The graph precompute command scores directed SkillFlow edge candidates using
+family rankings, metadata, task resources, output shape, and instruction text.
+Same-family edges flow only from earlier to later ranked tasks; cross-family
+edges use lower-weight semantic similarity. It writes profiles, edge weights,
+thresholds, kept/cut edges, and connected components for later inspection.
 
 ### What Is Not GRPO
 
@@ -227,6 +228,7 @@ uv run medcoevo run
 uv run medcoevo matrix
 uv run medcoevo inspect
 uv run medcoevo create-graph
+uv run medcoevo list
 uv run medcoevo sync
 ```
 
@@ -345,7 +347,7 @@ uv run python -m mediated_coevo.analysis.evolution_audit data/experiments/<run-d
 
 ## `create-graph`
 
-Create a metadata similarity graph from local SkillFlow tasks:
+Create a directed SkillFlow graph from local SkillFlow tasks:
 
 ```bash
 uv run medcoevo create-graph \
@@ -354,20 +356,39 @@ uv run medcoevo create-graph \
   --threshold 0.05
 ```
 
-The graph artifacts include task profiles, pairwise similarity components,
-score weights, active thresholds, kept/cut edges, and connected components.
+The graph artifacts include task profiles, directed edge components, score
+weights, active thresholds, kept/cut edges, and connected components.
 
 ## `sync`
 
-Download SkillFlow task data into the configured local cache:
+List remote SkillFlow task IDs before downloading:
 
 ```bash
-uv run medcoevo sync
+uv run medcoevo list
+uv run medcoevo list --family Distribution-Center-Auditing
+```
+
+Use `--local` to list already cached tasks under the configured local task
+directory.
+
+Download all remote SkillFlow test tasks into the configured local cache:
+
+```bash
+uv run medcoevo sync --tasks all
+```
+
+Download only selected tasks by repeating `--tasks` or passing comma-separated
+IDs:
+
+```bash
+uv run medcoevo sync \
+  --tasks Distribution-Center-Auditing/harbor_returns_disposition_audit
 ```
 
 By default the configured dataset is `zhang-ziao/SkillFlow-Task` and the target
-directory is `benchmarks/skillflow/tasks/`. Runtime task IDs assume data is
-available directly under `tasks/<Family>/<Task>/`:
+directory is `benchmarks/skillflow/tasks/`. Hugging Face files are downloaded
+from `test_tasks/` and flattened into the local `tasks/` cache, so runtime task
+IDs are available directly under `tasks/<Family>/<Task>/`:
 
 ```bash
 uv run medcoevo run --task Distribution-Center-Auditing/harbor_returns_disposition_audit
@@ -530,8 +551,9 @@ docker info
 
 Missing SkillFlow task
 
-Use `uv run medcoevo sync`, select an existing local `--task`, or add a task
-under `benchmarks/skillflow/tasks/`.
+Use `uv run medcoevo list`, download with `uv run medcoevo sync --tasks ...`,
+select an existing local `--task`, or add a task under
+`benchmarks/skillflow/tasks/`.
 
 Invalid experiment design
 

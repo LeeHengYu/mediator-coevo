@@ -260,6 +260,19 @@ def _task_ids_from_repeatable_cli(raw_values: list[str] | None) -> list[str]:
     return task_ids
 
 
+def _sync_task_ids_from_repeatable_cli(raw_values: list[str] | None) -> list[str] | None:
+    """Parse sync task selectors. None means all remote test tasks."""
+    if not raw_values:
+        return None
+    task_ids = _task_ids_from_repeatable_cli(raw_values)
+    all_selectors = [task_id for task_id in task_ids if task_id.lower() == "all"]
+    if all_selectors:
+        if len(task_ids) > 1:
+            raise typer.BadParameter("--tasks all cannot be combined with task IDs")
+        return None
+    return task_ids
+
+
 def _build_benchmark_repo(project_root: Path, config: Config) -> SkillFlowRepository:
     return SkillFlowRepository(
         root_dir=project_root / config.paths.benchmarks_dir,
@@ -1423,7 +1436,7 @@ def create_graph(
         help="Directory where graph precompute JSON artifacts are written.",
     ),
 ) -> None:
-    """Create a metadata similarity graph from local SkillFlow tasks."""
+    """Create a directed SkillFlow task graph from local task metadata."""
     try:
         precompute = build_task_graph_precompute(
             tasks_root,
@@ -1444,10 +1457,22 @@ def create_graph(
 
 @app.command("sync")
 def sync_skillflow(
+    tasks: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--tasks",
+            "--task",
+            "-t",
+            help=(
+                "Remote SkillFlow task ID(s) to download. Repeat the option, "
+                "provide comma-separated IDs, or use 'all'."
+            ),
+        ),
+    ] = None,
     output_dir: Path | None = typer.Option(
         None,
         "--output-dir",
-        help="Directory where SkillFlow task data should be downloaded.",
+        help="Local tasks/ directory where SkillFlow task data should be downloaded.",
     ),
     dataset: str = typer.Option(
         DEFAULT_SKILLFLOW_DATASET,
@@ -1463,11 +1488,51 @@ def sync_skillflow(
     config.executor_runtime.dataset = dataset
     repository = _build_benchmark_repo(PROJECT_ROOT, config)
     try:
-        destination = repository.sync_tasks(destination=output_dir)
+        destination = repository.sync_tasks(
+            destination=output_dir,
+            task_ids=_sync_task_ids_from_repeatable_cli(tasks),
+        )
     except SkillFlowSyncError as exc:
         console.print(f"[bold red]ERROR:[/] {exc}")
         raise typer.Exit(code=1) from exc
     console.print(f"[bold]Downloaded SkillFlow tasks to:[/] {destination}")
+
+
+@app.command("list")
+def list_skillflow_tasks(
+    family: str | None = typer.Option(
+        None,
+        "--family",
+        help="Filter task IDs by SkillFlow family.",
+    ),
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="List cached local tasks instead of remote Hugging Face tasks.",
+    ),
+    dataset: str = typer.Option(
+        DEFAULT_SKILLFLOW_DATASET,
+        "--dataset",
+        help="Hugging Face dataset ID.",
+    ),
+    config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """List available SkillFlow task IDs."""
+    _setup_logging(verbose)
+    config = _load_config_or_bad_parameter(config_dir)
+    config.executor_runtime.dataset = dataset
+    repository = _build_benchmark_repo(PROJECT_ROOT, config)
+    try:
+        if local:
+            task_ids = repository.list_local_task_ids(family=family)
+        else:
+            task_ids = repository.list_remote_task_ids(family=family)
+    except (FileNotFoundError, SkillFlowSyncError) as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    for task_id in task_ids:
+        typer.echo(task_id)
 
 
 if __name__ == "__main__":

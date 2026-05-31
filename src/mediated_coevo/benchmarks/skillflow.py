@@ -9,6 +9,7 @@ import os
 import signal
 import shutil
 import subprocess
+import tempfile
 import tomllib
 import uuid
 from collections.abc import Iterable, Mapping
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLFLOW_DATASET = "zhang-ziao/SkillFlow-Task"
 SKILLFLOW_VERIFIER_TYPE = "skillflow_harbor"
+HF_TEST_TASKS_ROOT = "test_tasks"
+HF_FAMILY_RANKING_FILENAME = "ALL_TASK_DIFFICULTY_RANKING.json"
 
 
 class HarborNotFoundError(RuntimeError):
@@ -132,19 +135,78 @@ class SkillFlowRepository:
             selected.extend(self._resolve_task_set(task_set))
         return _dedupe(selected)
 
-    def sync_tasks(self, destination: Path | None = None) -> Path:
+    def list_remote_task_ids(self, *, family: str | None = None) -> list[str]:
+        """Return task IDs advertised by the configured remote SkillFlow dataset."""
+        command = [
+            "hf",
+            "datasets",
+            "ls",
+            self.sync.dataset,
+            "-R",
+            "--format",
+            "quiet",
+        ]
+        completed = self._run_hf_command(
+            command,
+            failure_message="SkillFlow task list failed",
+        )
+        task_ids = sorted(
+            {
+                task_id
+                for line in completed.stdout.splitlines()
+                for task_id in [_remote_task_id_from_file_line(line)]
+                if task_id is not None
+            }
+        )
+        if family is None:
+            return task_ids
+        return [
+            task_id
+            for task_id in task_ids
+            if task_id.split("/", 1)[0] == family
+        ]
+
+    def sync_tasks(
+        self,
+        destination: Path | None = None,
+        *,
+        task_ids: list[str] | None = None,
+    ) -> Path:
         """Download SkillFlow task data into the configured task cache."""
         destination = destination or self.default_local_cache_dir()
         destination.mkdir(parents=True, exist_ok=True)
-        command = [
-            "hf",
-            "download",
-            self.sync.dataset,
-            "--repo-type",
-            self.sync.repo_type,
-            "--local-dir",
-            str(destination),
-        ]
+        selected_task_ids = _validated_remote_task_ids(task_ids)
+        with tempfile.TemporaryDirectory(
+            prefix="skillflow-sync-",
+            dir=destination.parent,
+        ) as staging_dir_name:
+            staging_dir = Path(staging_dir_name)
+            command = [
+                "hf",
+                "download",
+                self.sync.dataset,
+                "--repo-type",
+                self.sync.repo_type,
+            ]
+            for include_pattern in _download_include_patterns(selected_task_ids):
+                command.extend(["--include", include_pattern])
+            command.extend(["--local-dir", str(staging_dir)])
+            self._run_hf_command(
+                command,
+                failure_message="SkillFlow task sync failed",
+            )
+            _merge_downloaded_test_tasks(
+                source_root=staging_dir / HF_TEST_TASKS_ROOT,
+                destination=destination,
+            )
+        return destination
+
+    @staticmethod
+    def _run_hf_command(
+        command: list[str],
+        *,
+        failure_message: str,
+    ) -> subprocess.CompletedProcess[str]:
         try:
             completed = subprocess.run(
                 command,
@@ -160,10 +222,10 @@ class SkillFlowRepository:
             ) from exc
         if completed.returncode != 0:
             raise SkillFlowSyncError(
-                "SkillFlow task sync failed: "
+                f"{failure_message}: "
                 f"{completed.stderr.strip() or completed.stdout.strip()}"
             )
-        return destination
+        return completed
 
     def prepare_run_workspace(
         self,
@@ -525,6 +587,68 @@ def _is_task_dir(path: Path) -> bool:
 
 def _is_safe_task_id(task_id: str) -> bool:
     return bool(task_id) and not any(part in {"", ".", ".."} for part in task_id.split("/"))
+
+
+def _validated_remote_task_ids(task_ids: list[str] | None) -> list[str] | None:
+    if task_ids is None:
+        return None
+    selected_task_ids = _dedupe(task_ids)
+    if not selected_task_ids:
+        raise SkillFlowSyncError("at least one SkillFlow task ID is required")
+    unsafe_task_ids = [
+        task_id for task_id in selected_task_ids if not _is_safe_task_id(task_id)
+    ]
+    if unsafe_task_ids:
+        raise SkillFlowSyncError(f"unsafe SkillFlow task IDs: {unsafe_task_ids}")
+    missing_family_task_ids = [
+        task_id for task_id in selected_task_ids if "/" not in task_id
+    ]
+    if missing_family_task_ids:
+        raise SkillFlowSyncError(
+            "remote SkillFlow task IDs must use '<family>/<task>' format: "
+            f"{missing_family_task_ids}"
+        )
+    return selected_task_ids
+
+
+def _download_include_patterns(task_ids: list[str] | None) -> list[str]:
+    if task_ids is None:
+        return [f"{HF_TEST_TASKS_ROOT}/**"]
+    patterns: list[str] = []
+    for task_id in task_ids:
+        family_id = task_id.split("/", 1)[0]
+        patterns.append(f"{HF_TEST_TASKS_ROOT}/{task_id}/**")
+        patterns.append(
+            f"{HF_TEST_TASKS_ROOT}/{family_id}/{HF_FAMILY_RANKING_FILENAME}"
+        )
+    return _dedupe(patterns)
+
+
+def _remote_task_id_from_file_line(line: str) -> str | None:
+    for token in line.split():
+        normalized = token.strip().strip('"').strip("'")
+        marker = f"{HF_TEST_TASKS_ROOT}/"
+        if marker not in normalized or not normalized.endswith("/task.toml"):
+            continue
+        task_id = normalized.split(marker, 1)[1].removesuffix("/task.toml")
+        if "/" in task_id and _is_safe_task_id(task_id):
+            return task_id
+    return None
+
+
+def _merge_downloaded_test_tasks(*, source_root: Path, destination: Path) -> None:
+    if not source_root.exists():
+        raise SkillFlowSyncError(
+            "SkillFlow task sync did not produce a test_tasks/ directory. "
+            "Check the dataset layout or selected task IDs."
+        )
+    for source_path in sorted(source_root.iterdir(), key=lambda path: path.name):
+        target_path = destination / source_path.name
+        if source_path.is_dir():
+            shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+        else:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
 
 
 def _safe_artifact_name(task_id: str) -> str:

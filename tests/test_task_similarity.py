@@ -22,63 +22,77 @@ def test_percentile_threshold_uses_nearest_rank() -> None:
         percentile_threshold([0.0], 0.0)
 
 
-def test_task_graph_precompute_scores_all_pairs_and_cuts_below_p20(
+def test_task_graph_precompute_scores_directed_skillflow_edges_and_cuts_below_p20(
     tmp_path: Path,
 ) -> None:
     tasks_root = tmp_path / "tasks"
     _write_task(
         tasks_root,
-        "java-build",
-        category="Compilation & Build",
+        "family-a/task-one",
+        family="family-a",
+        category="data-analysis",
         difficulty="easy",
-        tags=["Java", "maven", "software", "build", "ci", "debugging"],
-        skills=["maven-build-lifecycle"],
-        instruction="Fix Java Maven build errors and write a patch diff.",
+        tags=["csv", "analysis"],
+        environment_files=["input.csv"],
+        instruction="Clean CSV data and write report.json.",
     )
     _write_task(
         tasks_root,
-        "python-build",
-        category="Compilation & Build",
-        difficulty="easy",
-        tags=["Python", "software", "build", "ci", "debugging"],
-        instruction="Fix Python CI build errors and write a patch diff.",
-    )
-    _write_task(
-        tasks_root,
-        "finance-xlsx",
-        category="finance-economics",
+        "family-a/task-two",
+        family="family-a",
+        category="data-analysis",
         difficulty="medium",
-        tags=["excel", "financial-analysis"],
-        skills=["xlsx"],
-        environment_files=["data.xlsx"],
-        instruction="Recover missing spreadsheet values in an xlsx workbook.",
+        tags=["csv", "analysis"],
+        environment_files=["output.csv"],
+        instruction="Transform CSV data and write report.json.",
     )
     _write_task(
         tasks_root,
-        "citation-check",
-        category="research",
-        difficulty="medium",
-        tags=["citation", "bibtex"],
-        skills=["citation-management"],
-        environment_files=["test.bib"],
-        instruction="Find fake BibTeX citations and write answer.json.",
+        "family-a/task-three",
+        family="family-a",
+        category="document-research",
+        difficulty="hard",
+        tags=["pdf", "citation"],
+        environment_files=["article.pdf"],
+        instruction="Review PDF citations and write answer.json.",
     )
+    _write_task(
+        tasks_root,
+        "family-b/task-x",
+        family="family-b",
+        category="data-analysis",
+        difficulty="medium",
+        tags=["csv"],
+        environment_files=["table.csv"],
+        instruction="Analyze CSV input and write report.json.",
+    )
+    _write_ranking(tasks_root, "family-a", ["task-one", "task-two", "task-three"])
+    _write_ranking(tasks_root, "family-b", ["task-x"])
 
     precompute = build_task_graph_precompute(tasks_root)
 
     assert precompute.task_count == 4
-    assert precompute.pair_count == 6
-    assert precompute.kept_edge_count + precompute.cut_edge_count == 6
+    assert precompute.pair_count == 9
+    assert precompute.kept_edge_count + precompute.cut_edge_count == 9
 
     pairs = {
         (pair.source, pair.target): pair for pair in precompute.pairwise_similarity
     }
-    build_pair = pairs[("java-build", "python-build")]
-    assert build_pair.score == max(pair.score for pair in pairs.values())
-    assert build_pair.kept_after_p20_cut is True
-    assert build_pair.kept_after_threshold_cut is True
-    assert build_pair.components["category"] == 1.0
-    assert "build-debugging" in build_pair.shared["capabilities"]
+    forward_pair = pairs[("family-a/task-one", "family-a/task-two")]
+    assert ("family-a/task-two", "family-a/task-one") not in pairs
+    assert forward_pair.score == pytest.approx(1.0)
+    assert forward_pair.metadata["edge_kind"] == "same_family_forward"
+    assert forward_pair.metadata["rank_gap"] == 1
+    assert forward_pair.metadata["rank_affinity"] == pytest.approx(1.0)
+    assert forward_pair.components["category"] == 1.0
+    assert forward_pair.shared["io_shape"] == ["csv", "json"]
+
+    skipped_pair = pairs[("family-a/task-one", "family-a/task-three")]
+    assert skipped_pair.metadata["rank_affinity"] == pytest.approx(0.0)
+    cross_pair = pairs[("family-a/task-one", "family-b/task-x")]
+    assert pairs[("family-b/task-x", "family-a/task-one")].score == cross_pair.score
+    assert cross_pair.metadata["edge_kind"] == "cross_family"
+    assert cross_pair.score < skipped_pair.score
 
     for pair in precompute.pairwise_similarity:
         if pair.score < precompute.p20_threshold:
@@ -94,40 +108,46 @@ def test_task_graph_precompute_can_use_absolute_score_threshold(
     tasks_root = tmp_path / "tasks"
     _write_task(
         tasks_root,
-        "java-build",
-        category="Compilation & Build",
+        "family-a/task-one",
+        family="family-a",
+        category="data-analysis",
         difficulty="easy",
-        tags=["Java", "maven", "software", "build", "ci", "debugging"],
-        instruction="Fix Java Maven build errors and write a patch diff.",
+        tags=["csv", "analysis"],
+        environment_files=["input.csv"],
+        instruction="Clean CSV data and write report.json.",
     )
     _write_task(
         tasks_root,
-        "python-build",
-        category="Compilation & Build",
+        "family-a/task-two",
+        family="family-a",
+        category="data-analysis",
         difficulty="easy",
-        tags=["Python", "software", "build", "ci", "debugging"],
-        instruction="Fix Python CI build errors and write a patch diff.",
+        tags=["csv", "analysis"],
+        environment_files=["output.csv"],
+        instruction="Transform CSV data and write report.json.",
     )
     _write_task(
         tasks_root,
-        "citation-check",
+        "family-a/task-three",
+        family="family-a",
         category="research",
         difficulty="medium",
         tags=["citation", "bibtex"],
         instruction="Find fake BibTeX citations and write answer.json.",
     )
+    _write_ranking(tasks_root, "family-a", ["task-one", "task-two", "task-three"])
 
-    precompute = build_task_graph_precompute(tasks_root, edge_score_threshold=0.05)
+    precompute = build_task_graph_precompute(tasks_root, edge_score_threshold=0.7)
 
     assert precompute.threshold_kind == "absolute_score"
-    assert precompute.edge_score_threshold == 0.05
-    assert precompute.active_threshold == 0.05
+    assert precompute.edge_score_threshold == 0.7
+    assert precompute.active_threshold == 0.7
     assert precompute.kept_edge_count == sum(
-        pair.score >= 0.05 for pair in precompute.pairwise_similarity
+        pair.score >= 0.7 for pair in precompute.pairwise_similarity
     )
 
     for pair in precompute.pairwise_similarity:
-        assert pair.kept_after_threshold_cut == (pair.score >= 0.05)
+        assert pair.kept_after_threshold_cut == (pair.score >= 0.7)
 
 
 def test_write_task_graph_artifacts(tmp_path: Path) -> None:
@@ -159,10 +179,13 @@ def test_write_task_graph_artifacts(tmp_path: Path) -> None:
 
     assert profiles["task_count"] == 2
     assert sorted(profiles["profiles"]) == ["task-a", "task-b"]
-    assert pairwise["pair_count"] == 1
+    assert pairwise["graph_kind"] == "skillflow_ranked_similarity"
+    assert pairwise["pair_count"] == 2
     assert pairwise["active_threshold"] == pairwise["p20_threshold"]
     assert pairwise["threshold_kind"] == "p20"
     assert pairwise["pairs"][0]["source"] == "task-a"
+    assert pairwise["pairs"][0]["metadata"]["directed"] is True
+    assert summary["graph_kind"] == "skillflow_ranked_similarity"
     assert summary["task_count"] == 2
     assert "profiles" not in summary
     assert "pairwise_similarity" not in summary
@@ -216,18 +239,19 @@ def test_create_graph_cli_writes_thresholded_artifacts(tmp_path: Path) -> None:
     pairwise = json.loads((output_dir / "pairwise_similarity.json").read_text())
 
     assert summary["task_count"] == 3
-    assert summary["pair_count"] == 3
+    assert summary["pair_count"] == 6
     assert summary["threshold_kind"] == "absolute_score"
     assert summary["active_threshold"] == 0.05
     assert summary["edge_score_threshold"] == 0.05
     assert pairwise["active_threshold"] == 0.05
-    assert len(pairwise["pairs"]) == 3
+    assert len(pairwise["pairs"]) == 6
 
 
 def _write_task(
     tasks_root: Path,
     task_id: str,
     *,
+    family: str | None = None,
     category: str,
     difficulty: str,
     tags: list[str],
@@ -240,12 +264,14 @@ def _write_task(
     task_dir.mkdir(parents=True)
     environment_dir.mkdir()
     (task_dir / "instruction.md").write_text(instruction)
+    family_lines = [f'family = "{family}"'] if family is not None else []
     (task_dir / "task.toml").write_text(
         "\n".join(
             [
                 'version = "1.0"',
                 "",
                 "[metadata]",
+                *family_lines,
                 f'difficulty = "{difficulty}"',
                 f'category = "{category}"',
                 f"tags = {_toml_list(tags)}",
@@ -259,6 +285,12 @@ def _write_task(
         (skill_dir / "SKILL.md").write_text(f"# {skill}\n")
     for filename in environment_files or []:
         (environment_dir / filename).write_text("")
+
+
+def _write_ranking(tasks_root: Path, family_id: str, task_ids: list[str]) -> None:
+    family_dir = tasks_root / family_id
+    family_dir.mkdir(parents=True, exist_ok=True)
+    (family_dir / "ALL_TASK_DIFFICULTY_RANKING.json").write_text(json.dumps(task_ids))
 
 
 def _toml_list(values: list[str]) -> str:

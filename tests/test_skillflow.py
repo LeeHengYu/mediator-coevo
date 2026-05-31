@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from typer.testing import CliRunner
+
 from mediated_coevo.benchmarks import (
     HarborRunResult,
     SKILLFLOW_VERIFIER_TYPE,
     SkillFlowRepository,
     parse_skillflow_execution_trace,
 )
+from mediated_coevo.main import app
 
 
 def test_repository_resolves_tasks_family_and_task_set(tmp_path: Path) -> None:
@@ -56,7 +59,49 @@ def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None
     assert metadata["verifier_contract_kind"] == SKILLFLOW_VERIFIER_TYPE
 
 
-def test_sync_tasks_downloads_directly_to_configured_task_cache(
+def test_repository_lists_remote_task_ids(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "skillflow"
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    calls = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        return _Completed(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    "test_tasks/family-a/task-one/task.toml",
+                    "test_tasks/family-a/task-one/instruction.md",
+                    "test_tasks/family-b/task-two/task.toml",
+                    "README.md",
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.subprocess.run",
+        fake_run,
+    )
+
+    assert repo.list_remote_task_ids() == [
+        "family-a/task-one",
+        "family-b/task-two",
+    ]
+    assert repo.list_remote_task_ids(family="family-a") == ["family-a/task-one"]
+    assert calls[0] == [
+        "hf",
+        "datasets",
+        "ls",
+        "zhang-ziao/SkillFlow-Task",
+        "-R",
+        "--format",
+        "quiet",
+    ]
+
+
+def test_sync_tasks_downloads_all_test_tasks_to_configured_task_cache(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -68,7 +113,7 @@ def test_sync_tasks_downloads_directly_to_configured_task_cache(
         del kwargs
         calls.append(command)
         local_dir = Path(command[command.index("--local-dir") + 1])
-        _write_task(local_dir / "family-a" / "task-one", family="family-a")
+        _write_task(local_dir / "test_tasks" / "family-a" / "task-one", family="family-a")
         return _Completed(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(
@@ -80,8 +125,114 @@ def test_sync_tasks_downloads_directly_to_configured_task_cache(
 
     assert destination == root / "tasks"
     assert (root / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
-    assert calls[0][-2:] == ["--local-dir", str(root / "tasks")]
+    assert "test_tasks/**" in calls[0]
+    assert calls[0][-2] == "--local-dir"
+    assert Path(calls[0][-1]) != root / "tasks"
+    assert not (root / "tasks" / "test_tasks").exists()
     assert repo.resolve("family-a/task-one").family == "family-a"
+
+
+def test_sync_tasks_downloads_selected_tasks_and_family_ranking(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skillflow"
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    calls = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        local_dir = Path(command[command.index("--local-dir") + 1])
+        family_dir = local_dir / "test_tasks" / "family-a"
+        _write_task(family_dir / "task-one", family="family-a")
+        (family_dir / "ALL_TASK_DIFFICULTY_RANKING.json").write_text(
+            json.dumps(["task-one", "task-two"])
+        )
+        return _Completed(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.subprocess.run",
+        fake_run,
+    )
+
+    destination = repo.sync_tasks(task_ids=["family-a/task-one"])
+
+    assert destination == root / "tasks"
+    assert (root / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
+    assert (
+        root / "tasks" / "family-a" / "ALL_TASK_DIFFICULTY_RANKING.json"
+    ).is_file()
+    assert "test_tasks/family-a/task-one/**" in calls[0]
+    assert "test_tasks/family-a/ALL_TASK_DIFFICULTY_RANKING.json" in calls[0]
+    assert not (root / "tasks" / "test_tasks").exists()
+
+
+def test_sync_cli_accepts_selected_tasks(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        local_dir = Path(command[command.index("--local-dir") + 1])
+        _write_task(local_dir / "test_tasks" / "family-a" / "task-one", family="family-a")
+        return _Completed(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.subprocess.run",
+        fake_run,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "sync",
+            "--output-dir",
+            str(tmp_path / "tasks"),
+            "--dataset",
+            "demo/dataset",
+            "--tasks",
+            "family-a/task-one",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Downloaded SkillFlow tasks to:" in result.output
+    assert "demo/dataset" in calls[0]
+    assert "test_tasks/family-a/task-one/**" in calls[0]
+    assert (tmp_path / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
+
+
+def test_list_cli_queries_remote_tasks(monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        del kwargs
+        assert command == [
+            "hf",
+            "datasets",
+            "ls",
+            "demo/dataset",
+            "-R",
+            "--format",
+            "quiet",
+        ]
+        return _Completed(
+            returncode=0,
+            stdout="test_tasks/family-a/task-one/task.toml\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.subprocess.run",
+        fake_run,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["list", "--dataset", "demo/dataset"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "family-a/task-one"
 
 
 def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:

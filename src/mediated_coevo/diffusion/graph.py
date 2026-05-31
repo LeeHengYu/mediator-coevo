@@ -29,6 +29,7 @@ class TaskProfilesArtifact(BaseModel):
 class PairwiseSimilarityArtifact(BaseModel):
     """Validated contents of a pairwise similarity precompute artifact."""
 
+    graph_kind: str | None = None
     pair_count: int
     p20_threshold: float | None = None
     edge_score_threshold: float | None = None
@@ -168,9 +169,15 @@ class DiffusionNetwork:
         return [self._nodes_by_task_id[neighbor_id] for neighbor_id in neighbor_ids]
 
     def get_isolated_task_ids(self) -> list[str]:
-        """Return selected task IDs with no visible edges."""
+        """Return selected task IDs with no incident directed edges."""
         self._require_built()
-        return [task_id for task_id in self._task_ids if not self._adj_list[task_id]]
+        edge_records = self.get_edge_records()
+        connected_task_ids = {edge.source_task_id for edge in edge_records} | {
+            edge.target_task_id for edge in edge_records
+        }
+        return [
+            task_id for task_id in self._task_ids if task_id not in connected_task_ids
+        ]
 
     def to_snapshot(self) -> TaskGraphSnapshot:
         """Return the frozen graph snapshot for the current build."""
@@ -246,6 +253,7 @@ class DiffusionNetwork:
     def _snapshot_metadata(self) -> dict[str, Any]:
         pairwise_artifact = self._require_pairwise_artifact()
         snapshot_metadata = dict(self.spec.metadata)
+        snapshot_metadata.setdefault("graph_kind", pairwise_artifact.graph_kind)
         snapshot_metadata.setdefault("active_threshold", pairwise_artifact.active_threshold)
         snapshot_metadata.setdefault(
             "edge_score_threshold",
@@ -303,8 +311,8 @@ class DiffusionNetwork:
                 continue
             if use_threshold_cut and not pair.kept_after_threshold_cut:
                 continue
-            edges.extend(
-                cls._pair_edges(
+            edges.append(
+                cls._edge_record(
                     pair,
                     threshold_filter_applied=use_threshold_cut,
                 )
@@ -358,35 +366,26 @@ class DiffusionNetwork:
         return cls._selected_task_ids(task_ids, task_ids)
 
     @staticmethod
-    def _pair_edges(
+    def _edge_record(
         pair: PairSimilarity,
         *,
         threshold_filter_applied: bool,
-    ) -> list[TaskGraphEdgeRecord]:
+    ) -> TaskGraphEdgeRecord:
         metadata = {
+            **pair.metadata,
             "components": pair.components,
             "shared": pair.shared,
             "kept_after_p20_cut": pair.kept_after_p20_cut,
             "kept_after_threshold_cut": pair.kept_after_threshold_cut,
-            "symmetric": True,
             "threshold_filter_applied": threshold_filter_applied,
         }
-        return [
-            TaskGraphEdgeRecord(
-                source_task_id=pair.source,
-                target_task_id=pair.target,
-                relation="precomputed_similarity",
-                weight=pair.score,
-                metadata=metadata,
-            ),
-            TaskGraphEdgeRecord(
-                source_task_id=pair.target,
-                target_task_id=pair.source,
-                relation="precomputed_similarity",
-                weight=pair.score,
-                metadata=metadata,
-            ),
-        ]
+        return TaskGraphEdgeRecord(
+            source_task_id=pair.source,
+            target_task_id=pair.target,
+            relation="precomputed_similarity",
+            weight=pair.score,
+            metadata=metadata,
+        )
 
 
 def adjacency_from_snapshot(

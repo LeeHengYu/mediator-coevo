@@ -10,6 +10,7 @@ import statistics
 import tomllib
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -151,11 +152,15 @@ DOMAIN_TERMS: frozenset[str] = frozenset(
 OUTPUT_MARKERS: dict[str, tuple[str, ...]] = {
     "dot": (".dot", "digraph"),
     "csv": (".csv", "csv"),
+    "docx": (".docx",),
     "html": (".html", "html", "web app"),
+    "image": (".png", ".jpg", ".jpeg", ".gif", ".webp", "image"),
     "json": (".json", "json"),
     "markdown": (".md", "markdown"),
     "patch": ("patch", "diff"),
     "pdf": (".pdf", "pdf"),
+    "pptx": (".pptx",),
+    "sqlite": (".sqlite", ".sqlite3", ".db"),
     "xlsx": (".xlsx", "excel", "spreadsheet"),
     "yaml": (".yaml", ".yml", "yaml"),
 }
@@ -188,20 +193,26 @@ CAPABILITY_MARKERS: dict[str, frozenset[str]] = {
 
 
 class ScoreWeights(BaseModel):
-    """Weights for task metadata similarity components."""
+    """Weights for directed SkillFlow edge scoring components."""
 
-    category: float = 0.30
-    tags: float = 0.22
-    skills: float = 0.18
-    capability: float = 0.14
-    io_shape: float = 0.10
-    instruction_text: float = 0.06
+    same_family_base: float = 0.65
+    rank_affinity: float = 0.15
+    same_family_tags: float = 0.10
+    same_family_category: float = 0.05
+    same_family_io_shape: float = 0.05
+    cross_family_tags: float = 0.20
+    cross_family_category: float = 0.10
+    cross_family_io_shape: float = 0.10
+    cross_family_instruction_text: float = 0.05
 
 
 class TaskSimilarityProfile(BaseModel):
     """Graph node ingredients extracted from a local SkillFlow task."""
 
     task_id: str
+    family_id: str = ""
+    rank: int | None = None
+    family_size: int | None = None
     category: str = ""
     difficulty: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -213,13 +224,14 @@ class TaskSimilarityProfile(BaseModel):
 
 
 class PairSimilarity(BaseModel):
-    """Weighted metadata similarity between two task nodes."""
+    """Weighted directed edge candidate between two task nodes."""
 
     source: str
     target: str
     score: float
     components: dict[str, float]
     shared: dict[str, list[str]]
+    metadata: dict[str, Any] = Field(default_factory=dict)
     kept_after_p20_cut: bool = False
     kept_after_threshold_cut: bool = False
 
@@ -227,6 +239,7 @@ class PairSimilarity(BaseModel):
 class TaskGraphPrecompute(BaseModel):
     """Precomputed graph ingredients and threshold-pruned edge set."""
 
+    graph_kind: str = "skillflow_ranked_similarity"
     task_count: int
     pair_count: int
     score_weights: ScoreWeights
@@ -253,6 +266,7 @@ class _ProfileFeatures(BaseModel):
     skill_terms: set[str]
     instruction_terms: set[str]
     output_terms: set[str]
+    io_terms: set[str]
     capability_terms: set[str]
 
 
@@ -270,9 +284,13 @@ def build_task_graph_precompute(
 
     weights = score_weights or ScoreWeights()
     pairwise_similarity = compute_pairwise_similarity(features, weights)
-    p20_threshold = percentile_threshold(
-        [pair.score for pair in pairwise_similarity],
-        percentile_cut,
+    p20_threshold = (
+        percentile_threshold(
+            [pair.score for pair in pairwise_similarity],
+            percentile_cut,
+        )
+        if pairwise_similarity
+        else 0.0
     )
     active_threshold = (
         edge_score_threshold if edge_score_threshold is not None else p20_threshold
@@ -301,10 +319,10 @@ def build_task_graph_precompute(
         threshold_kind=threshold_kind,
         kept_edge_count=len(kept_pairs),
         cut_edge_count=len(pruned_pairs) - len(kept_pairs),
-        score_min=min(scores),
-        score_max=max(scores),
-        score_mean=round(statistics.mean(scores), 6),
-        score_median=round(statistics.median(scores), 6),
+        score_min=min(scores) if scores else 0.0,
+        score_max=max(scores) if scores else 0.0,
+        score_mean=round(statistics.mean(scores), 6) if scores else 0.0,
+        score_median=round(statistics.median(scores), 6) if scores else 0.0,
         components_after_cut=connected_components(features.keys(), kept_pairs),
         profiles={task_id: features[task_id].profile for task_id in sorted(features)},
         pairwise_similarity=sorted(
@@ -317,10 +335,15 @@ def build_task_graph_precompute(
 def load_task_features(tasks_root: Path) -> dict[str, _ProfileFeatures]:
     """Extract metadata-driven graph node features from local task directories."""
     features: dict[str, _ProfileFeatures] = {}
-    for task_dir in sorted(tasks_root.iterdir(), key=lambda path: path.name):
-        if not task_dir.is_dir() or task_dir.name.startswith("."):
-            continue
-        features[task_dir.name] = _load_task_feature(task_dir)
+    family_rankings = _load_family_rankings(tasks_root)
+    for task_dir in _iter_task_dirs(tasks_root):
+        task_id = _task_id_for_dir(tasks_root, task_dir)
+        features[task_id] = _load_task_feature(
+            tasks_root=tasks_root,
+            task_dir=task_dir,
+            task_id=task_id,
+            rank_info=family_rankings.get(task_id),
+        )
     return features
 
 
@@ -328,30 +351,18 @@ def compute_pairwise_similarity(
     features: dict[str, _ProfileFeatures],
     score_weights: ScoreWeights,
 ) -> list[PairSimilarity]:
-    """Compute weighted similarity for every unordered task pair."""
+    """Compute weighted directed SkillFlow edge candidates."""
     pairs: list[PairSimilarity] = []
-    for source, target in itertools.combinations(sorted(features), 2):
+    for source, target in itertools.permutations(sorted(features), 2):
         source_features = features[source]
         target_features = features[target]
-        components = _component_scores(source_features, target_features)
-        score = round(
-            score_weights.category * components["category"]
-            + score_weights.tags * components["tags"]
-            + score_weights.skills * components["skills"]
-            + score_weights.capability * components["capability"]
-            + score_weights.io_shape * components["io_shape"]
-            + score_weights.instruction_text * components["instruction_text"],
-            6,
+        pair = _score_directed_edge(
+            source_features=source_features,
+            target_features=target_features,
+            score_weights=score_weights,
         )
-        pairs.append(
-            PairSimilarity(
-                source=source,
-                target=target,
-                score=score,
-                components=components,
-                shared=_shared_evidence(source_features, target_features),
-            )
-        )
+        if pair is not None:
+            pairs.append(pair)
     return pairs
 
 
@@ -414,6 +425,7 @@ def write_task_graph_artifacts(
     _write_json(
         output_dir / "pairwise_similarity.json",
         {
+            "graph_kind": precompute.graph_kind,
             "pair_count": precompute.pair_count,
             "percentile_cut": precompute.percentile_cut,
             "p20_threshold": precompute.p20_threshold,
@@ -434,8 +446,19 @@ def write_task_graph_artifacts(
     )
 
 
-def _load_task_feature(task_dir: Path) -> _ProfileFeatures:
-    task_id = task_dir.name
+class _RankInfo(BaseModel):
+    family_id: str
+    rank: int
+    family_size: int
+
+
+def _load_task_feature(
+    *,
+    tasks_root: Path,
+    task_dir: Path,
+    task_id: str,
+    rank_info: _RankInfo | None,
+) -> _ProfileFeatures:
     task_config = tomllib.loads((task_dir / "task.toml").read_text())
     metadata = task_config.get("metadata", {})
     instruction = (task_dir / "instruction.md").read_text(errors="ignore")
@@ -450,6 +473,7 @@ def _load_task_feature(task_dir: Path) -> _ProfileFeatures:
     skill_terms = _expand_terms(skill_names)
     instruction_terms = _tokens(instruction)
     output_terms = _infer_output_types(instruction, test_text, environment_files)
+    io_terms = output_terms | _file_extension_terms(environment_files)
     domain_terms = sorted(
         (
             category_terms
@@ -462,11 +486,21 @@ def _load_task_feature(task_dir: Path) -> _ProfileFeatures:
         & DOMAIN_TERMS
     )
     capability_terms = _infer_capabilities(
-        category_terms | tag_terms | skill_terms | instruction_terms | output_terms
+        category_terms | tag_terms | skill_terms | instruction_terms | io_terms
+    )
+    family_id = _family_id(
+        tasks_root=tasks_root,
+        task_dir=task_dir,
+        task_id=task_id,
+        metadata=metadata,
+        rank_info=rank_info,
     )
 
     profile = TaskSimilarityProfile(
         task_id=task_id,
+        family_id=family_id,
+        rank=rank_info.rank if rank_info is not None else None,
+        family_size=rank_info.family_size if rank_info is not None else None,
         category=category,
         difficulty=str(metadata.get("difficulty", "")).strip(),
         tags=tags,
@@ -483,8 +517,78 @@ def _load_task_feature(task_dir: Path) -> _ProfileFeatures:
         skill_terms=skill_terms,
         instruction_terms=instruction_terms,
         output_terms=output_terms,
+        io_terms=io_terms,
         capability_terms=capability_terms,
     )
+
+
+def _score_directed_edge(
+    *,
+    source_features: _ProfileFeatures,
+    target_features: _ProfileFeatures,
+    score_weights: ScoreWeights,
+) -> PairSimilarity | None:
+    components = _component_scores(source_features, target_features)
+    source = source_features.profile
+    target = target_features.profile
+    same_family = bool(source.family_id) and source.family_id == target.family_id
+    rank_gap: int | None = None
+    rank_affinity = 0.0
+
+    if same_family:
+        if source.rank is None or target.rank is None:
+            return None
+        rank_gap = target.rank - source.rank
+        if rank_gap <= 0:
+            return None
+        rank_affinity = _rank_affinity(
+            rank_gap=rank_gap,
+            family_size=source.family_size or target.family_size or 0,
+        )
+        score = (
+            score_weights.same_family_base
+            + score_weights.rank_affinity * rank_affinity
+            + score_weights.same_family_tags * components["tags"]
+            + score_weights.same_family_category * components["category"]
+            + score_weights.same_family_io_shape * components["io_shape"]
+        )
+        edge_kind = "same_family_forward"
+    else:
+        score = (
+            score_weights.cross_family_tags * components["tags"]
+            + score_weights.cross_family_category * components["category"]
+            + score_weights.cross_family_io_shape * components["io_shape"]
+            + score_weights.cross_family_instruction_text
+            * components["instruction_text"]
+        )
+        edge_kind = "cross_family"
+
+    return PairSimilarity(
+        source=source.task_id,
+        target=target.task_id,
+        score=round(score, 6),
+        components=components,
+        shared=_shared_evidence(source_features, target_features),
+        metadata={
+            "directed": True,
+            "edge_kind": edge_kind,
+            "same_family": same_family,
+            "source_family": source.family_id,
+            "target_family": target.family_id,
+            "source_rank": source.rank,
+            "target_rank": target.rank,
+            "source_family_size": source.family_size,
+            "target_family_size": target.family_size,
+            "rank_gap": rank_gap,
+            "rank_affinity": round(rank_affinity, 6),
+        },
+    )
+
+
+def _rank_affinity(*, rank_gap: int, family_size: int) -> float:
+    if family_size <= 2:
+        return 1.0
+    return max(0.0, 1.0 - ((rank_gap - 1) / (family_size - 2)))
 
 
 def _component_scores(
@@ -501,12 +605,7 @@ def _component_scores(
     return {
         "category": round(category_score, 6),
         "tags": round(_jaccard(source.tag_terms, target.tag_terms), 6),
-        "skills": round(_jaccard(source.skill_terms, target.skill_terms), 6),
-        "capability": round(
-            _jaccard(source.capability_terms, target.capability_terms),
-            6,
-        ),
-        "io_shape": round(_jaccard(source.output_terms, target.output_terms), 6),
+        "io_shape": round(_jaccard(source.io_terms, target.io_terms), 6),
         "instruction_text": round(
             _jaccard(source.instruction_terms, target.instruction_terms),
             6,
@@ -529,6 +628,7 @@ def _shared_evidence(
         "output_types": sorted(
             set(source.profile.output_types) & set(target.profile.output_types)
         ),
+        "io_shape": sorted(source.io_terms & target.io_terms),
         "skills": sorted(set(source.profile.skills) & set(target.profile.skills)),
         "tags": sorted(set(source.profile.tags) & set(target.profile.tags)),
     }
@@ -544,6 +644,15 @@ def _environment_files(task_dir: Path) -> list[str]:
     if not environment_dir.exists():
         return []
     return sorted(path.name for path in environment_dir.iterdir() if path.is_file())
+
+
+def _file_extension_terms(filenames: list[str]) -> set[str]:
+    return {
+        suffix.removeprefix(".").lower()
+        for filename in filenames
+        for suffix in [Path(filename).suffix]
+        if suffix
+    }
 
 
 def _infer_output_types(
@@ -600,6 +709,92 @@ def _read_optional(path: Path) -> str:
     if not path.exists():
         return ""
     return path.read_text(errors="ignore")
+
+
+def _iter_task_dirs(tasks_root: Path) -> list[Path]:
+    task_dirs: list[Path] = []
+    if _is_task_dir(tasks_root):
+        task_dirs.append(tasks_root)
+    for task_toml in sorted(tasks_root.rglob("task.toml")):
+        task_dir = task_toml.parent
+        if task_dir in task_dirs or _is_hidden_path(tasks_root, task_dir):
+            continue
+        if _is_task_dir(task_dir):
+            task_dirs.append(task_dir)
+    return sorted(task_dirs, key=lambda path: _task_id_for_dir(tasks_root, path))
+
+
+def _is_task_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "task.toml").is_file() and (
+        path / "instruction.md"
+    ).is_file()
+
+
+def _is_hidden_path(root: Path, path: Path) -> bool:
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    return any(part.startswith(".") for part in parts)
+
+
+def _task_id_for_dir(tasks_root: Path, task_dir: Path) -> str:
+    try:
+        relative = task_dir.relative_to(tasks_root)
+    except ValueError:
+        return task_dir.name
+    if not relative.parts:
+        return task_dir.name
+    return relative.as_posix()
+
+
+def _load_family_rankings(tasks_root: Path) -> dict[str, _RankInfo]:
+    rankings: dict[str, _RankInfo] = {}
+    for ranking_path in sorted(tasks_root.rglob("ALL_TASK_DIFFICULTY_RANKING.json")):
+        if _is_hidden_path(tasks_root, ranking_path.parent):
+            continue
+        family_dir = ranking_path.parent
+        family_id = _task_id_for_dir(tasks_root, family_dir)
+        ranking = json.loads(ranking_path.read_text())
+        if not isinstance(ranking, list):
+            raise ValueError(f"ranking file must contain a list: {ranking_path}")
+        family_size = len(ranking)
+        for rank, raw_task_name in enumerate(ranking):
+            if not isinstance(raw_task_name, str):
+                raise ValueError(
+                    f"ranking entries must be task directory names: {ranking_path}"
+                )
+            task_id = (family_dir / raw_task_name).relative_to(tasks_root).as_posix()
+            rankings[task_id] = _RankInfo(
+                family_id=family_id,
+                rank=rank,
+                family_size=family_size,
+            )
+    return rankings
+
+
+def _family_id(
+    *,
+    tasks_root: Path,
+    task_dir: Path,
+    task_id: str,
+    metadata: dict[str, Any],
+    rank_info: _RankInfo | None,
+) -> str:
+    if rank_info is not None:
+        return rank_info.family_id
+    family = str(metadata.get("family", "")).strip()
+    if family:
+        return family
+    try:
+        relative_parent = task_dir.parent.relative_to(tasks_root)
+    except ValueError:
+        return ""
+    if relative_parent.parts:
+        return relative_parent.as_posix()
+    if "/" in task_id:
+        return task_id.split("/", 1)[0]
+    return ""
 
 
 def _write_json(path: Path, payload: object) -> None:

@@ -71,6 +71,7 @@ def _write_graph_artifacts(graph_dir: Path, task_ids: list[str]) -> None:
     (graph_dir / "pairwise_similarity.json").write_text(
         json.dumps(
             {
+                "graph_kind": "skillflow_ranked_similarity",
                 "pair_count": len(pairs),
                 "p20_threshold": 0.01,
                 "edge_score_threshold": 0.05,
@@ -121,6 +122,7 @@ def _write_weighted_graph_artifacts(
     (graph_dir / "pairwise_similarity.json").write_text(
         json.dumps(
             {
+                "graph_kind": "skillflow_ranked_similarity",
                 "pair_count": len(pairs),
                 "p20_threshold": 0.01,
                 "edge_score_threshold": 0.05,
