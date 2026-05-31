@@ -536,7 +536,7 @@ def _candidates_from_traces(*, traces_path: Path) -> list[_JudgeCandidate]:
                 task_category=None,
                 task_difficulty=None,
                 expected_reward_range=(0.0, 1.0),
-                verifier_type="swebench",
+                verifier_type="skillflow_harbor",
                 trace=trace,
                 trace_path=traces_path,
                 metrics_path=None,

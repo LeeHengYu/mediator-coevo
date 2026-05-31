@@ -50,10 +50,15 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "diffusion_policy": record.diffusion_policy,
         "diffusion_graph": record.diffusion_graph,
         "graph_snapshot_id": record.graph_snapshot_id,
+        "diffusion_artifacts_eligible": record.diffusion_artifacts_eligible,
         "diffusion_artifacts_selected": record.diffusion_artifacts_selected,
         "diffusion_artifacts_rendered": record.diffusion_artifacts_rendered,
         "diffusion_context_tokens": record.diffusion_context_tokens,
         "source_task_ids": record.source_task_ids,
+        "reward_after_diffusion_context": record.reward_after_diffusion_context,
+        "regression_after_diffusion_context": (
+            record.regression_after_diffusion_context
+        ),
         "skill_update_policy": record.skill_update_policy,
         "planner_model": record.models.get("planner"),
         "executor_model": record.models.get("executor"),

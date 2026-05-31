@@ -1,6 +1,6 @@
-"""GCP VM support for running SkillsBench Harbor jobs remotely.
+"""GCP VM support for running SkillFlow Harbor jobs remotely.
 
-The local experiment remains the control plane. For each SkillsBench execution,
+The local experiment remains the control plane. For each SkillFlow execution,
 only the prepared task workspace is copied to the VM, Harbor runs there, and the
 Harbor job artifacts are copied back for normal local parsing.
 """
@@ -17,10 +17,10 @@ import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from mediated_coevo.benchmarks.skillsbench import (
+from mediated_coevo.benchmarks import (
     HarborRunResult,
     HarborTimeoutError,
 )
@@ -274,7 +274,7 @@ def build_remote_harbor_script(
 
 
 class RemoteHarborRunner:
-    """Run SkillsBench Harbor jobs on a configured GCP VM."""
+    """Run SkillFlow Harbor jobs on a configured GCP VM."""
 
     def __init__(
         self,
@@ -518,7 +518,7 @@ def _remote_shell_path(path: str) -> str:
 
 
 def _new_remote_run_id() -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"remote-harbor-{timestamp}-{uuid.uuid4().hex[:8]}"
 
 

@@ -1,25 +1,29 @@
-"""Local benchmark integrations."""
+"""Benchmark integrations."""
 
-from .skillsbench import (
+from .skillflow import (
+    DEFAULT_SKILLFLOW_DATASET,
+    SKILLFLOW_VERIFIER_TYPE,
     HarborNotFoundError,
     HarborRunner,
     HarborRunResult,
     HarborTimeoutError,
-    SkillsBenchFetchError,
-    SkillsBenchRemoteConfig,
-    SkillsBenchRepository,
-    SkillsBenchTask,
-    parse_execution_trace,
+    SkillFlowRepository,
+    SkillFlowSyncConfig,
+    SkillFlowSyncError,
+    SkillFlowTask,
+    parse_skillflow_execution_trace,
 )
 
 __all__ = [
+    "DEFAULT_SKILLFLOW_DATASET",
+    "SKILLFLOW_VERIFIER_TYPE",
     "HarborNotFoundError",
     "HarborRunResult",
     "HarborRunner",
     "HarborTimeoutError",
-    "SkillsBenchFetchError",
-    "SkillsBenchRemoteConfig",
-    "SkillsBenchRepository",
-    "SkillsBenchTask",
-    "parse_execution_trace",
+    "SkillFlowRepository",
+    "SkillFlowSyncConfig",
+    "SkillFlowSyncError",
+    "SkillFlowTask",
+    "parse_skillflow_execution_trace",
 ]

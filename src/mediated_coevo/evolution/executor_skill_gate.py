@@ -14,7 +14,7 @@ from mediated_coevo.analysis.judge_rewards import (
     judge_reward_for_trace,
     judge_reward_metadata,
 )
-from mediated_coevo.benchmarks import SkillsBenchRepository
+from mediated_coevo.benchmarks import SkillFlowRepository
 from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.candidates import (
     build_candidate_batch,
@@ -46,26 +46,10 @@ from mediated_coevo.stores.skill_store import SkillStore
 
 logger = logging.getLogger(__name__)
 
-_SWE_LIKE_TAGS = {
-    "bugfix",
-    "build",
-    "ci",
-    "compilation",
-    "debugging",
-    "github actions",
-    "java",
-    "maven",
-    "python",
-    "pytest",
-    "software",
-    "swebench",
-}
-
-
 @dataclass(frozen=True)
 class _TaskProfile:
     task_id: str
-    benchmark_kind: str
+    family: str
     category: str
     tags: frozenset[str]
 
@@ -80,7 +64,7 @@ class ExecutorSkillGate:
     planner: PlannerAgent
     skill_advisor: SkillAdvisor
     executor: ExecutorAgent
-    benchmark_repo: SkillsBenchRepository
+    benchmark_repo: SkillFlowRepository
     artifact_store: ArtifactStore
     judge_llm_client: Any | None = None
     last_advisor_decision: str | None = None
@@ -395,10 +379,7 @@ class ExecutorSkillGate:
     ) -> list[str]:
         """Select holdout validation tasks compatible with proposal provenance."""
         validation_config = self.config.experiment.skill_validation
-        configured_pool = [
-            *validation_config.skillsbench_tasks,
-            *validation_config.swebench_instances,
-        ]
+        configured_pool = list(validation_config.tasks)
         pool = _dedupe_task_ids([*configured_pool, *self.validation_task_pool])
         excluded = set(contributing_tasks)
         contributor_profiles = [
@@ -417,12 +398,7 @@ class ExecutorSkillGate:
                 _compatible_validation_profile(
                     contributor,
                     candidate_profile,
-                    min_skillsbench_tag_overlap=(
-                        validation_config.min_skillsbench_tag_overlap
-                    ),
-                    allow_swebench_replacement=(
-                        validation_config.allow_swebench_replacement_for_skillsbench
-                    ),
+                    min_tag_overlap=validation_config.min_tag_overlap,
                 )
                 for contributor in contributor_profiles
             ):
@@ -722,84 +698,32 @@ def _dedupe_task_ids(task_ids: Iterable[str]) -> list[str]:
 def _task_profile_from_task(task_id: str, task: Any) -> _TaskProfile:
     task_config = getattr(task, "task_config", None) or {}
     metadata = task_config.get("metadata") or {}
-    benchmark_kind = _benchmark_kind(task_id, task)
+    family = _normalize_token(getattr(task, "family", None) or metadata.get("family"))
+    if not family and "/" in task_id:
+        family = _normalize_token(task_id.split("/", 1)[0])
     category = _normalize_token(metadata.get("category"))
     tags = set(_normalized_tags(metadata.get("tags")))
-    if benchmark_kind == "swebench":
-        category = category or "software"
-        tags.update({"software", "swebench"})
     return _TaskProfile(
         task_id=task_id,
-        benchmark_kind=benchmark_kind,
+        family=family,
         category=category,
         tags=frozenset(tags),
     )
-
-
-def _benchmark_kind(task_id: str, task: Any) -> str:
-    explicit_kind = getattr(task, "benchmark_kind", None)
-    if explicit_kind:
-        return str(explicit_kind)
-    benchmark_by_task_id = getattr(task, "benchmark_by_task_id", None)
-    if isinstance(benchmark_by_task_id, dict):
-        kind = benchmark_by_task_id.get(task_id)
-        if kind:
-            return str(kind)
-    if hasattr(task, "task_dir"):
-        return "skillsbench"
-    if hasattr(task, "repo") and hasattr(task, "base_commit"):
-        return "swebench"
-    return "unknown"
 
 
 def _compatible_validation_profile(
     contributor: _TaskProfile,
     candidate: _TaskProfile,
     *,
-    min_skillsbench_tag_overlap: int,
-    allow_swebench_replacement: bool,
+    min_tag_overlap: int,
 ) -> bool:
     if candidate.task_id == contributor.task_id:
         return False
-
-    if contributor.benchmark_kind != candidate.benchmark_kind:
-        return (
-            allow_swebench_replacement
-            and contributor.benchmark_kind == "skillsbench"
-            and candidate.benchmark_kind == "swebench"
-            and _is_swe_like_profile(contributor)
-        )
-
-    if contributor.benchmark_kind == "skillsbench":
-        return _similar_skillsbench_profile(
-            contributor,
-            candidate,
-            min_skillsbench_tag_overlap=min_skillsbench_tag_overlap,
-        )
-    if contributor.benchmark_kind == "swebench":
+    if contributor.family and contributor.family == candidate.family:
         return True
     if contributor.category and contributor.category == candidate.category:
         return True
-    return len(contributor.tags & candidate.tags) >= min_skillsbench_tag_overlap
-
-
-def _similar_skillsbench_profile(
-    contributor: _TaskProfile,
-    candidate: _TaskProfile,
-    *,
-    min_skillsbench_tag_overlap: int,
-) -> bool:
-    if contributor.category and contributor.category == candidate.category:
-        return True
-    return len(contributor.tags & candidate.tags) >= min_skillsbench_tag_overlap
-
-
-def _is_swe_like_profile(profile: _TaskProfile) -> bool:
-    if profile.benchmark_kind == "swebench":
-        return True
-    category = profile.category
-    category_is_swe = any(token in category for token in ("build", "software"))
-    return category_is_swe or bool(profile.tags & _SWE_LIKE_TAGS)
+    return len(contributor.tags & candidate.tags) >= min_tag_overlap
 
 
 def _normalized_tags(raw_tags: Any) -> set[str]:

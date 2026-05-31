@@ -37,6 +37,7 @@ def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
     assert saved["experiment"]["allow_cross_task_feedback"] is False
     assert saved["diffusion"]["enabled"] is False
     assert saved["diffusion"]["policy"] == "none"
+    assert saved["diffusion"]["graph"] == "none"
     assert saved["diffusion"]["max_artifacts"] == 3
     assert saved["diffusion"]["top_k_neighbors"] == 3
     assert saved["experiment"]["skill_updates"] == {

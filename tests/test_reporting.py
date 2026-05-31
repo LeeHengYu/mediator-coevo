@@ -6,6 +6,15 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from mediated_coevo.diffusion import (
+    DiffusedRecord,
+    DiffusionArtifact,
+    DiffusionArtifactType,
+    DiffusionRiskLevel,
+    DiffusionStore,
+    TaskGraphSnapshot,
+)
+from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
 from mediated_coevo.analysis.reporting import (
@@ -93,6 +102,31 @@ def test_score_summary_reports_overall_and_per_task_metrics():
     assert by_task["api-misuse"].median_reward == pytest.approx(0.5)
     assert by_task["api-misuse"].task_category == "category-api-misuse"
     assert by_task["api-misuse"].expected_reward_range == (0.0, 1.0)
+
+
+def test_metric_row_includes_diffusion_process_and_transfer_fields():
+    record = _record("task-a", 0.25)
+    record.diffusion_enabled = True
+    record.diffusion_policy = "top_k_similarity"
+    record.diffusion_graph = "precomputed_similarity"
+    record.graph_snapshot_id = "snapshot-1"
+    record.diffusion_artifacts_eligible = 4
+    record.diffusion_artifacts_selected = 2
+    record.diffusion_artifacts_rendered = 1
+    record.diffusion_context_tokens = 37
+    record.source_task_ids = ["task-b"]
+    record.reward_after_diffusion_context = 0.25
+    record.regression_after_diffusion_context = True
+
+    row = metric_row(record)
+
+    assert row["diffusion_artifacts_eligible"] == 4
+    assert row["diffusion_artifacts_selected"] == 2
+    assert row["diffusion_artifacts_rendered"] == 1
+    assert row["diffusion_context_tokens"] == 37
+    assert row["source_task_ids"] == ["task-b"]
+    assert row["reward_after_diffusion_context"] == 0.25
+    assert row["regression_after_diffusion_context"] is True
 
 
 def test_score_summary_excludes_coevolution_records_and_writes_json(tmp_path):
@@ -243,6 +277,57 @@ def test_single_run_inspection_payload_reports_summary_and_paths(tmp_path):
     assert payload["artifact_dirs"] == [str(artifact_dir)]
     assert payload["summary"]["total_runs"] == 1
     assert payload["summary"]["scored_count"] == 1
+
+
+def test_single_run_inspection_payload_reports_diffusion_bundle(tmp_path):
+    run_dir = tmp_path / "20260502-000000-42-learned_mediator"
+    run_dir.mkdir()
+    write_score_summary(
+        build_score_summary([_record("task-a", 1.0)], bootstrap_samples=50),
+        run_dir / "summary.json",
+    )
+    store = DiffusionStore(run_dir / "diffusion")
+    store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="artifact-1",
+            source_task_id="task-b",
+            source_iteration=0,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="hint",
+        )
+    )
+    store.store_graph_snapshot(
+        TaskGraphSnapshot(
+            snapshot_id="snapshot-1",
+            run_id=run_dir.name,
+            iteration=1,
+            task_ids=["task-a", "task-b"],
+            graph_policy="precomputed_similarity",
+        )
+    )
+    store.append_diffused_record(
+        DiffusedRecord(
+            artifact_id="artifact-1",
+            source_task_id="task-b",
+            source_iteration=0,
+            target_task_id="task-a",
+            target_iteration=1,
+            snapshot_id="snapshot-1",
+            policy_name="capped_broadcast",
+            selected=True,
+            rendered=True,
+        )
+    )
+
+    payload = _inspection_payload(run_dir)
+
+    assert payload["diffusion"]["artifact_count"] == 1
+    assert payload["diffusion"]["graph_snapshot_count"] == 1
+    assert payload["diffusion"]["diffused_record_count"] == 1
+    assert payload["diffusion"]["rendered_record_count"] == 1
+    assert payload["diffusion"]["source_task_ids"] == ["task-b"]
+    assert payload["diffusion"]["graph_snapshot_ids"] == ["snapshot-1"]
 
 
 def test_single_run_inspection_payload_warns_when_summary_missing(tmp_path):

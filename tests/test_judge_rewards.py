@@ -129,7 +129,7 @@ def _scored_run_with_history(tmp_path: Path) -> tuple[Path, HistoryStore, str]:
                 "reward": 0.5,
                 "verifier_status": "ok",
                 "total_tokens": 12,
-                "task_category": "skillsbench",
+                "task_category": "skillflow",
                 "task_difficulty": "medium",
                 "expected_reward_range": [0.0, 1.0],
                 "verifier_type": "pytest",
@@ -243,7 +243,7 @@ async def test_live_judge_reward_returns_evolution_metadata(tmp_path):
         config=_config(),
         llm_client=_FakeJudgeClient(),
         trace_path=tmp_path / "trace.json",
-        task_category="skillsbench",
+        task_category="skillflow",
         task_difficulty="medium",
         expected_reward_range=(0.0, 1.0),
         verifier_type="pytest",
@@ -253,7 +253,7 @@ async def test_live_judge_reward_returns_evolution_metadata(tmp_path):
     assert record is not None
     assert record.raw_reward == pytest.approx(0.5)
     assert record.judge_reward == pytest.approx(0.63)
-    assert record.task_category == "skillsbench"
+    assert record.task_category == "skillflow"
     metadata = judge_reward_metadata(record)
     assert metadata["reward_source"] == "judge"
     assert metadata["verifier_reward"] == pytest.approx(0.5)

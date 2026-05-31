@@ -228,7 +228,7 @@ def _orchestrator(tmp_path):
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
-    config.experiment.skill_validation.skillsbench_tasks = ["task-A"]
+    config.experiment.skill_validation.tasks = ["task-A"]
     config.experiment.skill_validation.sample_size = 1
     config.experiment.skill_validation.allow_contributing_fallback = True
     config.experiment.skill_validation.min_mean_delta = 0.01

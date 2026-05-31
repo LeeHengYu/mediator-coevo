@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import random
-import shlex
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,14 +18,9 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from mediated_coevo.agents.executor import (
-    ExecutorAgent,
-    RoutedExecutorAgent,
-    SWEbenchExecutorAgent,
-)
+from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
-from mediated_coevo.agents.swebench_patch_generator import LLMSWEbenchPatchGenerator
 from mediated_coevo.analysis.judge_rewards import (
     JudgeRewardAnnotationError,
     annotate_judge_rewards,
@@ -43,22 +37,11 @@ from mediated_coevo.analysis.task_similarity import (
     write_task_graph_artifacts,
 )
 from mediated_coevo.benchmarks import (
+    DEFAULT_SKILLFLOW_DATASET,
     HarborRunner,
-    SkillsBenchFetchError,
-    SkillsBenchRemoteConfig,
-    SkillsBenchRepository,
-)
-from mediated_coevo.benchmarks.mixed import (
-    BenchmarkKind,
-    BenchmarkTaskSelection,
-    MixedBenchmarkRepository,
-    build_benchmark_task_selection,
-)
-from mediated_coevo.benchmarks import swebench as swebench_helpers
-from mediated_coevo.benchmarks.task_sets import (
-    TASK_SETS,
-    TaskSetError,
-    resolve_task_selection,
+    SkillFlowRepository,
+    SkillFlowSyncConfig,
+    SkillFlowSyncError,
 )
 from mediated_coevo.cloud.vm import (
     CloudVMConfigError,
@@ -72,8 +55,8 @@ from mediated_coevo.core.config import (
     DiffusionPolicyName,
     SkillUpdateConfig,
     load_config,
-    normalize_openrouter_model_name,
 )
+from mediated_coevo.diffusion import DiffusionStore
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
@@ -87,24 +70,26 @@ from mediated_coevo.experiment.conditions import (
 )
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.models.task import TaskSpec
-from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
 app = typer.Typer(name="medcoevo", help="Mediated Co-Evolution Experiment Runner")
-skillsbench_app = typer.Typer(help="Manage the local SkillsBench task cache")
-swebench_app = typer.Typer(help="Explore and smoke-test SWE-bench tasks")
-app.add_typer(skillsbench_app, name="skillsbench")
-app.add_typer(swebench_app, name="swebench")
 console = Console()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
 VALID_CONDITION_NAMES = set(get_args(ConditionName))
 VALID_DIFFUSION_POLICY_NAMES = set(get_args(DiffusionPolicyName))
-SKILLSBENCH_ALL_TASK_SET = "skillsbench-all"
+
+
+@dataclass(frozen=True)
+class TaskSelection:
+    """Resolved SkillFlow task selectors for one run."""
+
+    task_ids: list[str]
+    tasks: list[str]
+    family: str | None
+    task_set: str | None
 
 
 @dataclass(frozen=True)
@@ -136,7 +121,8 @@ class ExperimentFactory:
         seed: int,
         condition_name: ConditionName,
         experiment_dir: Path | None = None,
-        benchmark_repo: SkillsBenchRepository | None = None,
+        benchmark_repo: SkillFlowRepository | None = None,
+        harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
     ) -> ExperimentRuntime:
         from mediated_coevo.llm.client import LLMClient
 
@@ -171,14 +157,13 @@ class ExperimentFactory:
         history_store = HistoryStore(history_dir=experiment_dir / "history")
         if benchmark_repo is None:
             benchmark_repo = _build_benchmark_repo(self._project_root, config)
-        harbor_runner = HarborRunner(
-            agent_name=config.executor_runtime.agent_name,
-            jobs_dir=experiment_dir / config.executor_runtime.jobs_dir,
-            timeout_sec=config.executor_runtime.harbor_timeout_sec,
-            agent_setup_timeout_multiplier=(
-                config.executor_runtime.harbor_agent_setup_timeout_multiplier
-            ),
-        )
+        if harbor_runner is None:
+            harbor_runner = _build_harbor_runner(
+                config=config,
+                experiment_dir=experiment_dir,
+                remote_harbor_config=None,
+            )
+
         planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
         planner.configure_token_budget(
             config.budgets,
@@ -258,21 +243,7 @@ def _validate_diffusion_policy_name(policy: str) -> DiffusionPolicyName:
     return cast(DiffusionPolicyName, policy)
 
 
-def _task_ids_from_cli(tasks: str | None, task_set: str | None) -> list[str]:
-    try:
-        return resolve_task_selection(
-            tasks=tasks,
-            task_set=task_set,
-        )
-    except TaskSetError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
-def _task_ids_from_repeatable_cli(
-    raw_values: list[str] | None,
-    *,
-    label: str,
-) -> list[str]:
+def _task_ids_from_repeatable_cli(raw_values: list[str] | None) -> list[str]:
     """Parse repeatable comma-separated task options."""
     if not raw_values:
         return []
@@ -281,26 +252,46 @@ def _task_ids_from_repeatable_cli(
     for raw_value in raw_values:
         for candidate in raw_value.split(","):
             task_id = candidate.strip()
-            if not task_id:
-                continue
-            if task_id not in seen:
+            if task_id and task_id not in seen:
                 task_ids.append(task_id)
                 seen.add(task_id)
     if not task_ids:
-        raise typer.BadParameter(f"at least one {label} is required")
+        raise typer.BadParameter("at least one task ID is required")
     return task_ids
 
 
-def _build_benchmark_repo(project_root: Path, config: Config) -> SkillsBenchRepository:
-    return SkillsBenchRepository(
+def _build_benchmark_repo(project_root: Path, config: Config) -> SkillFlowRepository:
+    return SkillFlowRepository(
         root_dir=project_root / config.paths.benchmarks_dir,
         task_dirs=config.executor_runtime.task_dirs,
-        remote=SkillsBenchRemoteConfig(
-            enabled=config.executor_runtime.remote_fetch,
-            archive_url=config.executor_runtime.archive_url,
-            archive_sha256=config.executor_runtime.archive_sha256,
-            local_archive_base_dir=project_root,
+        sync=SkillFlowSyncConfig(
+            enabled=config.executor_runtime.sync_enabled,
+            dataset=config.executor_runtime.dataset,
+            repo_type=config.executor_runtime.dataset_repo_type,
+            local_dir=config.executor_runtime.task_dirs[0],
         ),
+    )
+
+
+def _resolve_task_selection(
+    *,
+    repository: SkillFlowRepository,
+    tasks: list[str] | None,
+    family: str | None,
+    task_set: str | None,
+) -> TaskSelection:
+    selected = repository.resolve_selection(
+        tasks=tasks,
+        family=family,
+        task_set=task_set,
+    )
+    if not selected:
+        raise typer.BadParameter("provide --task, --family, or --task-set")
+    return TaskSelection(
+        task_ids=selected,
+        tasks=tasks or [],
+        family=family,
+        task_set=task_set,
     )
 
 
@@ -330,6 +321,7 @@ def _run_config_overrides(
     advisor_buffer_max: int | None,
     diffusion_enabled: bool | None,
     diffusion_policy: str | None,
+    diffusion_graph: str | None,
     diffusion_max_artifacts: int | None,
     diffusion_top_k_neighbors: int | None,
     harbor_agent_setup_timeout_multiplier: float | None,
@@ -349,6 +341,14 @@ def _run_config_overrides(
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
 
+    diffusion: dict[str, Any] = {}
+    _nested_override(diffusion, "enabled", diffusion_enabled)
+    if diffusion_policy is not None:
+        diffusion["policy"] = _validate_diffusion_policy_name(diffusion_policy)
+    _nested_override(diffusion, "graph", diffusion_graph)
+    _nested_override(diffusion, "max_artifacts", diffusion_max_artifacts)
+    _nested_override(diffusion, "top_k_neighbors", diffusion_top_k_neighbors)
+
     executor_runtime: dict[str, Any] = {}
     _nested_override(
         executor_runtime,
@@ -359,233 +359,11 @@ def _run_config_overrides(
     overrides: dict[str, Any] = {}
     if experiment:
         overrides["experiment"] = experiment
-    diffusion: dict[str, Any] = {}
-    _nested_override(diffusion, "enabled", diffusion_enabled)
-    if diffusion_policy is not None:
-        diffusion["policy"] = _validate_diffusion_policy_name(diffusion_policy)
-    _nested_override(diffusion, "max_artifacts", diffusion_max_artifacts)
-    _nested_override(diffusion, "top_k_neighbors", diffusion_top_k_neighbors)
     if diffusion:
         overrides["diffusion"] = diffusion
     if executor_runtime:
         overrides["executor_runtime"] = executor_runtime
     return overrides
-
-
-def _available_task_set_help() -> str:
-    return ", ".join(sorted([*TASK_SETS, SKILLSBENCH_ALL_TASK_SET]))
-
-
-def _skillsbench_all_task_ids(benchmark_repo: SkillsBenchRepository) -> list[str]:
-    task_ids = benchmark_repo.list_local_task_ids()
-    seen = set(task_ids)
-
-    if benchmark_repo.remote.enabled:
-        try:
-            remote_task_ids = benchmark_repo.list_remote_task_ids()
-        except SkillsBenchFetchError as exc:
-            if task_ids:
-                return task_ids
-            raise typer.BadParameter(
-                f"failed to resolve task set {SKILLSBENCH_ALL_TASK_SET!r}: {exc}"
-            ) from exc
-        for task_id in remote_task_ids:
-            if task_id not in seen:
-                task_ids.append(task_id)
-                seen.add(task_id)
-
-    if not task_ids:
-        raise typer.BadParameter(
-            f"task set {SKILLSBENCH_ALL_TASK_SET!r} resolved to no local tasks; "
-            "enable executor_runtime.remote_fetch or sync selected tasks first"
-        )
-    return task_ids
-
-
-def _task_ids_from_cli_with_repo(
-    tasks: str | None,
-    task_set: str | None,
-    benchmark_repo: SkillsBenchRepository,
-) -> list[str]:
-    task_set_name = task_set.strip() if task_set is not None else None
-    if tasks is not None:
-        return _task_ids_from_cli(tasks, task_set)
-    if task_set_name == SKILLSBENCH_ALL_TASK_SET:
-        return _skillsbench_all_task_ids(benchmark_repo)
-    return _task_ids_from_cli(tasks, task_set)
-
-
-def _skillsbench_task_ids_from_unified_cli(
-    *,
-    skillsbench_tasks: list[str] | None,
-    skillsbench_task_set: str | None,
-    legacy_tasks: str | None,
-    legacy_task_set: str | None,
-    benchmark_repo: SkillsBenchRepository,
-) -> list[str]:
-    """Resolve SkillsBench selections from new options and legacy aliases."""
-    if skillsbench_tasks and legacy_tasks is not None:
-        raise typer.BadParameter(
-            "cannot combine --skillsbench-task with legacy --tasks"
-        )
-    if skillsbench_task_set is not None and legacy_task_set is not None:
-        raise typer.BadParameter(
-            "cannot combine --skillsbench-task-set with legacy --task-set"
-        )
-
-    explicit_tasks = _task_ids_from_repeatable_cli(
-        skillsbench_tasks,
-        label="SkillsBench task",
-    )
-    if explicit_tasks:
-        return explicit_tasks
-    if legacy_tasks is not None:
-        return _task_ids_from_cli_with_repo(legacy_tasks, None, benchmark_repo)
-
-    task_set = (
-        skillsbench_task_set if skillsbench_task_set is not None else legacy_task_set
-    )
-    if task_set is not None:
-        return _task_ids_from_cli_with_repo(None, task_set, benchmark_repo)
-    return []
-
-
-def _swebench_instance_ids_from_unified_cli(
-    *,
-    swebench_instances: list[str] | None,
-    swebench_limit: int | None,
-    dataset_name: str,
-    split: str,
-) -> list[str]:
-    """Resolve optional SWE-bench selections without defaulting to smoke IDs."""
-    if not swebench_instances and swebench_limit is None:
-        return []
-    try:
-        return swebench_helpers.resolve_swebench_instance_ids(
-            dataset_name=dataset_name,
-            split=split,
-            raw_instance_ids=swebench_instances,
-            limit=swebench_limit,
-        )
-    except (RuntimeError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
-def _resolve_unified_task_selection(
-    *,
-    skillsbench_tasks: list[str] | None,
-    skillsbench_task_set: str | None,
-    legacy_tasks: str | None,
-    legacy_task_set: str | None,
-    swebench_instances: list[str] | None,
-    swebench_limit: int | None,
-    dataset_name: str,
-    split: str,
-    benchmark_repo: SkillsBenchRepository,
-) -> BenchmarkTaskSelection:
-    """Resolve all benchmark selections for a unified evolution run."""
-    skillsbench_task_ids = _skillsbench_task_ids_from_unified_cli(
-        skillsbench_tasks=skillsbench_tasks,
-        skillsbench_task_set=skillsbench_task_set,
-        legacy_tasks=legacy_tasks,
-        legacy_task_set=legacy_task_set,
-        benchmark_repo=benchmark_repo,
-    )
-    swebench_instance_ids = _swebench_instance_ids_from_unified_cli(
-        swebench_instances=swebench_instances,
-        swebench_limit=swebench_limit,
-        dataset_name=dataset_name,
-        split=split,
-    )
-    try:
-        selection = build_benchmark_task_selection(
-            skillsbench_task_ids=skillsbench_task_ids,
-            swebench_instance_ids=swebench_instance_ids,
-        )
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    if not selection.task_ids:
-        raise typer.BadParameter(
-            "provide at least one SkillsBench task or SWE-bench instance "
-            "(--skillsbench-task/--skillsbench-task-set/--tasks/--task-set or "
-            "--swebench-instance/--swebench-limit)"
-        )
-    return selection
-
-
-def _load_remote_harbor_config(
-    *,
-    enabled: bool,
-    env_file: Path,
-    selection: BenchmarkTaskSelection,
-) -> GCPVMConfig | None:
-    if not enabled:
-        return None
-    if not selection.has_skillsbench:
-        raise typer.BadParameter("--cloud requires a SkillsBench selection")
-    try:
-        return load_vm_config(env_file)
-    except (OSError, CloudVMConfigError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
-def _preflight_task_ids_from_cli(
-    tasks: str | None,
-    task_set: str | None,
-) -> list[str] | None:
-    """Validate task selection before Harbor checks when no repo is needed."""
-    task_set_name = task_set.strip() if task_set is not None else None
-    if tasks is None and task_set_name == SKILLSBENCH_ALL_TASK_SET:
-        return None
-    return _task_ids_from_cli(tasks, task_set)
-
-
-def _sync_task_ids_from_cli(tasks: str | None, task_set: str | None) -> list[str]:
-    task_set_name = task_set.strip() if task_set is not None else None
-    if tasks is not None:
-        return _task_ids_from_cli(tasks, task_set)
-    if task_set_name is None:
-        raise typer.BadParameter("provide --tasks or --task-set to sync selected tasks")
-    if task_set_name == SKILLSBENCH_ALL_TASK_SET:
-        raise typer.BadParameter(
-            f"syncing {SKILLSBENCH_ALL_TASK_SET!r} is intentionally unsupported; "
-            "use --tasks or --task-set skillsbench-10"
-        )
-    return _task_ids_from_cli(tasks, task_set)
-
-
-def _ensure_harbor_available(config: Config) -> None:
-    if config.executor_runtime.harbor_required and shutil.which("harbor") is None:
-        console.print(
-            "[bold red]ERROR:[/] harbor CLI not found on PATH. Install harbor, "
-            "or set executor_runtime.harbor_required = false in config."
-        )
-        raise typer.Exit(code=1)
-
-
-def _ensure_gcloud_available() -> None:
-    if shutil.which("gcloud") is None:
-        console.print(
-            "[bold red]ERROR:[/] gcloud CLI not found on PATH. Install the "
-            "Google Cloud CLI before using --cloud."
-        )
-        raise typer.Exit(code=1)
-
-
-def _prepare_llm_credentials_or_exit(config: Config) -> Config:
-    from mediated_coevo.core.config import ModelConfigError
-    from mediated_coevo.llm.client import (
-        LLMCredentialError,
-        validate_openrouter_credentials,
-    )
-
-    try:
-        config.normalize_models()
-        validate_openrouter_credentials()
-    except (ModelConfigError, LLMCredentialError) as exc:
-        console.print(f"[bold red]ERROR:[/] {exc}")
-        raise typer.Exit(code=1) from exc
-    return config
 
 
 def _apply_experiment_settings(
@@ -600,6 +378,7 @@ def _apply_experiment_settings(
     advisor_buffer_max: int | None = None,
     diffusion_enabled: bool | None = None,
     diffusion_policy: str | None = None,
+    diffusion_graph: str | None = None,
     diffusion_max_artifacts: int | None = None,
     diffusion_top_k_neighbors: int | None = None,
     harbor_agent_setup_timeout_multiplier: float | None = None,
@@ -622,6 +401,8 @@ def _apply_experiment_settings(
         config.diffusion.enabled = diffusion_enabled
     if diffusion_policy is not None:
         config.diffusion.policy = _validate_diffusion_policy_name(diffusion_policy)
+    if diffusion_graph is not None:
+        config.diffusion.graph = diffusion_graph
     if diffusion_max_artifacts is not None:
         config.diffusion.max_artifacts = diffusion_max_artifacts
     if diffusion_top_k_neighbors is not None:
@@ -650,7 +431,8 @@ def _build_matrix_runtimes(
     base_config: Config,
     seed: int,
     matrix_dir: Path,
-    benchmark_repo: SkillsBenchRepository | None = None,
+    benchmark_repo: SkillFlowRepository,
+    harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
 ) -> list[MatrixRuntime]:
     """Build all baseline-matrix rows with isolated skill stores."""
     rows: list[MatrixRuntime] = []
@@ -663,9 +445,50 @@ def _build_matrix_runtimes(
             condition_name=preset.condition_name,
             experiment_dir=matrix_dir / preset_name,
             benchmark_repo=benchmark_repo,
+            harbor_runner=harbor_runner,
         )
         rows.append(MatrixRuntime(preset_name=preset_name, runtime=runtime))
     return rows
+
+
+def _build_harbor_runner(
+    *,
+    config: Config,
+    experiment_dir: Path,
+    remote_harbor_config: GCPVMConfig | None,
+) -> HarborRunner | RemoteHarborRunner:
+    jobs_dir = experiment_dir / config.executor_runtime.jobs_dir
+    timeout_sec = config.executor_runtime.harbor_timeout_sec
+    setup_timeout_multiplier = (
+        config.executor_runtime.harbor_agent_setup_timeout_multiplier
+    )
+    if remote_harbor_config is not None:
+        return RemoteHarborRunner(
+            config=remote_harbor_config,
+            agent_name=config.executor_runtime.agent_name,
+            jobs_dir=jobs_dir,
+            timeout_sec=timeout_sec,
+            agent_setup_timeout_multiplier=setup_timeout_multiplier,
+        )
+    return HarborRunner(
+        agent_name=config.executor_runtime.agent_name,
+        jobs_dir=jobs_dir,
+        timeout_sec=timeout_sec,
+        agent_setup_timeout_multiplier=setup_timeout_multiplier,
+    )
+
+
+def _load_remote_harbor_config(
+    *,
+    enabled: bool,
+    env_file: Path,
+) -> GCPVMConfig | None:
+    if not enabled:
+        return None
+    try:
+        return load_vm_config(env_file)
+    except (OSError, CloudVMConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -675,6 +498,40 @@ def _setup_logging(verbose: bool = False) -> None:
         format="%(message)s",
         handlers=[RichHandler(console=console, show_time=True, show_path=False)],
     )
+
+
+def _ensure_harbor_available(config: Config) -> None:
+    if config.executor_runtime.harbor_required and shutil.which("harbor") is None:
+        console.print(
+            "[bold red]ERROR:[/] Harbor CLI not found on PATH. Install Harbor, "
+            "or set executor_runtime.harbor_required = false in config."
+        )
+        raise typer.Exit(code=1)
+
+
+def _ensure_gcloud_available() -> None:
+    if shutil.which("gcloud") is None:
+        console.print(
+            "[bold red]ERROR:[/] gcloud CLI not found on PATH. Install the "
+            "Google Cloud CLI before using --cloud."
+        )
+        raise typer.Exit(code=1)
+
+
+def _prepare_llm_credentials_or_exit(config: Config) -> Config:
+    from mediated_coevo.core.config import ModelConfigError
+    from mediated_coevo.llm.client import (
+        LLMCredentialError,
+        validate_openrouter_credentials,
+    )
+
+    try:
+        config.normalize_models()
+        validate_openrouter_credentials()
+    except (ModelConfigError, LLMCredentialError) as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    return config
 
 
 def _print_result_summary(
@@ -792,11 +649,36 @@ def _artifact_dirs(experiment_dir: Path) -> list[str]:
     ]
 
 
+def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None:
+    diffusion_dir = experiment_dir / "diffusion"
+    if not diffusion_dir.exists():
+        return None
+    store = DiffusionStore(diffusion_dir)
+    artifacts = store.query_artifacts(recent=None)
+    snapshots = store.query_graph_snapshots(recent=None)
+    records = store.query_diffused_records(recent=None)
+    return {
+        "diffusion_dir": str(diffusion_dir),
+        "artifacts_dir": str(diffusion_dir / "artifacts"),
+        "graph_snapshots_dir": str(diffusion_dir / "graph_snapshots"),
+        "diffused_records_path": str(diffusion_dir / "diffused_records.jsonl"),
+        "artifact_count": len(artifacts),
+        "graph_snapshot_count": len(snapshots),
+        "diffused_record_count": len(records),
+        "eligible_record_count": sum(1 for record in records if record.eligible),
+        "selected_record_count": sum(1 for record in records if record.selected),
+        "rendered_record_count": sum(1 for record in records if record.rendered),
+        "source_task_ids": sorted({artifact.source_task_id for artifact in artifacts}),
+        "graph_snapshot_ids": [snapshot.snapshot_id for snapshot in snapshots],
+    }
+
+
 def _single_inspection_payload(experiment_dir: Path) -> dict[str, Any]:
     summary_path = experiment_dir / "summary.json"
     metrics_path = experiment_dir / "metrics.jsonl"
+    diffusion_payload = _diffusion_inspection_payload(experiment_dir)
     if summary_path.exists():
-        return {
+        payload = {
             "kind": "single",
             "experiment_dir": str(experiment_dir),
             "summary_path": str(summary_path),
@@ -804,8 +686,11 @@ def _single_inspection_payload(experiment_dir: Path) -> dict[str, Any]:
             "artifact_dirs": _artifact_dirs(experiment_dir),
             "summary": _load_score_summary(summary_path).model_dump(mode="json"),
         }
+        if diffusion_payload is not None:
+            payload["diffusion"] = diffusion_payload
+        return payload
     if metrics_path.exists():
-        return {
+        payload = {
             "kind": "single",
             "experiment_dir": str(experiment_dir),
             "summary_path": None,
@@ -813,6 +698,9 @@ def _single_inspection_payload(experiment_dir: Path) -> dict[str, Any]:
             "artifact_dirs": _artifact_dirs(experiment_dir),
             "warning": "summary.json is missing; inspect metrics.jsonl directly.",
         }
+        if diffusion_payload is not None:
+            payload["diffusion"] = diffusion_payload
+        return payload
     raise typer.BadParameter(
         f"no summary.json or metrics.jsonl found under {experiment_dir}"
     )
@@ -837,15 +725,12 @@ def _matrix_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None:
             row["summary"] = _load_score_summary(summary_path).model_dump(mode="json")
         else:
             row["warning"] = "summary.json is missing; inspect metrics.jsonl directly."
+        if diffusion_payload := _diffusion_inspection_payload(row_dir):
+            row["diffusion"] = diffusion_payload
         rows.append(row)
-
     if not rows:
         return None
-    return {
-        "kind": "matrix",
-        "experiment_dir": str(experiment_dir),
-        "rows": rows,
-    }
+    return {"kind": "matrix", "experiment_dir": str(experiment_dir), "rows": rows}
 
 
 def _inspection_payload(experiment_dir: Path) -> dict[str, Any]:
@@ -876,6 +761,11 @@ def _print_single_inspection(payload: dict[str, Any]) -> None:
         console.print("  Artifact dirs:")
         for artifact_dir in artifact_dirs:
             console.print(f"    {artifact_dir}")
+    if diffusion_payload := payload.get("diffusion"):
+        console.print("  Diffusion:")
+        console.print(f"    Records: {diffusion_payload['diffused_record_count']}")
+        console.print(f"    Rendered: {diffusion_payload['rendered_record_count']}")
+        console.print(f"    Graph snapshots: {diffusion_payload['graph_snapshot_count']}")
 
 
 def _print_matrix_inspection(payload: dict[str, Any]) -> None:
@@ -888,8 +778,15 @@ def _print_matrix_inspection(payload: dict[str, Any]) -> None:
     table.add_column("Env failures", justify="right")
     table.add_column("Mean")
     table.add_column("Macro mean")
+    table.add_column("Diffusion")
     table.add_column("Metrics")
     for row in payload["rows"]:
+        diffusion_payload = row.get("diffusion") or {}
+        diffusion_summary = (
+            f"{diffusion_payload.get('rendered_record_count', 0)} rendered"
+            if diffusion_payload
+            else "n/a"
+        )
         summary_data = row.get("summary")
         if summary_data is None:
             table.add_row(
@@ -899,6 +796,7 @@ def _print_matrix_inspection(payload: dict[str, Any]) -> None:
                 "n/a",
                 "n/a",
                 "n/a",
+                diffusion_summary,
                 row.get("metrics_path") or "n/a",
             )
             continue
@@ -910,6 +808,7 @@ def _print_matrix_inspection(payload: dict[str, Any]) -> None:
             str(summary.env_failure_count),
             _format_score(summary.mean_reward),
             _format_score(summary.macro_mean_reward),
+            diffusion_summary,
             row.get("metrics_path") or "n/a",
         )
     console.print(table)
@@ -946,15 +845,12 @@ def _format_task_metadata(task_summary: TaskScoreSummary) -> str:
     return f" ({', '.join(metadata)})"
 
 
-def _print_task_selection(
-    *,
-    task_ids: list[str],
-    tasks: str | None,
-    task_set: str | None,
-) -> None:
-    console.print(f"[bold]Tasks:[/] {task_ids}")
-    if tasks is None and task_set is not None:
-        console.print(f"[bold]Task set:[/] {task_set}")
+def _print_task_selection(selection: TaskSelection) -> None:
+    console.print(f"[bold]SkillFlow tasks:[/] {selection.task_ids}")
+    if selection.family is not None:
+        console.print(f"[bold]Family:[/] {selection.family}")
+    if selection.task_set is not None:
+        console.print(f"[bold]Task set:[/] {selection.task_set}")
 
 
 def _print_experiment_controls(config: Config) -> None:
@@ -963,13 +859,13 @@ def _print_experiment_controls(config: Config) -> None:
     console.print(
         f"[bold]Advisor buffer max:[/] {config.experiment.advisor_buffer_max}"
     )
+    console.print(
+        "[bold]Diffusion:[/] "
+        f"enabled={config.diffusion.enabled} "
+        f"policy={config.diffusion.policy} "
+        f"graph={config.diffusion.graph}"
+    )
     console.print("[bold]Skill validation:[/] required")
-
-
-def _resolve_output_dir(output_dir: Path) -> Path:
-    if output_dir.is_absolute():
-        return output_dir
-    return PROJECT_ROOT / output_dir
 
 
 def _timestamped_run_id(suffix: str) -> str:
@@ -977,186 +873,13 @@ def _timestamped_run_id(suffix: str) -> str:
     return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
 
 
-def _print_swebench_instances(
-    instances: list[swebench_helpers.SWEbenchInstanceInfo],
-) -> None:
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Instance ID")
-    table.add_column("Repo")
-    table.add_column("Version")
-    table.add_column("Created")
-    for instance in instances:
-        table.add_row(
-            instance.instance_id,
-            instance.repo or "n/a",
-            instance.version or "n/a",
-            instance.created_at or "n/a",
-        )
-    console.print(table)
-
-
-def _print_swebench_eval_result(
-    *,
-    traces_path: Path,
-    summary_path: Path,
-    raw_output_root: Path,
-    traces_count: int,
-) -> None:
-    console.print("\n[bold]SWE-bench eval outputs:[/]")
-    console.print(f"  Raw outputs: {raw_output_root}")
-    console.print(f"  Traces: {traces_path}")
-    console.print(f"  Summary: {summary_path}")
-    console.print(f"  Instances: {traces_count}")
-
-
-def _run_swebench_eval(
-    *,
-    instance_ids: list[str] | None,
-    dataset_name: str,
-    split: str,
-    predictions_path: str,
-    run_id: str | None,
-    timeout: int,
-    max_workers: int,
-    output_dir: Path,
-    limit: int | None = None,
-    repo_filter: str | None = None,
-    run_id_suffix: str = "swebench-run",
-) -> None:
-    try:
-        selected_instance_ids = swebench_helpers.resolve_swebench_instance_ids(
-            dataset_name=dataset_name,
-            split=split,
-            raw_instance_ids=instance_ids,
-            limit=limit,
-            repo_filter=repo_filter,
-        )
-        swebench_helpers.validate_modal_credentials()
-    except (RuntimeError, ValueError) as exc:
-        console.print(f"[bold red]ERROR:[/] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    resolved_run_id = _timestamped_run_id(run_id or run_id_suffix)
-    resolved_output_dir = _resolve_output_dir(output_dir)
-    raw_output_root = resolved_output_dir / resolved_run_id / "raw"
-    raw_output_root.mkdir(parents=True, exist_ok=True)
-
-    harness_dataset_name = dataset_name
-    dataset_path = Path(dataset_name)
-    if not dataset_path.is_absolute():
-        project_dataset_path = PROJECT_ROOT / dataset_path
-        if project_dataset_path.exists():
-            harness_dataset_name = str(project_dataset_path)
-
-    harness_predictions_path = predictions_path
-    if predictions_path != "gold":
-        predictions_file = Path(predictions_path)
-        if not predictions_file.is_absolute():
-            predictions_file = PROJECT_ROOT / predictions_file
-        harness_predictions_path = str(predictions_file)
-
-    command = swebench_helpers.build_swebench_harness_command(
-        dataset_name=harness_dataset_name,
-        split=split,
-        instance_ids=selected_instance_ids,
-        predictions_path=harness_predictions_path,
-        run_id=resolved_run_id,
-        timeout=timeout,
-        max_workers=max_workers,
-        report_dir=".",
-    )
-
-    console.print(f"[bold]SWE-bench instances:[/] {selected_instance_ids}")
-    console.print(f"[bold]Dataset:[/] {dataset_name} ({split})")
-    console.print(f"[bold]Run ID:[/] {resolved_run_id}")
-    console.print(f"[bold]Harness command:[/] {shlex.join(command)}")
-
-    harness_run = swebench_helpers.run_swebench_harness(
-        command=command,
-        cwd=raw_output_root,
-        stream_output=True,
-    )
-    traces = swebench_helpers.build_swebench_traces(
-        instance_ids=selected_instance_ids,
-        run_id=resolved_run_id,
-        project_root=PROJECT_ROOT,
-        harness_run=harness_run,
-        raw_output_root=raw_output_root,
-    )
-    traces_path, summary_path = swebench_helpers.write_swebench_eval_outputs(
-        traces=traces,
-        output_dir=resolved_output_dir,
-        run_id=resolved_run_id,
-    )
-    _print_swebench_eval_result(
-        traces_path=traces_path,
-        summary_path=summary_path,
-        raw_output_root=raw_output_root,
-        traces_count=len(traces),
-    )
-
-    if harness_run.returncode != 0:
-        console.print(
-            "[bold red]ERROR:[/] SWE-bench harness exited with "
-            f"code {harness_run.returncode}."
-        )
-        raise typer.Exit(code=harness_run.returncode)
-
-
-def _ensure_disjoint_swebench_sets(
-    *,
-    evolve_instance_ids: list[str],
-    eval_instance_ids: list[str],
-) -> None:
-    overlap = sorted(set(evolve_instance_ids) & set(eval_instance_ids))
-    if overlap:
-        raise typer.BadParameter(
-            "evolution and eval SWE-bench instances must be disjoint; "
-            f"overlap: {overlap}"
-        )
-
-
-def _build_swebench_executor(
-    *,
-    config: Config,
-    benchmark_repo: swebench_helpers.SWEbenchRepository,
-    phase_dir: Path,
-    timeout: int,
-    max_workers: int,
-    run_id_prefix: str,
-) -> SWEbenchExecutorAgent:
-    from mediated_coevo.llm.client import LLMClient
-
-    artifact_root = phase_dir / "artifacts"
-    patch_generator = LLMSWEbenchPatchGenerator(
-        LLMClient(model=_openrouter_model_for_llm(config.models.executor))
-    )
-    return SWEbenchExecutorAgent(
-        model=config.models.executor,
-        benchmark_repo=benchmark_repo,
-        patch_generator=patch_generator,
-        artifact_root=artifact_root,
-        injected_skill_name=config.executor_runtime.injected_skill_name,
-        project_root=PROJECT_ROOT,
-        timeout=timeout,
-        max_workers=max_workers,
-        run_id_prefix=run_id_prefix,
-    )
-
-
-def _openrouter_model_for_llm(model: str) -> str:
-    """Return a LiteLLM/OpenRouter model id from a Harbor-ready model id."""
-    return normalize_openrouter_model_name(model)
-
-
-def _prepare_unified_experiment_root(
+def _prepare_experiment_root(
     *,
     config: Config,
     seed: int,
     run_id: str | None,
-    suffix: str,
 ) -> tuple[Path, Path]:
-    resolved_run_id = _timestamped_run_id(run_id or f"{seed}-{suffix}")
+    resolved_run_id = _timestamped_run_id(run_id or f"{seed}-skillflow")
     experiment_dir = (
         PROJECT_ROOT / config.paths.data_dir / "experiments" / resolved_run_id
     )
@@ -1170,104 +893,16 @@ def _prepare_unified_experiment_root(
     return experiment_dir, runtime_skills_dir
 
 
-def _runtime_benchmark_by_task_id(
-    selection: BenchmarkTaskSelection,
-    config: Config,
-) -> dict[str, BenchmarkKind]:
-    """Include validation-only tasks in runtime routing without evolving on them."""
-    mapping = dict(selection.benchmark_by_task_id)
-    if _needs_validation_skillsbench(selection, config):
-        for task_id in config.experiment.skill_validation.skillsbench_tasks:
-            mapping.setdefault(task_id, "skillsbench")
-    if _needs_validation_swebench(selection, config):
-        for task_id in config.experiment.skill_validation.swebench_instances:
-            mapping.setdefault(task_id, "swebench")
-    return mapping
-
-
-def _needs_runtime_skillsbench(
-    selection: BenchmarkTaskSelection,
-    config: Config,
-) -> bool:
-    return selection.has_skillsbench or _needs_validation_skillsbench(
-        selection,
-        config,
-    )
-
-
-def _needs_runtime_swebench(
-    selection: BenchmarkTaskSelection,
-    config: Config,
-) -> bool:
-    return selection.has_swebench or _needs_validation_swebench(selection, config)
-
-
-def _needs_validation_skillsbench(
-    selection: BenchmarkTaskSelection,
-    config: Config,
-) -> bool:
-    return (
-        bool(config.experiment.skill_validation.skillsbench_tasks)
-        and selection.has_skillsbench
-    )
-
-
-def _needs_validation_swebench(
-    selection: BenchmarkTaskSelection,
-    config: Config,
-) -> bool:
-    validation = config.experiment.skill_validation
-    if not validation.swebench_instances:
-        return False
-    if selection.has_swebench:
-        return True
-    return (
-        selection.has_skillsbench
-        and validation.allow_swebench_replacement_for_skillsbench
-    )
-
-
-def _build_harbor_runner(
+def _build_runtime(
     *,
     config: Config,
-    experiment_dir: Path,
-    remote_harbor_config: GCPVMConfig | None,
-) -> HarborRunner | RemoteHarborRunner:
-    jobs_dir = experiment_dir / config.executor_runtime.jobs_dir
-    timeout_sec = config.executor_runtime.harbor_timeout_sec
-    setup_timeout_multiplier = (
-        config.executor_runtime.harbor_agent_setup_timeout_multiplier
-    )
-    if remote_harbor_config is not None:
-        return RemoteHarborRunner(
-            config=remote_harbor_config,
-            agent_name=config.executor_runtime.agent_name,
-            jobs_dir=jobs_dir,
-            timeout_sec=timeout_sec,
-            agent_setup_timeout_multiplier=setup_timeout_multiplier,
-        )
-    return HarborRunner(
-        agent_name=config.executor_runtime.agent_name,
-        jobs_dir=jobs_dir,
-        timeout_sec=timeout_sec,
-        agent_setup_timeout_multiplier=setup_timeout_multiplier,
-    )
-
-
-def _build_unified_runtime(
-    *,
-    config: Config,
-    selection: BenchmarkTaskSelection,
     condition_name: ConditionName,
     runtime_skills_dir: Path,
     experiment_dir: Path,
-    dataset_name: str,
-    split: str,
-    timeout: int,
-    max_workers: int,
-    remote_harbor_config: GCPVMConfig | None = None,
+    benchmark_repo: SkillFlowRepository,
+    remote_harbor_config: GCPVMConfig | None,
 ) -> ExperimentRuntime:
-    """Build one orchestrator that can route across selected benchmark backends."""
+    """Build one SkillFlow runtime."""
     from mediated_coevo.llm.client import LLMClient
 
     validate_experiment_design(
@@ -1279,60 +914,21 @@ def _build_unified_runtime(
     skill_store.validate()
     artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
     history_store = HistoryStore(history_dir=experiment_dir / "history")
-
-    needs_skillsbench = _needs_runtime_skillsbench(selection, config)
-    needs_swebench = _needs_runtime_swebench(selection, config)
-    skillsbench_repo = (
-        _build_benchmark_repo(PROJECT_ROOT, config) if needs_skillsbench else None
-    )
-    swebench_repo = (
-        swebench_helpers.SWEbenchRepository(dataset_name=dataset_name, split=split)
-        if needs_swebench
-        else None
-    )
-    runtime_benchmark_by_task_id = _runtime_benchmark_by_task_id(selection, config)
-    benchmark_repo = MixedBenchmarkRepository(
-        benchmark_by_task_id=runtime_benchmark_by_task_id,
-        skillsbench_repo=skillsbench_repo,
-        swebench_repo=swebench_repo,
-    )
-
-    skillsbench_executor = None
-    if needs_skillsbench:
-        assert skillsbench_repo is not None
-        skillsbench_executor = ExecutorAgent(
-            model=config.models.executor,
-            benchmark_repo=skillsbench_repo,
-            harbor_runner=_build_harbor_runner(
-                config=config,
-                experiment_dir=experiment_dir,
-                remote_harbor_config=remote_harbor_config,
-            ),
-            workspace_root=experiment_dir / "benchmarks",
-            injected_skill_name=config.executor_runtime.injected_skill_name,
-        )
-
-    swebench_executor = None
-    if needs_swebench:
-        assert swebench_repo is not None
-        swebench_executor = _build_swebench_executor(
-            config=config,
-            benchmark_repo=swebench_repo,
-            phase_dir=experiment_dir,
-            timeout=timeout,
-            max_workers=max_workers,
-            run_id_prefix=experiment_dir.name,
-        )
-
     planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
     planner.configure_token_budget(
         config.budgets,
         condition_name=config.experiment.condition_name,
     )
-    executor = RoutedExecutorAgent(
-        benchmark_by_task_id=runtime_benchmark_by_task_id,
-        skillsbench_executor=skillsbench_executor,
-        swebench_executor=swebench_executor,
+    executor = ExecutorAgent(
+        model=config.models.executor,
+        benchmark_repo=benchmark_repo,
+        harbor_runner=_build_harbor_runner(
+            config=config,
+            experiment_dir=experiment_dir,
+            remote_harbor_config=remote_harbor_config,
+        ),
+        workspace_root=experiment_dir / "benchmarks",
+        injected_skill_name=config.executor_runtime.injected_skill_name,
     )
     mediator = MediatorAgent(
         llm_client=LLMClient(model=config.models.mediator),
@@ -1351,17 +947,16 @@ def _build_unified_runtime(
         condition_name=config.experiment.condition_name,
     )
     judge_client = LLMClient(model=config.models.judge)
-
     return ExperimentRuntime(
         experiment_dir=experiment_dir,
         orchestrator=Orchestrator(
             planner=planner,
-            executor=executor,  # type: ignore[arg-type]
+            executor=executor,
             mediator=mediator,
             skill_store=skill_store,
             artifact_store=artifact_store,
             history_store=history_store,
-            benchmark_repo=benchmark_repo,  # type: ignore[arg-type]
+            benchmark_repo=benchmark_repo,
             config=config,
             experiment_dir=experiment_dir,
             skill_advisor=skill_advisor,
@@ -1370,86 +965,48 @@ def _build_unified_runtime(
     )
 
 
-def _print_unified_task_selection(selection: BenchmarkTaskSelection) -> None:
-    if selection.skillsbench_task_ids:
-        console.print(f"[bold]SkillsBench tasks:[/] {selection.skillsbench_task_ids}")
-    if selection.swebench_instance_ids:
-        console.print(
-            f"[bold]SWE-bench instances:[/] {selection.swebench_instance_ids}"
-        )
-    console.print(f"[bold]Executor backend:[/] {selection.backend_name}")
-
-
-def _run_unified_experiment(
+def _run_skillflow_experiment(
     *,
     config: Config,
-    selection: BenchmarkTaskSelection,
+    selection: TaskSelection,
     iterations: int,
     seed: int,
     condition_name: ConditionName,
-    dataset_name: str,
-    split: str,
-    timeout: int,
-    max_workers: int,
     run_id: str | None,
-    swebench_eval_instance_ids: list[str],
     remote_harbor_config: GCPVMConfig | None = None,
 ) -> None:
-    """Run SkillsBench, SWE-bench, or mixed selections in one evolution loop."""
+    """Run a SkillFlow selection in one evolution loop."""
     random.seed(seed)
-    config.executor_runtime.backend = selection.backend_name
-    config.experiment.benchmark_selection.skillsbench_tasks = (
-        selection.skillsbench_task_ids
-    )
-    config.experiment.benchmark_selection.swebench_instances = (
-        selection.swebench_instance_ids
-    )
+    config.experiment.benchmark_selection.tasks = selection.task_ids
+    config.experiment.benchmark_selection.family = selection.family
+    config.experiment.benchmark_selection.task_set = selection.task_set
 
     _prepare_llm_credentials_or_exit(config)
-    needs_skillsbench_runtime = _needs_runtime_skillsbench(selection, config)
-    needs_swebench_runtime = _needs_runtime_swebench(selection, config)
-    if needs_skillsbench_runtime:
-        if remote_harbor_config is None:
-            _ensure_harbor_available(config)
-        else:
-            _ensure_gcloud_available()
-    if needs_swebench_runtime:
-        try:
-            swebench_helpers.validate_modal_credentials()
-        except RuntimeError as exc:
-            console.print(f"[bold red]ERROR:[/] {exc}")
-            raise typer.Exit(code=1) from exc
+    if remote_harbor_config is None:
+        _ensure_harbor_available(config)
+    else:
+        _ensure_gcloud_available()
 
-    experiment_dir, runtime_skills_dir = _prepare_unified_experiment_root(
+    experiment_dir, runtime_skills_dir = _prepare_experiment_root(
         config=config,
         seed=seed,
         run_id=run_id,
-        suffix=selection.backend_name,
     )
-    runtime = _build_unified_runtime(
+    benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
+    runtime = _build_runtime(
         config=config,
-        selection=selection,
         condition_name=condition_name,
         runtime_skills_dir=runtime_skills_dir,
         experiment_dir=experiment_dir,
-        dataset_name=dataset_name,
-        split=split,
-        timeout=timeout,
-        max_workers=max_workers,
+        benchmark_repo=benchmark_repo,
         remote_harbor_config=remote_harbor_config,
     )
 
-    _print_unified_task_selection(selection)
-    if selection.has_swebench:
-        console.print(f"[bold]SWE-bench dataset:[/] {dataset_name} ({split})")
+    _print_task_selection(selection)
     if remote_harbor_config is not None:
         console.print(
             "[bold]Harbor runtime:[/] "
             f"GCP VM {remote_harbor_config.vm_name} ({remote_harbor_config.zone})"
-        )
-    if swebench_eval_instance_ids:
-        console.print(
-            f"[bold]SWE-bench frozen eval instances:[/] {swebench_eval_instance_ids}"
         )
     console.print(f"[bold]Iterations:[/] {iterations}")
     console.print(f"[bold]Condition:[/] {condition_name}")
@@ -1478,248 +1035,25 @@ def _run_unified_experiment(
         config=config,
         history_store=runtime.orchestrator.history_store,
     )
-    if not swebench_eval_instance_ids:
-        return
-
-    eval_config = config.model_copy(deep=True)
-    eval_config.experiment.skill_updates = SkillUpdateConfig(
-        executor=False,
-        planner=False,
-        mediator=False,
-    )
-    eval_dir = runtime.experiment_dir / "eval"
-    benchmark_repo = swebench_helpers.SWEbenchRepository(
-        dataset_name=dataset_name,
-        split=split,
-    )
-    console.print("\n[bold green]Starting frozen SWE-bench eval phase[/]\n")
-    eval_traces = asyncio.run(
-        _run_swebench_frozen_eval(
-            config=eval_config,
-            benchmark_repo=benchmark_repo,
-            runtime_skills_dir=runtime_skills_dir,
-            eval_dir=eval_dir,
-            instance_ids=swebench_eval_instance_ids,
-            timeout=timeout,
-            max_workers=max_workers,
-            run_id_prefix=f"{runtime.experiment_dir.name}-eval",
-        )
-    )
-    traces_path, predictions_path, summary_path, eval_summary = (
-        _write_swebench_phase_outputs(
-            traces=eval_traces,
-            phase_dir=eval_dir,
-            config=eval_config,
-        )
-    )
-    _print_result_summary(
-        summary=eval_summary,
-        data_dir=eval_dir,
-        summary_path=summary_path,
-        header="Frozen eval results",
-    )
-    _annotate_judge_rewards_or_exit(data_dir=eval_dir, config=eval_config)
-    console.print(f"  Predictions: {predictions_path}")
-    console.print(f"  Traces: {traces_path}")
-
-
-async def _run_swebench_frozen_eval(
-    *,
-    config: Config,
-    benchmark_repo: swebench_helpers.SWEbenchRepository,
-    runtime_skills_dir: Path,
-    eval_dir: Path,
-    instance_ids: list[str],
-    timeout: int,
-    max_workers: int,
-    run_id_prefix: str,
-) -> list[ExecutionTrace]:
-    skill_store = SkillStore(runtime_skills_dir)
-    skill_store.validate()
-    executor = _build_swebench_executor(
-        config=config,
-        benchmark_repo=benchmark_repo,
-        phase_dir=eval_dir,
-        timeout=timeout,
-        max_workers=max_workers,
-        run_id_prefix=run_id_prefix,
-    )
-    executor_skill_text = skill_store.read_skill("executor") or ""
-    traces: list[ExecutionTrace] = []
-    for iteration, instance_id in enumerate(instance_ids):
-        task = benchmark_repo.resolve(instance_id)
-        trace = await executor.execute_task(
-            TaskSpec(
-                task_id=instance_id,
-                instruction=task.instruction,
-                iteration=iteration,
-            ),
-            [executor_skill_text] if executor_skill_text else [],
-        )
-        traces.append(trace)
-    return traces
-
-
-def _records_from_swebench_traces(
-    *,
-    traces: list[ExecutionTrace],
-    config: Config,
-) -> list[IterationRecord]:
-    return [
-        IterationRecord(
-            iteration=trace.iteration,
-            task_id=trace.task_id,
-            execution_trace=trace,
-            reward=trace.reward,
-            duration_sec=trace.duration_sec,
-            run_id=trace.run_id,
-            condition_name=config.experiment.condition_name,
-            seed=config.experiment.seed,
-            models=config.models.model_dump(exclude_none=True),
-            executor_agent=config.executor_runtime.agent_name,
-            skill_update_policy=config.experiment.skill_updates.model_dump(),
-            expected_reward_range=(0.0, 1.0),
-            verifier_type=swebench_helpers.SWEBENCH_VERIFIER_TYPE,
-            success=trace.is_usable_feedback_signal,
-            verifier_status=trace.status,
-            total_tokens=(
-                trace.token_usage.input_tokens + trace.token_usage.output_tokens
-            ),
-            token_totals_by_agent={
-                "executor": (
-                    trace.token_usage.input_tokens + trace.token_usage.output_tokens
-                )
-            },
-        )
-        for trace in traces
-    ]
-
-
-def _write_swebench_phase_outputs(
-    *,
-    traces: list[ExecutionTrace],
-    phase_dir: Path,
-    config: Config,
-) -> tuple[Path, Path, Path, ExperimentScoreSummary]:
-    phase_dir.mkdir(parents=True, exist_ok=True)
-    traces_path = phase_dir / "traces.jsonl"
-    with open(traces_path, "w") as f:
-        for trace in traces:
-            f.write(trace.model_dump_json())
-            f.write("\n")
-
-    predictions_path = phase_dir / "predictions.jsonl"
-    with open(predictions_path, "w") as f:
-        for trace in traces:
-            prediction_path = trace.harbor_paths.get("prediction_jsonl")
-            if not prediction_path:
-                continue
-            path = Path(prediction_path)
-            if not path.exists():
-                continue
-            text = path.read_text().strip()
-            if text:
-                f.write(text)
-                f.write("\n")
-
-    records = _records_from_swebench_traces(traces=traces, config=config)
-    summary = build_score_summary(records)
-    summary_path = phase_dir / "summary.json"
-    write_score_summary(summary, summary_path)
-    return traces_path, predictions_path, summary_path, summary
 
 
 @app.command()
 def run(
-    skillsbench_tasks: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--skillsbench-task",
-            help=(
-                "SkillsBench task ID. Repeat the option or provide comma-separated "
-                "IDs. Overrides --skillsbench-task-set."
-            ),
-        ),
-    ] = None,
-    skillsbench_task_set: Annotated[
-        str | None,
-        typer.Option(
-            "--skillsbench-task-set",
-            help=(
-                f"Named SkillsBench task set. Available: {_available_task_set_help()}"
-            ),
-        ),
-    ] = None,
-    swebench_instances: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--swebench-instance",
-            help=(
-                "SWE-bench instance ID. Repeat the option or provide "
-                "comma-separated IDs."
-            ),
-        ),
-    ] = None,
-    swebench_limit: Annotated[
-        int | None,
-        typer.Option(
-            "--swebench-limit",
-            min=1,
-            help="Use the first N instances from the selected SWE-bench split.",
-        ),
-    ] = None,
-    swebench_eval_instances: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--swebench-eval-instance",
-            help=(
-                "SWE-bench instance ID to use for frozen eval after evolution. "
-                "Repeat the option or provide comma-separated IDs."
-            ),
-        ),
-    ] = None,
-    swebench_eval_limit: Annotated[
-        int | None,
-        typer.Option(
-            "--swebench-eval-limit",
-            min=1,
-            help=(
-                "Use the first N instances from the selected SWE-bench split for "
-                "frozen eval after evolution."
-            ),
-        ),
-    ] = None,
     tasks: Annotated[
-        str | None,
+        list[str] | None,
         typer.Option(
-            "--tasks",
-            help=(
-                "Legacy alias for comma-separated --skillsbench-task IDs. "
-                "Overrides --task-set."
-            ),
+            "--task",
+            help="SkillFlow task ID. Repeat the option or provide comma-separated IDs.",
         ),
+    ] = None,
+    family: Annotated[
+        str | None,
+        typer.Option("--family", help="Run all local tasks in this SkillFlow family."),
     ] = None,
     task_set: Annotated[
         str | None,
-        typer.Option(
-            "--task-set",
-            help="Legacy alias for --skillsbench-task-set.",
-        ),
+        typer.Option("--task-set", help="Named local SkillFlow task set."),
     ] = None,
-    dataset_name: Annotated[
-        str,
-        typer.Option(
-            "--swebench-dataset-name",
-            help="SWE-bench dataset name or local dataset path.",
-        ),
-    ] = swebench_helpers.DEFAULT_SWEBENCH_DATASET,
-    split: Annotated[
-        str,
-        typer.Option(
-            "--swebench-split",
-            help="SWE-bench dataset split to use.",
-        ),
-    ] = swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
     iterations: Annotated[
         int | None,
         typer.Option(help="Number of iterations. Overrides experiment.num_iterations."),
@@ -1782,12 +1116,16 @@ def run(
             ),
         ),
     ] = None,
+    diffusion_graph: Annotated[
+        str | None,
+        typer.Option("--diffusion-graph", help="Override diffusion.graph."),
+    ] = None,
     diffusion_max_artifacts: Annotated[
         int | None,
         typer.Option(
             "--diffusion-max-artifacts",
             min=1,
-            help="Override diffusion.max_artifacts for this run.",
+            help="Override diffusion.max_artifacts.",
         ),
     ] = None,
     diffusion_top_k_neighbors: Annotated[
@@ -1795,7 +1133,7 @@ def run(
         typer.Option(
             "--diffusion-top-k-neighbors",
             min=1,
-            help="Override diffusion.top_k_neighbors for this run.",
+            help="Override diffusion.top_k_neighbors.",
         ),
     ] = None,
     harbor_agent_setup_timeout_multiplier: Annotated[
@@ -1816,22 +1154,6 @@ def run(
             ),
         ),
     ] = None,
-    timeout: Annotated[
-        int,
-        typer.Option(
-            "--timeout",
-            min=1,
-            help="Per-SWE-bench-instance test timeout in seconds.",
-        ),
-    ] = 1800,
-    max_workers: Annotated[
-        int,
-        typer.Option(
-            "--max-workers",
-            min=1,
-            help="SWE-bench Modal harness worker count.",
-        ),
-    ] = 1,
     config_dir: Annotated[
         Path,
         typer.Option(help="Config directory"),
@@ -1841,23 +1163,19 @@ def run(
         typer.Option(
             "--cloud",
             help=(
-                "Run SkillsBench Harbor jobs on the configured GCP VM while "
-                "keeping the experiment control plane local."
+                "Run Harbor jobs on the configured GCP VM while keeping the "
+                "experiment control plane local."
             ),
         ),
     ] = False,
     cloud_env_file: Annotated[
         Path,
-        typer.Option(
-            "--cloud-env-file",
-            help="Dotenv file containing GCP VM Harbor settings.",
-        ),
+        typer.Option("--cloud-env-file", help="Dotenv file containing GCP VM settings."),
     ] = PROJECT_ROOT / ".env",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run a unified SkillsBench, SWE-bench, or mixed co-evolution experiment."""
+    """Run a SkillFlow co-evolution experiment."""
     _setup_logging(verbose)
-
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides=_run_config_overrides(
@@ -1869,6 +1187,7 @@ def run(
             advisor_buffer_max=advisor_buffer_max,
             diffusion_enabled=diffusion_enabled,
             diffusion_policy=diffusion_policy,
+            diffusion_graph=diffusion_graph,
             diffusion_max_artifacts=diffusion_max_artifacts,
             diffusion_top_k_neighbors=diffusion_top_k_neighbors,
             harbor_agent_setup_timeout_multiplier=(
@@ -1876,79 +1195,46 @@ def run(
             ),
         ),
     )
-    iterations = config.experiment.num_iterations
-    seed = config.experiment.seed
-    condition_name = config.experiment.condition_name
-
     _validate_or_raise_bad_parameter(config)
-    benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
-    selection = _resolve_unified_task_selection(
-        skillsbench_tasks=skillsbench_tasks,
-        skillsbench_task_set=skillsbench_task_set,
-        legacy_tasks=tasks,
-        legacy_task_set=task_set,
-        swebench_instances=swebench_instances,
-        swebench_limit=swebench_limit,
-        dataset_name=dataset_name,
-        split=split,
-        benchmark_repo=benchmark_repo,
+    repository = _build_benchmark_repo(PROJECT_ROOT, config)
+    selection = _resolve_task_selection(
+        repository=repository,
+        tasks=_task_ids_from_repeatable_cli(tasks),
+        family=family,
+        task_set=task_set,
     )
-    swebench_eval_requested = (
-        bool(swebench_eval_instances) or swebench_eval_limit is not None
-    )
-    if swebench_eval_requested and not selection.has_swebench:
-        raise typer.BadParameter(
-            "SWE-bench frozen eval requires an evolution SWE-bench selection "
-            "(--swebench-instance or --swebench-limit)"
-        )
     remote_harbor_config = _load_remote_harbor_config(
         enabled=cloud,
         env_file=cloud_env_file,
-        selection=selection,
     )
-    swebench_eval_instance_ids: list[str] = []
-    if swebench_eval_requested:
-        swebench_eval_instance_ids = _swebench_instance_ids_from_unified_cli(
-            swebench_instances=swebench_eval_instances,
-            swebench_limit=swebench_eval_limit,
-            dataset_name=dataset_name,
-            split=split,
-        )
-        _ensure_disjoint_swebench_sets(
-            evolve_instance_ids=selection.swebench_instance_ids,
-            eval_instance_ids=swebench_eval_instance_ids,
-        )
-    _run_unified_experiment(
+    _run_skillflow_experiment(
         config=config,
         selection=selection,
-        iterations=iterations,
-        seed=seed,
-        condition_name=condition_name,
-        dataset_name=dataset_name,
-        split=split,
-        timeout=timeout,
-        max_workers=max_workers,
+        iterations=config.experiment.num_iterations,
+        seed=config.experiment.seed,
+        condition_name=config.experiment.condition_name,
         run_id=run_id,
-        swebench_eval_instance_ids=swebench_eval_instance_ids,
         remote_harbor_config=remote_harbor_config,
     )
 
 
 @app.command()
 def matrix(
-    tasks: str | None = typer.Option(
-        None,
-        "--tasks",
-        help="Comma-separated task IDs. Overrides --task-set when provided.",
-    ),
-    task_set: str | None = typer.Option(
-        None,
-        "--task-set",
-        help=(
-            "Named task set to run when --tasks is omitted. "
-            f"Available: {_available_task_set_help()}"
+    tasks: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--task",
+            help="SkillFlow task ID. Repeat the option or provide comma-separated IDs.",
         ),
-    ),
+    ] = None,
+    family: Annotated[
+        str | None,
+        typer.Option("--family", help="Run all local tasks in this SkillFlow family."),
+    ] = None,
+    task_set: Annotated[
+        str | None,
+        typer.Option("--task-set", help="Named local SkillFlow task set."),
+    ] = None,
     iterations: int | None = typer.Option(
         None,
         help="Number of iterations per row. Overrides experiment.num_iterations.",
@@ -1990,12 +1276,16 @@ def matrix(
             ),
         ),
     ] = None,
+    diffusion_graph: Annotated[
+        str | None,
+        typer.Option("--diffusion-graph", help="Override diffusion.graph."),
+    ] = None,
     diffusion_max_artifacts: Annotated[
         int | None,
         typer.Option(
             "--diffusion-max-artifacts",
             min=1,
-            help="Override diffusion.max_artifacts for every matrix row.",
+            help="Override diffusion.max_artifacts.",
         ),
     ] = None,
     diffusion_top_k_neighbors: Annotated[
@@ -2003,7 +1293,7 @@ def matrix(
         typer.Option(
             "--diffusion-top-k-neighbors",
             min=1,
-            help="Override diffusion.top_k_neighbors for every matrix row.",
+            help="Override diffusion.top_k_neighbors.",
         ),
     ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
@@ -2011,7 +1301,6 @@ def matrix(
 ) -> None:
     """Run the six-row baseline matrix with isolated per-row skills."""
     _setup_logging(verbose)
-
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides=_run_config_overrides(
@@ -2023,6 +1312,7 @@ def matrix(
             advisor_buffer_max=advisor_buffer_max,
             diffusion_enabled=diffusion_enabled,
             diffusion_policy=diffusion_policy,
+            diffusion_graph=diffusion_graph,
             diffusion_max_artifacts=diffusion_max_artifacts,
             diffusion_top_k_neighbors=diffusion_top_k_neighbors,
             harbor_agent_setup_timeout_multiplier=None,
@@ -2035,14 +1325,14 @@ def matrix(
             skill_updates=preset.skill_updates,
             baseline_preset=preset.name,
         )
-    preflight_task_ids = _preflight_task_ids_from_cli(tasks, task_set)
     _prepare_llm_credentials_or_exit(config)
     _ensure_harbor_available(config)
-    benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
-    task_ids = preflight_task_ids or _task_ids_from_cli_with_repo(
-        tasks,
-        task_set,
-        benchmark_repo,
+    repository = _build_benchmark_repo(PROJECT_ROOT, config)
+    selection = _resolve_task_selection(
+        repository=repository,
+        tasks=_task_ids_from_repeatable_cli(tasks),
+        family=family,
+        task_set=task_set,
     )
     factory = ExperimentFactory(PROJECT_ROOT)
     seed = config.experiment.seed
@@ -2053,10 +1343,10 @@ def matrix(
         base_config=config,
         seed=seed,
         matrix_dir=matrix_dir,
-        benchmark_repo=benchmark_repo,
+        benchmark_repo=repository,
     )
 
-    _print_task_selection(task_ids=task_ids, tasks=tasks, task_set=task_set)
+    _print_task_selection(selection)
     console.print(f"[bold]Iterations per row:[/] {iterations}")
     console.print(f"[bold]Seed per row:[/] {seed}")
     _print_experiment_controls(config)
@@ -2073,7 +1363,7 @@ def matrix(
             f"skill_updates={row_config.experiment.skill_updates.model_dump()})"
         )
         records = asyncio.run(
-            row.runtime.orchestrator.run_experiment(task_ids, iterations)
+            row.runtime.orchestrator.run_experiment(selection.task_ids, iterations)
         )
         _write_and_print_result_summary(
             records=records,
@@ -2085,7 +1375,6 @@ def matrix(
             config=row_config,
             history_store=row.runtime.orchestrator.history_store,
         )
-
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
 
 
@@ -2124,17 +1413,17 @@ def create_graph(
         help="Minimum similarity score required to keep an edge.",
     ),
     tasks_root: Path = typer.Option(
-        PROJECT_ROOT / "benchmarks" / "skillsbench" / "tasks",
+        PROJECT_ROOT / "benchmarks" / "skillflow" / "tasks",
         "--tasks-root",
-        help="Local SkillsBench task directory to analyze.",
+        help="Local SkillFlow task directory to analyze.",
     ),
     output_dir: Path = typer.Option(
-        PROJECT_ROOT / "data" / "task_graphs" / "skillsbench-local",
+        PROJECT_ROOT / "data" / "task_graphs" / "skillflow-local",
         "--output-dir",
         help="Directory where graph precompute JSON artifacts are written.",
     ),
 ) -> None:
-    """Create a metadata similarity graph from local SkillsBench tasks."""
+    """Create a metadata similarity graph from local SkillFlow tasks."""
     try:
         precompute = build_task_graph_precompute(
             tasks_root,
@@ -2153,144 +1442,32 @@ def create_graph(
     console.print(f"[bold]Output:[/] {output_dir}")
 
 
-@swebench_app.command("list-instances")
-def list_swebench_instances(
-    dataset_name: str = typer.Option(
-        swebench_helpers.DEFAULT_SWEBENCH_DATASET,
-        "--dataset-name",
-        help="SWE-bench dataset name or local dataset path.",
-    ),
-    split: str = typer.Option(
-        swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
-        "--split",
-        help="Dataset split to inspect.",
-    ),
-    limit: int = typer.Option(
-        20,
-        "--limit",
-        min=1,
-        help="Maximum number of valid instance IDs to print.",
-    ),
-    repo_filter: str | None = typer.Option(
+@app.command("sync")
+def sync_skillflow(
+    output_dir: Path | None = typer.Option(
         None,
-        "--repo-filter",
-        help="Optional case-insensitive substring filter for the repo field.",
-    ),
-) -> None:
-    """List valid instance IDs from a SWE-bench dataset split."""
-    try:
-        instances = swebench_helpers.list_swebench_instances(
-            dataset_name=dataset_name,
-            split=split,
-            limit=limit,
-            repo_filter=repo_filter,
-        )
-    except (RuntimeError, ValueError) as exc:
-        console.print(f"[bold red]ERROR:[/] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    if not instances:
-        console.print("[yellow]No SWE-bench instances matched the filters.[/]")
-        return
-    _print_swebench_instances(instances)
-
-
-@swebench_app.command("smoke")
-def smoke_swebench(
-    instance_ids: list[str] | None = typer.Option(
-        None,
-        "--instance-id",
-        help=(
-            "SWE-bench instance ID to run. Repeat the option or provide "
-            "comma-separated IDs. Defaults to a tiny Lite smoke instance."
-        ),
-    ),
-    dataset_name: str = typer.Option(
-        swebench_helpers.DEFAULT_SWEBENCH_DATASET,
-        "--dataset-name",
-        help="SWE-bench dataset name or local dataset path.",
-    ),
-    split: str = typer.Option(
-        swebench_helpers.DEFAULT_SWEBENCH_SPLIT,
-        "--split",
-        help="Dataset split to evaluate.",
-    ),
-    predictions_path: str = typer.Option(
-        "gold",
-        "--predictions-path",
-        help="SWE-bench predictions JSON/JSONL path, or 'gold'.",
-    ),
-    run_id: str | None = typer.Option(
-        None,
-        "--run-id",
-        help=(
-            "Run ID suffix. The actual SWE-bench run ID is prefixed with a timestamp."
-        ),
-    ),
-    timeout: int = typer.Option(
-        1800,
-        "--timeout",
-        min=1,
-        help="Per-instance test timeout in seconds.",
-    ),
-    max_workers: int = typer.Option(
-        1,
-        "--max-workers",
-        min=1,
-        help="Modal harness worker count. Kept at 1 for small smoke runs.",
-    ),
-    output_dir: Path = typer.Option(
-        swebench_helpers.DEFAULT_SWEBENCH_OUTPUT_DIR,
         "--output-dir",
-        help="Directory for normalized medcoevo smoke outputs.",
+        help="Directory where SkillFlow task data should be downloaded.",
     ),
-) -> None:
-    """Run a tiny standalone SWE-bench evaluation and normalize its reports."""
-    _run_swebench_eval(
-        instance_ids=instance_ids,
-        dataset_name=dataset_name,
-        split=split,
-        predictions_path=predictions_path,
-        run_id=run_id,
-        timeout=timeout,
-        max_workers=max_workers,
-        output_dir=output_dir,
-        run_id_suffix="swebench-smoke",
-    )
-
-
-@skillsbench_app.command("sync")
-def sync_skillsbench(
-    tasks: str | None = typer.Option(
-        None,
-        "--tasks",
-        help="Comma-separated task IDs to sync into the local SkillsBench cache.",
-    ),
-    task_set: str | None = typer.Option(
-        None,
-        "--task-set",
-        help=(
-            "Named task set to sync when --tasks is omitted. "
-            "Use skillsbench-10; skillsbench-all is intentionally unsupported."
-        ),
+    dataset: str = typer.Option(
+        DEFAULT_SKILLFLOW_DATASET,
+        "--dataset",
+        help="Hugging Face dataset ID.",
     ),
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Fetch selected SkillsBench tasks into the configured local cache."""
+    """Download SkillFlow task data into the configured local cache."""
     _setup_logging(verbose)
     config = _load_config_or_bad_parameter(config_dir)
-    benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
-    task_ids = _sync_task_ids_from_cli(tasks, task_set)
-
+    config.executor_runtime.dataset = dataset
+    repository = _build_benchmark_repo(PROJECT_ROOT, config)
     try:
-        synced_tasks = benchmark_repo.sync_tasks(task_ids)
-    except (FileNotFoundError, SkillsBenchFetchError) as exc:
+        destination = repository.sync_tasks(destination=output_dir)
+    except SkillFlowSyncError as exc:
         console.print(f"[bold red]ERROR:[/] {exc}")
         raise typer.Exit(code=1) from exc
-
-    console.print(f"[bold]Synced tasks:[/] {[task.task_id for task in synced_tasks]}")
-    console.print(f"[bold]Cache:[/] {benchmark_repo.default_local_cache_dir()}")
+    console.print(f"[bold]Downloaded SkillFlow tasks to:[/] {destination}")
 
 
 if __name__ == "__main__":

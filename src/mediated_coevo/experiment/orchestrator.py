@@ -23,9 +23,10 @@ from mediated_coevo.analysis.judge_rewards import (
     judge_reward_metadata,
 )
 from mediated_coevo.analysis.metrics import metric_row
-from mediated_coevo.benchmarks import SkillsBenchRepository
+from mediated_coevo.benchmarks import SkillFlowRepository
 from mediated_coevo.core.config import Config
 from mediated_coevo.diffusion import (
+    DiffusedRecord,
     DiffusionArtifact,
     DiffusionStore,
     DiffusionSubscription,
@@ -117,7 +118,7 @@ class Orchestrator:
         skill_store: SkillStore,
         artifact_store: ArtifactStore,
         history_store: HistoryStore,
-        benchmark_repo: SkillsBenchRepository,
+        benchmark_repo: SkillFlowRepository,
         config: Config,
         experiment_dir: Path,
         skill_advisor: SkillAdvisor,
@@ -180,8 +181,7 @@ class Orchestrator:
         self._diffusion_prepared_iterations.clear()
         self._diffusion_snapshot_by_iteration.clear()
         self.executor_skill_gate.validation_task_pool = [
-            *selection.skillsbench_tasks,
-            *selection.swebench_instances,
+            *selection.tasks,
             *task_ids,
         ]
 
@@ -673,10 +673,15 @@ class Orchestrator:
             target_iteration=current_iteration,
             target_run_id=None,
             subscriptions=subscriptions,
+            eligible_count=self._diffusion_context_by_target.get(
+                (task_id, current_iteration),
+                {},
+            ).get("eligible_count"),
         )
         self._diffusion_context_by_target[(task_id, current_iteration)] = {
             "graph_snapshot_id": bundle.snapshot_id,
             "graph_policy": bundle.graph_policy,
+            "eligible_count": bundle.eligible_count,
             "selected_count": bundle.selected_count,
             "rendered_count": bundle.rendered_count,
             "context_tokens": bundle.context_tokens,
@@ -727,6 +732,20 @@ class Orchestrator:
                 target_task_id=target_id,
                 current_iteration=current_iteration,
                 eligible_artifacts=eligible_artifacts,
+                snapshot=snapshot,
+            )
+            self._record_prepared_diffusion_context(
+                target_id,
+                current_iteration,
+                snapshot=snapshot,
+                eligible_count=len(eligible_artifacts),
+                subscriptions=subscriptions,
+            )
+            self._record_unselected_diffusion_candidates(
+                target_task_id=target_id,
+                current_iteration=current_iteration,
+                eligible_artifacts=eligible_artifacts,
+                subscriptions=subscriptions,
                 snapshot=snapshot,
             )
             if subscriptions:
@@ -796,15 +815,80 @@ class Orchestrator:
         current_iteration: int,
         *,
         snapshot: TaskGraphSnapshot | None = None,
+        eligible_count: int = 0,
     ) -> None:
+        current_context = self._diffusion_context_by_target.get(
+            (task_id, current_iteration),
+            {},
+        )
         self._diffusion_context_by_target[(task_id, current_iteration)] = {
             "graph_snapshot_id": snapshot.snapshot_id if snapshot is not None else None,
             "graph_policy": snapshot.graph_policy if snapshot is not None else None,
+            "eligible_count": current_context.get("eligible_count", eligible_count),
             "selected_count": 0,
             "rendered_count": 0,
             "context_tokens": 0,
             "source_task_ids": [],
         }
+
+    def _record_prepared_diffusion_context(
+        self,
+        task_id: str,
+        current_iteration: int,
+        *,
+        snapshot: TaskGraphSnapshot,
+        eligible_count: int,
+        subscriptions: list[DiffusionSubscription],
+    ) -> None:
+        self._diffusion_context_by_target[(task_id, current_iteration)] = {
+            "graph_snapshot_id": snapshot.snapshot_id,
+            "graph_policy": snapshot.graph_policy,
+            "eligible_count": eligible_count,
+            "selected_count": len(subscriptions),
+            "rendered_count": 0,
+            "context_tokens": 0,
+            "source_task_ids": list(
+                dict.fromkeys(
+                    subscription.artifact.source_task_id
+                    for subscription in subscriptions
+                )
+            ),
+        }
+
+    def _record_unselected_diffusion_candidates(
+        self,
+        *,
+        target_task_id: str,
+        current_iteration: int,
+        eligible_artifacts: list[DiffusionArtifact],
+        subscriptions: list[DiffusionSubscription],
+        snapshot: TaskGraphSnapshot,
+    ) -> None:
+        selected_ids = {subscription.artifact.artifact_id for subscription in subscriptions}
+        for artifact in eligible_artifacts:
+            if artifact.artifact_id in selected_ids:
+                continue
+            self._diffusion_store.append_diffused_record(
+                DiffusedRecord(
+                    artifact_id=artifact.artifact_id,
+                    source_task_id=artifact.source_task_id,
+                    source_iteration=artifact.source_iteration,
+                    source_run_id=artifact.source_run_id,
+                    target_task_id=target_task_id,
+                    target_iteration=current_iteration,
+                    snapshot_id=snapshot.snapshot_id,
+                    policy_name=self.config.diffusion.policy,
+                    relation="candidate",
+                    reason="eligible_not_selected",
+                    eligible=True,
+                    selected=False,
+                    rendered=False,
+                    metadata={
+                        "artifact_type": artifact.artifact_type.value,
+                        "risk_level": artifact.risk_level.value,
+                    },
+                )
+            )
 
     def _diffusion_snapshot(
         self,
@@ -813,7 +897,8 @@ class Orchestrator:
         task_ids: list[str],
         iteration: int,
     ) -> TaskGraphSnapshot:
-        if graph_dir.exists():
+        graph_name = self.config.diffusion.graph
+        if graph_name in {"task_similarity", "precomputed_similarity"} and graph_dir.exists():
             from mediated_coevo.diffusion import DiffusionNetwork, GraphBuildSpec
 
             network = DiffusionNetwork.from_graph_dir(
@@ -822,6 +907,7 @@ class Orchestrator:
                     task_ids=task_ids,
                     run_id=self.experiment_dir.name,
                     iteration=iteration,
+                    graph_policy="precomputed_similarity",
                 )
             )
             return network.to_snapshot()
@@ -829,7 +915,7 @@ class Orchestrator:
             run_id=self.experiment_dir.name,
             iteration=iteration,
             task_ids=task_ids,
-            graph_policy="broadcast",
+            graph_policy=graph_name if graph_name != "none" else "broadcast",
         )
 
     def _attach_diffusion_context_metrics(self, record: IterationRecord) -> None:
@@ -839,10 +925,16 @@ class Orchestrator:
             return
         record.graph_snapshot_id = context["graph_snapshot_id"]
         record.diffusion_graph = context["graph_policy"]
+        record.diffusion_artifacts_eligible = context["eligible_count"]
         record.diffusion_artifacts_selected = context["selected_count"]
         record.diffusion_artifacts_rendered = context["rendered_count"]
         record.diffusion_context_tokens = context["context_tokens"]
         record.source_task_ids = list(context["source_task_ids"])
+        if record.diffusion_artifacts_rendered > 0:
+            record.reward_after_diffusion_context = record.reward
+            record.regression_after_diffusion_context = (
+                record.delta_reward is not None and record.delta_reward < 0
+            )
 
     def _ensure_diffusion_runtime_state(self) -> None:
         if not hasattr(self, "_diffusion_store"):

@@ -2,10 +2,11 @@
 
 Mediated Co-Evolution is an experiment runner for studying how agent skills
 change when execution feedback is routed through different context policies.
-It supports SkillsBench tasks through Harbor, SWE-bench tasks through the
-official SWE-bench/Modal harness, and mixed runs that include both task types.
+The executor backend now targets SkillFlow tasks through Harbor, while the
+planner, mediator, judge, reward tagging, reflection, validation, and diffusion
+concepts remain the same experimental frame.
 
-## How It Works: GRPO-Like Skill Evolution
+## How It Works
 
 Mediated Co-Evolution studies skill files as runtime policies. It uses a
 GRPO-like loop at the level of reward-relative skill editing: completed task
@@ -13,12 +14,12 @@ traces produce rewards, same-task history forms group-relative evidence, and LLM
 reflection rewrites Markdown skills. It does not train model weights.
 
 ```text
-Benchmark task
+SkillFlow task
     |
     v
 Planner -------------- plan/instructions -------------> Executor
    ^                                                     |
-   |                                                     | trace, logs, verifier reward
+   |                                                     | Harbor trace, logs, verifier reward
    |                                                     v
    |<---------------- curated feedback ------------- Mediator
                                                          |
@@ -34,9 +35,9 @@ Planner -------------- plan/instructions -------------> Executor
 
 The experiment loop has four roles:
 
-- Planner: reads the benchmark instruction plus condition-selected prior
-  context, then produces an execution plan.
-- Executor: runs the task in the selected benchmark backend and returns a
+- Planner: reads the task instruction plus condition-selected prior context,
+  then produces an execution plan.
+- Executor: runs the task through the SkillFlow/Harbor backend and returns a
   normalized execution trace and verifier reward.
 - Mediator: when the condition uses mediation, compresses and filters execution
   feedback before it is exposed to later Planner iterations.
@@ -52,8 +53,7 @@ The mutable runtime policies are:
 Runtime skill files are copied into each experiment directory before the run
 starts. Normal experiment runs do not edit the repo-level `skills/` directory.
 
-Executor policy is exposed to benchmark backends through a shared runtime
-envelope rather than as benchmark-specific domain knowledge:
+Executor policy is exposed to SkillFlow through a shared runtime envelope:
 
 ```text
 Task Instruction
@@ -62,13 +62,10 @@ Task Resources
 Verifier Contract
 ```
 
-SkillsBench and SWE-bench use the same logical envelope. For SkillsBench, the
-runner copies the original task directory, preserves any curated
-`environment/skills/` entries, and rewrites the copied task `instruction.md` to
-include the envelope. The curated SkillsBench skills remain task resources; the
-evolved `executor` policy is not written as a competing
-`environment/skills/executor/SKILL.md` skill. For SWE-bench, the same envelope is
-included in the patch-generation prompt.
+For SkillFlow, the runner copies the original task directory, preserves any
+task-local `environment/skills/` resources, and rewrites the copied
+`instruction.md` to include the envelope. The evolved executor policy remains a
+portable policy channel; task-local resources remain task resources.
 
 ### Reward Sources And Tagging
 
@@ -84,10 +81,10 @@ run at iteration `N + 1`.
 History entries keep:
 
 - `reward`: the evolution reward used for ranking and reflection.
-- `metadata.verifier_reward`: the raw verifier score from the benchmark.
+- `metadata.verifier_reward`: the raw verifier score from Harbor.
 - `metadata.reward_source`: `judge`, `verifier_fallback`, or `verifier`.
 
-### Group-Relative Contrastive Evidence
+### Group-Relative Evidence
 
 Co-evolution reflection builds same-role, same-task contrastive pairs from
 tagged history. For each task and role, the history store computes:
@@ -127,17 +124,39 @@ same-task history -> group-relative pairs -> LLM reflection prompt
 ```
 
 The reflection prompt shows each worse/better pair with its evolution reward and
-task-relative delta. Planner and Mediator reflection each ask for two candidate
-skill rewrites, validate them empirically, and commit only an accepted candidate
-with the higher validation reward. Mediator validation replays a shared source
-trace through current and candidate mediator protocols, then scores the executor
-skill candidate induced by that feedback through the executor validation gate.
+task-relative delta. Planner and Mediator reflection each ask for candidate skill
+rewrites, validate them empirically, and commit only accepted candidates.
+Mediator validation replays a shared source trace through current and candidate
+mediator protocols, then scores the executor skill candidate induced by that
+feedback through the executor validation gate.
 
-The validation task pool comes from `experiment.skill_validation`. Executor
-validation compares the old and candidate Executor policies on the same selected
-tasks under the same task instruction, task resources, and verifier contract.
-It accepts only when the candidate improves by at least `min_mean_delta` without
-violating configured regression or usability rules.
+Executor validation compares old and candidate Executor policies on selected
+SkillFlow tasks under the same task instruction, task resources, and verifier
+contract. It accepts only when the candidate improves by at least
+`min_mean_delta` without violating configured regression or usability rules.
+
+### Diffusion
+
+Diffusion is an optional graph-aware context route layered on top of the core
+planner, executor, mediator, and judge loop. It emits task artifacts, builds a
+per-iteration subscription board, and renders selected cross-task artifacts into
+planner context according to the configured policy.
+
+Current diffusion policy values:
+
+- `none`: do not render diffusion context.
+- `capped_broadcast`: render the most recent eligible cross-task artifacts up
+  to `diffusion.max_artifacts`.
+- `random_k`: render a deterministic seeded random sample of eligible
+  cross-task artifacts up to `diffusion.max_artifacts`.
+- `top_k_similarity`: render eligible artifacts from the strongest incoming
+  graph neighbors for the target task, capped by `diffusion.max_artifacts` and
+  `diffusion.top_k_neighbors`.
+
+The graph precompute command scores all local SkillFlow task pairs using
+metadata, task resources, output shape, and instruction text. It writes profiles,
+pairwise weights, thresholds, kept edges, cut edges, and connected components
+for later inspection.
 
 ### What Is Not GRPO
 
@@ -151,33 +170,36 @@ The framework is GRPO-like only at the skill-editing layer. It does not:
 The reward tags are noisy downstream labels. The intended signal comes from
 repeated same-task, group-relative comparisons over many iterations.
 
+## Requirements
+
+- Python `>=3.13`
+- `uv`
+- Harbor CLI on `PATH`
+- Docker for local Harbor execution
+- `OPENROUTER_API_KEY` for planner, mediator, and judge calls
+
+The default executor Harbor agent is `nop`, which is useful for local smoke
+validation and parser checks. Configure `executor_runtime.agent_name` in
+`config/default.toml` when using an agent that edits task files.
+
 ## Quick Start
 
-The main CLI entrypoint is:
+Inspect the CLI:
 
 ```bash
 uv run medcoevo --help
 ```
 
-## Normal Experiment
-
-For a normal short SkillsBench experiment, run:
+Run a short local SkillFlow smoke experiment:
 
 ```bash
 uv run medcoevo run \
-  --skillsbench-task fix-build-agentops \
-  --swebench-instance sympy__sympy-13915 \
-  --iterations 2 \
+  --task smoke-skillflow \
+  --iterations 1 \
+  --condition no_feedback \
   --skill-updates none \
-  --advisor-buffer-max 2 \
-  --coevo-interval 2
+  --run-id smoke
 ```
-
-This selects one SkillsBench task, runs two iterations, disables committed skill
-updates, and sets the advisor and reflection cadence to two iterations. Skill
-validation gates are always required for skill candidates. The default condition is
-`learned_mediator`, so the Mediator still produces feedback reports unless you
-override `--condition`.
 
 Experiment outputs are written under:
 
@@ -185,50 +207,16 @@ Experiment outputs are written under:
 data/experiments/<timestamp>-<run-id>/
 ```
 
-Use `--run-id <run-id>` when you want a custom suffix. If omitted, unified
-runs use `<seed>-<backend>` after the timestamp prefix:
+## Local Smoke Task
 
-```bash
-uv run medcoevo run \
-  --skillsbench-task fix-build-agentops \
-  --iterations 2 \
-  --skill-updates none \
-  --run-id agentops-smoke
+A minimal task is included at:
+
+```text
+benchmarks/skillflow/tasks/smoke-skillflow/
 ```
 
-## Setup
-
-Install project dependencies with `uv`:
-
-```bash
-uv sync --dev
-```
-
-Export the model credential used by all LLM calls:
-
-```bash
-export OPENROUTER_API_KEY=...
-```
-
-Local SkillsBench runs require Harbor and a local container runtime:
-
-```bash
-uv tool install harbor
-harbor --version
-docker --version
-docker compose version
-```
-
-To run Docker-heavy SkillsBench tasks on the configured GCP VM instead of the
-local machine, use the `--cloud` flag. See
-[Cloud VM Harbor Setup](#cloud-vm-harbor-setup).
-
-SWE-bench runs use Modal instead of local Docker. Configure Modal before running
-SWE-bench commands:
-
-```bash
-modal token new
-```
+It lets us confirm the Harbor output shape and parser contract without pulling a
+remote dataset.
 
 ## CLI Overview
 
@@ -238,9 +226,8 @@ Top-level commands:
 uv run medcoevo run
 uv run medcoevo matrix
 uv run medcoevo inspect
-uv run medcoevo skillsbench sync
-uv run medcoevo swebench list-instances
-uv run medcoevo swebench smoke
+uv run medcoevo create-graph
+uv run medcoevo sync
 ```
 
 Shell completion helpers:
@@ -250,185 +237,33 @@ uv run medcoevo --install-completion
 uv run medcoevo --show-completion
 ```
 
-## Cloud VM Harbor Setup
-
-`medcoevo run --cloud` keeps the co-evolution control plane on the local
-machine, but sends each prepared SkillsBench task workspace to an existing GCP
-VM for `harbor run`. The VM is only a remote Docker/Harbor host: the full repo
-is not copied to the VM, `medcoevo run` is not run on the VM, and experiment
-outputs stay under local `data/experiments/`.
-
-Current CLI shape:
-
-```bash
-uv run medcoevo run \
-  --skillsbench-task dialogue-parser \
-  --iterations 1 \
-  --condition no_feedback \
-  --skill-updates none \
-  --cloud
-```
-
-Use `--cloud-env-file` when the GCP settings are not in `.env`:
-
-```bash
-uv run medcoevo run \
-  --skillsbench-task dialogue-parser \
-  --iterations 1 \
-  --cloud \
-  --cloud-env-file .env-another
-```
-
-### Local Dotenv Keys
-
-The cloud path reads VM connection settings and the OpenRouter Secret Manager
-resource from the dotenv file. The API key value itself should stay in Secret
-Manager and is read by the VM service account at runtime.
-
-Copy [.env.example](.env.example) to `.env` and fill in local-only secrets:
-
-```bash
-cp .env.example .env
-```
-
-`GCP_REGION` is optional when `GCP_ZONE` is set. `GCP_REMOTE_DIR` is optional
-and defaults to `/tmp/mediator-coevo`; this project’s VM smoke run used
-`~/mediator-coevo`. `GCP_SERVICE_ACCOUNT` is informational for this path; the
-VM’s attached service account is what actually accesses Secret Manager.
-
-The example file also lists GCS keys that are not used by direct VM Harbor mode
-so they are not confused with the active `--cloud` path.
-
-### Local Requirements
-
-The local machine needs:
-
-- `gcloud` installed and authenticated.
-- permission to `gcloud compute ssh` and `gcloud compute scp` to the VM.
-- `OPENROUTER_API_KEY` exported locally for planner, mediator, and judge model
-  calls.
-
-Local Harbor and local Docker are not required when `--cloud` is used for a
-SkillsBench-only run. The CLI checks `gcloud` locally and skips the local Harbor
-preflight.
-
-### VM Requirements
-
-The VM must have:
-
-- Docker daemon running.
-- Docker Compose v2 available as `docker compose`.
-- `uv` on `PATH`.
-- Harbor on `PATH`.
-- `gcloud` on `PATH`.
-- VM service account access to the OpenRouter secret stored in the secret manager within the same GCP project.
-- an OAuth scope that permits Secret Manager access, such as `cloud-platform`.
-
-The Debian 12 VM setup used for the smoke run was:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y docker.io docker-compose python3-venv pipx
-sudo systemctl enable --now docker
-
-mkdir -p "$HOME/.local/bin"
-curl -LsSf https://astral.sh/uv/install.sh | sh
-"$HOME/.local/bin/uv" tool install harbor
-
-sudo ln -sf "$HOME/.local/bin/uv" /usr/local/bin/uv
-sudo ln -sf "$HOME/.local/bin/harbor" /usr/local/bin/harbor
-
-tmp="$(mktemp)"
-curl -fL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o "$tmp"
-sudo mkdir -p /usr/local/lib/docker/cli-plugins
-sudo install -m 0755 "$tmp" /usr/local/lib/docker/cli-plugins/docker-compose
-rm -f "$tmp"
-```
-
-Verify the VM runtime:
-
-```bash
-docker ps >/dev/null
-docker --version
-docker compose version
-uv --version
-harbor --version
-```
-
-Grant Secret Manager access to the VM service account:
-
-```bash
-gcloud secrets add-iam-policy-binding OPENROUTER_API_KEY \
-  --project agent-coevolution \
-  --member serviceAccount:vm-service-account@developer.gserviceaccount.com \
-  --role roles/secretmanager.secretAccessor
-```
-
-If the VM was created with narrow OAuth scopes, update it to use
-`cloud-platform` scope. This requires stopping the VM:
-
-```bash
-gcloud compute instances stop vm-instance-name \
-  --project agent-coevolution \
-  --zone us-central1-a
-
-gcloud compute instances set-service-account vm-instance-name \
-  --project agent-coevolution \
-  --zone us-central1-a \
-  --service-account vm-service-account@developer.gserviceaccount.com \
-  --scopes cloud-platform
-
-gcloud compute instances start vm-instance-name \
-  --project agent-coevolution \
-  --zone us-central1-a
-```
-
-After changing scopes, clear stale VM-side gcloud token cache and verify the VM
-can read the secret without printing the secret value:
-
-```bash
-rm -f ~/.config/gcloud/access_tokens.db ~/.config/gcloud/credentials.db
-gcloud secrets versions access latest \
-  --secret OPENROUTER_API_KEY \
-  --project agent-coevolution >/dev/null
-echo secret-ok
-```
-
 ## `run`
 
-`run` executes one SkillsBench, SWE-bench, or mixed co-evolution experiment. It
-requires at least one task selector.
+`run` executes one SkillFlow co-evolution experiment. It requires at least one
+task selector.
 
-SkillsBench selectors:
+Selectors:
 
-- `--skillsbench-task <id>`: repeatable; comma-separated IDs are also accepted.
-- `--skillsbench-task-set skillsbench-10`: curated 10-task set.
-- `--skillsbench-task-set skillsbench-all`: discover all local and remote
-  SkillsBench tasks, then fetch missing tasks lazily.
-- `--tasks` and `--task-set`: legacy aliases for SkillsBench selection.
-
-SWE-bench selectors:
-
-- `--swebench-instance <id>`: repeatable; comma-separated IDs are also accepted.
-- `--swebench-limit <n>`: first `n` instances from the configured split.
-- `--swebench-eval-instance <id>`: optional frozen eval after evolution.
-- `--swebench-eval-limit <n>`: first `n` instances for frozen eval.
+- `--task <id>`: repeatable; comma-separated IDs are also accepted.
+- `--family <name>`: run all local tasks with matching SkillFlow family
+  metadata.
+- `--task-set <name>`: read `benchmarks/skillflow/task_sets/<name>.txt`.
 
 Core run options:
 
-| Option                                         | Default            | Meaning                                                                 |
-| ---------------------------------------------- | ------------------ | ----------------------------------------------------------------------- |
-| `--iterations`                                 | config value       | Number of experiment iterations.                                        |
-| `--seed`                                       | config value       | Random seed.                                                            |
-| `--condition`                                  | config value       | Feedback routing condition.                                             |
-| `--skill-updates`                              | config value       | Which skill families may be committed.                                  |
-| `--advisor-buffer-max`                         | config value       | Executor proposal batch size override.                                  |
-| `--coevo-interval`                             | config value       | Planner/Mediator reflection interval override.                          |
-| `--run-id`                                     | auto suffix        | Optional run id suffix for the timestamp-prefixed output directory.      |
-| `--config-dir`                                 | `config/`          | Directory containing `default.toml`.                                    |
-| `--cloud`                                      | false              | Run SkillsBench Harbor jobs on the configured GCP VM.                   |
-| `--cloud-env-file`                             | `.env`             | Dotenv file containing GCP VM Harbor settings.                          |
-| `--verbose`, `-v`                              | false              | Enable debug logging.                                                   |
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--iterations` | config value | Number of experiment iterations. |
+| `--seed` | config value | Random seed. |
+| `--condition` | config value | Feedback routing condition. |
+| `--skill-updates` | config value | Which skill families may be committed. |
+| `--advisor-buffer-max` | config value | Executor proposal batch size override. |
+| `--coevo-interval` | config value | Planner/Mediator reflection interval override. |
+| `--run-id` | auto suffix | Optional run id suffix for the timestamp-prefixed output directory. |
+| `--config-dir` | `config/` | Directory containing `default.toml`. |
+| `--cloud` | false | Run Harbor jobs on the configured GCP VM. |
+| `--cloud-env-file` | `.env` | Dotenv file containing GCP VM Harbor settings. |
+| `--verbose`, `-v` | false | Enable debug logging. |
 
 Feedback conditions:
 
@@ -439,44 +274,6 @@ Feedback conditions:
   invalid.
 - `learned_mediator`: Mediator reports are used, and Mediator/Planner
   co-evolution can be enabled.
-
-Feedback scope terms used in this repo:
-
-- same-task memory: prior context sourced from earlier iterations of the same
-  task only.
-- explicit flat cross-task feedback: prior context sourced from other tasks by
-  the existing condition router when
-  `experiment.allow_cross_task_feedback = true`.
-- graph-aware diffusion: diffusion artifacts stored under the run `diffusion/`
-  directory for later graph-based routing.
-- learned diffusion policy: a future policy layer that would learn which
-  diffusion artifacts to route, rather than relying only on the current
-  explicit condition-based routing.
-
-Current diffusion policy values:
-
-- `none`: do not render diffusion context.
-- `capped_broadcast`: render the most recent eligible cross-task artifacts up
-  to `diffusion.max_artifacts`.
-- `random_k`: render a deterministic seeded random sample of eligible
-  cross-task artifacts up to `diffusion.max_artifacts`.
-- `top_k_similarity`: render eligible artifacts from the strongest incoming
-  graph neighbors for the target task, capped by `diffusion.max_artifacts` and
-  `diffusion.top_k_neighbors`.
-
-At runtime, diffusion uses an ephemeral per-iteration subscription board. Durable
-artifacts remain in the run `diffusion/` store, while the current policy
-materializes target-specific subscriptions such as `(iteration, target_task_id)
--> artifacts`. When a target task builds planner context, its board entry is
-consumed; the source artifacts remain in the store for future iterations and
-audit/replay.
-
-By default, `config/default.toml` enables explicit flat cross-task feedback with
-`experiment.allow_cross_task_feedback = true`. That default applies before and
-alongside any diffusion work. In other words, cross-task planner context is
-already part of the baseline runtime when the selected condition supports prior
-context; diffusion is an additional mechanism, not the feature that first turns
-on cross-task sharing.
 
 Skill update values:
 
@@ -491,39 +288,29 @@ Skill update values:
 
 ## `matrix`
 
-`matrix` runs the six baseline rows against the same SkillsBench task selection,
-seed, model config, and budget config. Matrix runs are SkillsBench-only.
+`matrix` runs the six baseline rows against the same SkillFlow task selection,
+seed, model config, and budget config.
 
 ```bash
 uv run medcoevo matrix \
-  --task-set skillsbench-10 \
+  --task smoke-skillflow \
   --iterations 1 \
   --seed 42
 ```
 
-Supported options include `--tasks`, `--task-set`, `--iterations`, `--seed`,
-`--coevo-interval`, `--advisor-buffer-max`,
-`--config-dir`, and `--verbose`.
-
 Baseline rows:
 
-| Preset                             | Condition          | Skill updates               |
-| ---------------------------------- | ------------------ | --------------------------- |
-| `no_feedback`                      | `no_feedback`      | `none`                      |
-| `full_trace_same_task`             | `full_traces`      | `none`                      |
-| `static_mediator_same_task`        | `static_mediator`  | `none`                      |
-| `planner_only_skill_evolution`     | `learned_mediator` | `planner`                   |
-| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator`                  |
-| `full_coevolution`                 | `learned_mediator` | `executor,planner,mediator` |
+| Preset | Condition | Skill updates |
+| --- | --- | --- |
+| `no_feedback` | `no_feedback` | `none` |
+| `full_trace_same_task` | `full_traces` | `none` |
+| `static_mediator_same_task` | `static_mediator` | `none` |
+| `planner_only_skill_evolution` | `learned_mediator` | `planner` |
+| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator` |
+| `full_coevolution` | `learned_mediator` | `executor,planner,mediator` |
 
 Each row gets an isolated copy of the skill tree under its experiment
 directory.
-
-The `_same_task` names in the preset table are retained as stable row labels.
-Under the current default `experiment.allow_cross_task_feedback = true`, those
-rows still permit explicit flat cross-task feedback whenever the selected
-condition exposes prior context. Disable cross-task feedback explicitly if you
-need strictly same-task-only routing semantics.
 
 ## `inspect`
 
@@ -556,97 +343,64 @@ artifact paths, and adjacent reward regressions from an experiment metrics file:
 uv run python -m mediated_coevo.analysis.evolution_audit data/experiments/<run-dir>
 ```
 
-## `skillsbench sync`
+## `create-graph`
 
-SkillsBench tasks are cached under `benchmarks/skillsbench/tasks/`. Missing
-tasks are fetched on demand when `executor_runtime.remote_fetch = true`.
-
-Pre-cache selected tasks:
+Create a metadata similarity graph from local SkillFlow tasks:
 
 ```bash
-uv run medcoevo skillsbench sync \
-  --tasks fix-build-agentops,dialogue-parser
+uv run medcoevo create-graph \
+  --tasks-root benchmarks/skillflow/tasks \
+  --output-dir data/task_graphs/skillflow-local \
+  --threshold 0.05
 ```
 
-Pre-cache the curated set:
+The graph artifacts include task profiles, pairwise similarity components,
+score weights, active thresholds, kept/cut edges, and connected components.
+
+## `sync`
+
+Download SkillFlow task data into the configured local cache:
 
 ```bash
-uv run medcoevo skillsbench sync \
-  --task-set skillsbench-10
+uv run medcoevo sync
 ```
 
-`skillsbench sync` intentionally does not support `skillsbench-all`, because
-syncing every remote task can be expensive.
-
-The task archive is configured in `config/default.toml`:
-
-```toml
-[executor_runtime]
-remote_fetch = true
-archive_url = "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
-# archive_sha256 = "<64 hex chars>"
-```
-
-For reproducible experiments, pin `archive_url` to a commit or tag archive and
-set `archive_sha256`.
-
-## `swebench`
-
-List valid SWE-bench Lite instance IDs:
+By default the configured dataset is `zhang-ziao/SkillFlow-Task` and the target
+directory is `benchmarks/skillflow/tasks/`. Runtime task IDs assume data is
+available directly under `tasks/<Family>/<Task>/`:
 
 ```bash
-uv run medcoevo swebench list-instances --limit 20
+uv run medcoevo run --task Distribution-Center-Auditing/harbor_returns_disposition_audit
 ```
 
-Filter by repository substring:
+## Cloud VM Harbor Setup
 
-```bash
-uv run medcoevo swebench list-instances \
-  --repo-filter django \
-  --limit 20
-```
-
-Run the standalone SWE-bench smoke command:
-
-```bash
-uv run medcoevo swebench smoke
-```
-
-The smoke command defaults to the SWE-bench Lite `test` split and the
-`sympy__sympy-20590` instance when no `--instance-id` is provided.
-
-For SWE-bench co-evolution, use the unified `run` command:
+`medcoevo run --cloud` keeps the co-evolution control plane on the local
+machine, but sends each prepared SkillFlow task workspace to an existing GCP VM
+for `harbor run`. The VM is only a remote Docker/Harbor host: the full repo is
+not copied to the VM, `medcoevo run` is not run on the VM, and experiment
+outputs stay under local `data/experiments/`.
 
 ```bash
 uv run medcoevo run \
-  --swebench-instance django__django-11910 \
-  --iterations 4 \
-  --run-id swebench-django
+  --task smoke-skillflow \
+  --iterations 1 \
+  --condition no_feedback \
+  --skill-updates none \
+  --cloud
 ```
 
-Add a frozen eval phase:
+Use `--cloud-env-file` when the GCP settings are not in `.env`.
 
-```bash
-uv run medcoevo run \
-  --swebench-instance django__django-11910 \
-  --swebench-eval-instance django__django-11099 \
-  --run-id swebench-django
-```
+The local machine needs:
 
-SWE-bench options for `run`:
+- `gcloud` installed and authenticated for the configured VM.
+- `OPENROUTER_API_KEY` exported locally for planner, mediator, and judge model
+  calls.
 
-| Option                    | Default                    | Meaning                               |
-| ------------------------- | -------------------------- | ------------------------------------- |
-| `--swebench-dataset-name` | `SWE-bench/SWE-bench_Lite` | Dataset name or local dataset path.   |
-| `--swebench-split`        | `test`                     | Dataset split.                        |
-| `--timeout`               | `1800`                     | Per-instance test timeout in seconds. |
-| `--max-workers`           | `1`                        | Modal harness worker count.           |
-
-Standalone SWE-bench smoke outputs are written under:
-
-```text
-data/swebench-evals/<timestamp>-<run-id>/
-```
+The VM must have Docker, `uv`, Harbor, and `gcloud` on `PATH`, plus access to
+the configured OpenRouter secret when remote execution reads credentials from
+Secret Manager.
 
 ## Outputs
 
@@ -658,63 +412,45 @@ data/experiments/<timestamp>-<run-id>/
 |-- metrics.jsonl
 |-- summary.json
 |-- artifacts/
+|   |-- judge_rewards.jsonl
 |   |-- reports/
 |   |-- traces/
 |   |-- validation/
 |   `-- skill_updates/
 |-- history/
-|   |-- history.jsonl
-|   |-- rejected_proposals.jsonl
-|   `-- rejected_reflections.jsonl
 |-- jobs/
 |-- skills/
-`-- skills_snapshots/
+|-- skills_snapshots/
+`-- diffusion/
 ```
 
 Important files:
 
 - `config.toml`: resolved config after CLI overrides.
 - `metrics.jsonl`: per-iteration records.
-- `summary.json`: aggregate rewards, bootstrap confidence interval, token
-  totals, per-task summaries, and environment failure count.
-- `artifacts/traces/`: normalized task execution traces.
+- `summary.json`: aggregate verifier rewards, Judge rewards, confidence
+  intervals, token totals, per-task summaries, and environment failure count.
+- `artifacts/traces/`: normalized SkillFlow/Harbor execution traces.
 - `artifacts/reports/`: Mediator reports.
-- `artifacts/validation/`: Executor skill, Planner reflection, and Mediator
-  reflection validation evidence when enabled.
+- `artifacts/validation/`: Executor, Planner, and Mediator validation evidence.
 - `artifacts/skill_updates/`: committed skill update ledger, full update JSON,
   and readable diffs for post-run regression analysis.
-- `history/history.jsonl`: feedback history entries used for later context and
-  contrastive reflection; the evolution audit uses tagged Mediator rows to
-  report delayed same-task reward movement after each report.
-- `history/rejected_proposals.jsonl`: rejected advisor batches or validation
-  failures.
-- `history/rejected_reflections.jsonl`: rejected Planner/Mediator reflection
-  candidates retained as negative evidence for future reflection prompts.
+- `history/`: feedback history entries, rejected proposal batches, and rejected
+  reflection candidates.
 - `skills/`: run-local skill copy.
 - `skills_snapshots/`: committed skill snapshots.
+- `diffusion/`: graph diffusion artifacts and rendered subscriptions when
+  enabled.
 
 Executor policy observability fields in `metrics.jsonl`:
 
 - `executor_policy_hash`: hash of the policy text injected for the run.
 - `executor_policy_injected`: whether a non-empty policy was included.
-- `executor_policy_injection`: where the policy was exposed, such as
-  `instruction_envelope` for SkillsBench or `prompt_envelope` for SWE-bench.
+- `executor_policy_injection`: where the policy was exposed.
 - `task_resource_count` and `task_resource_names`: task-local resources exposed
-  alongside the policy, such as curated SkillsBench skills.
-- `verifier_contract_kind`: the benchmark verifier contract shown to the
+  alongside the policy.
+- `verifier_contract_kind`: the SkillFlow verifier contract shown to the
   Executor.
-
-Matrix outputs use one subdirectory per preset:
-
-```text
-data/experiments/<timestamp>-42-baseline-matrix/
-|-- no_feedback/
-|-- full_trace_same_task/
-|-- static_mediator_same_task/
-|-- planner_only_skill_evolution/
-|-- mediator_only_protocol_evolution/
-`-- full_coevolution/
-```
 
 ## Configuration
 
@@ -732,35 +468,30 @@ The current config controls:
 - skill update and validation defaults;
 - local output and benchmark paths;
 - Harbor runtime settings;
-- SkillsBench remote archive settings.
+- SkillFlow dataset synchronization settings.
 
 CLI options override the loaded config for a single run. The resolved config is
-persisted in the experiment directory as `config.toml`.
-Required experiment settings must be present in `default.toml` unless the CLI
-provides an override; otherwise the command fails before runtime setup and names
-the missing setting.
+persisted in the experiment directory as `config.toml`. Required experiment
+settings must be present in `default.toml` unless the CLI provides an override;
+otherwise the command fails before runtime setup and names the missing setting.
 
-Current config defaults include:
+Current task/runtime defaults include:
 
-- `experiment.num_iterations = 5`
-- `experiment.coevo_interval = 2`
-- `experiment.advisor_buffer_max = 2`
-- `experiment.seed = 42`
-- `experiment.condition_name = "learned_mediator"`
-- `experiment.allow_cross_task_feedback = true`, so eligible conditions append
-  explicit flat cross-task context by default, including in runs that also
-  enable diffusion.
-- `diffusion.enabled = false`
-- `diffusion.policy = "none"`
-- `diffusion.max_artifacts = 3`
-- `diffusion.top_k_neighbors = 3`
-- `executor_runtime.agent_name = "hermes"`
-- `executor_runtime.harbor_timeout_sec = 5400`
-- `executor_runtime.injected_skill_name = "executor"` names the Executor policy
-  channel. The policy is rendered through the shared envelope; it is not
-  automatically copied as a task-local domain skill for every benchmark.
+```toml
+[paths]
+benchmarks_dir = "benchmarks/skillflow"
 
-To use the agent configured (for Skillsbench tasks), pre-installation of respective tools, such as CLI, is required.
+[executor_runtime]
+agent_name = "nop"
+task_dirs = ["tasks"]
+sync_enabled = false
+dataset = "zhang-ziao/SkillFlow-Task"
+dataset_repo_type = "dataset"
+
+[experiment.skill_validation]
+sample_size = 3
+min_tag_overlap = 1
+```
 
 ## Testing
 
@@ -770,19 +501,12 @@ Run the default unit suite:
 uv run pytest
 ```
 
-Run one test file:
+Run static checks:
 
 ```bash
-uv run pytest tests/test_skillsbench.py
+uv run ruff check src tests
+uv run mypy src
 ```
-
-Run the opt-in Harbor integration test:
-
-```bash
-uv run pytest tests/test_skillsbench_integration.py -m integration -v -s
-```
-
-The project config excludes integration tests from the default pytest run.
 
 ## Troubleshooting
 
@@ -792,28 +516,22 @@ Export `OPENROUTER_API_KEY` before running experiments.
 
 `harbor CLI not found on PATH`
 
-Install Harbor with `uv tool install harbor`, then confirm `harbor --version`.
-For orchestrator-only checks that should not call Harbor, set
-`executor_runtime.harbor_required = false` in `config/default.toml`.
+Install Harbor, then confirm `harbor --version`. For orchestrator-only checks
+that should not call Harbor, set `executor_runtime.harbor_required = false` in
+`config/default.toml`.
 
-Docker or Compose failures in SkillsBench runs
+Docker failures in local runs
 
-Start Docker Desktop or Colima, then confirm:
+Start Docker Desktop or another local Docker daemon, then confirm:
 
 ```bash
-docker --version
-docker compose version
+docker info
 ```
 
-Missing SkillsBench task
+Missing SkillFlow task
 
-Sync selected tasks with `skillsbench sync`, or keep
-`executor_runtime.remote_fetch = true` so the runner can fetch missing tasks on
-demand.
-
-SWE-bench Modal credential failure
-
-Run `modal token new` before SWE-bench commands.
+Use `uv run medcoevo sync`, select an existing local `--task`, or add a task
+under `benchmarks/skillflow/tasks/`.
 
 Invalid experiment design
 
@@ -825,31 +543,15 @@ runtime side effects. Examples:
 - `shared_notes` cannot enable Executor updates.
 - `static_mediator` cannot enable Mediator updates.
 
-## Progress
-
-1. SkillsBench and SWE-bench datasets are integrated; SWE-bench evaluation runs
-   on Modal.
-2. The experimental LLM Judge layer runs after each task and scores traces,
-   logs, verifier reward, and quality flags.
-
-### Further Experiment 
-
-1. Larger scale experiment (5+ tasks across two bench, 2hr+ time)
-  - Lack of device resource (memory, storage, cloud computation for SWE-bench verifier)
-2. GRPO framework application
-3. LLM-as-judge design
-  - Pass 2-3 traces, so the reward is relative
-  - Few shot examples
-
 ## Related Work
 
 - Claude API Advisor: https://platform.anthropic.com/docs/en/agents-and-tools/tool-use/advisor-tool
 - Spark - Shared Agentic Memory: https://arxiv.org/abs/2511.08301
-- Multi-Agent Evolve (MAE): https://arxiv.org/abs/2510.23595
+- Multi-Agent Evolve: https://arxiv.org/abs/2510.23595
 - OpenSpace: https://github.com/HKUDS/OpenSpace
-- Group-Evolving Agents (GEA): https://arxiv.org/abs/2602.04837
-- Self-Evolving Coordination Protocol (SECP): https://arxiv.org/abs/2602.02170
+- Group-Evolving Agents: https://arxiv.org/abs/2602.04837
+- Self-Evolving Coordination Protocol: https://arxiv.org/abs/2602.02170
 - Rubric as Reward: https://arxiv.org/pdf/2507.17746
 - Skill Collective Evolution: https://github.com/AMAP-ML/SkillClaw
-- LLM-as-Judge guide (23 Jun): https://arxiv.org/pdf/2306.05685
+- LLM-as-Judge guide: https://arxiv.org/pdf/2306.05685
 - Textual Parameter Graph Optimization: https://arxiv.org/pdf/2604.20714

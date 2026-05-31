@@ -351,7 +351,7 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
     monkeypatch.setattr(planner, "process", _fake_process)
 
     task_spec = await planner.plan_task(
-        task_id="large-swebench-task",
+        task_id="large-skillflow-task",
         base_instruction="START " + ("required issue text " * 5000) + " END",
         prior_context="prior feedback " * 300,
         current_skills=["# executor"],
@@ -362,7 +362,7 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
     assert "required issue text" in compact_calls[0][0]
     assert (
         compact_calls[0][1]["label"]
-        == "benchmark instruction for large-swebench-task"
+        == "benchmark instruction for large-skillflow-task"
     )
     assert "COMPACTED ISSUE SIGNAL" in task_spec.instruction
 

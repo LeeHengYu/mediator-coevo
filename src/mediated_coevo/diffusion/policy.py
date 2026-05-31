@@ -26,6 +26,7 @@ class DiffusionContextBundle:
     text: str | None
     snapshot_id: str | None
     graph_policy: str
+    eligible_count: int
     selected_count: int
     rendered_count: int
     context_tokens: int
@@ -72,6 +73,7 @@ def build_capped_broadcast_context(
         target_iteration=target_iteration,
         target_run_id=target_run_id,
         subscriptions=subscriptions,
+        eligible_count=len(eligible_artifacts),
     )
 
 
@@ -108,6 +110,7 @@ def build_random_k_context(
         target_iteration=target_iteration,
         target_run_id=target_run_id,
         subscriptions=subscriptions,
+        eligible_count=len(eligible_artifacts),
     )
 
 
@@ -263,6 +266,7 @@ def render_diffusion_subscriptions(
     target_iteration: int,
     target_run_id: str | None,
     subscriptions: list[DiffusionSubscription],
+    eligible_count: int | None = None,
 ) -> DiffusionContextBundle:
     """Render and audit the target's consumed diffusion subscriptions."""
     lines = [
@@ -313,6 +317,9 @@ def render_diffusion_subscriptions(
         text=text,
         snapshot_id=snapshot.snapshot_id,
         graph_policy=snapshot.graph_policy,
+        eligible_count=(
+            eligible_count if eligible_count is not None else len(subscriptions)
+        ),
         selected_count=len(subscriptions),
         rendered_count=len(subscriptions),
         context_tokens=context_tokens,

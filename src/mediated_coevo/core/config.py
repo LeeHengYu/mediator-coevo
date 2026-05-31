@@ -12,9 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mediated_coevo.experiment.conditions import ConditionName
 
 OPENROUTER_MODEL_PREFIX = "openrouter/"
-DEFAULT_SKILLSBENCH_ARCHIVE_URL = (
-    "https://github.com/benchflow-ai/skillsbench/archive/refs/heads/main.zip"
-)
+DEFAULT_SKILLFLOW_DATASET = "zhang-ziao/SkillFlow-Task"
 DiffusionPolicyName: TypeAlias = Literal[
     "none",
     "capped_broadcast",
@@ -58,6 +56,7 @@ CONFIG_CLI_HINTS: dict[str, str] = {
     "experiment.skill_updates.mediator": "--skill-updates",
     "diffusion.enabled": "--diffusion-enabled/--no-diffusion-enabled",
     "diffusion.policy": "--diffusion-policy",
+    "diffusion.graph": "--diffusion-graph",
     "diffusion.max_artifacts": "--diffusion-max-artifacts",
     "diffusion.top_k_neighbors": "--diffusion-top-k-neighbors",
 }
@@ -137,18 +136,17 @@ class SkillValidationConfig(BaseModel):
     reward_tolerance: float = 1e-9
     require_all_tasks_usable: bool = True
     sample_size: int = 3
-    skillsbench_tasks: list[str] = Field(default_factory=list)
-    swebench_instances: list[str] = Field(default_factory=list)
+    tasks: list[str] = Field(default_factory=list)
     allow_contributing_fallback: bool = True
-    min_skillsbench_tag_overlap: int = 1
-    allow_swebench_replacement_for_skillsbench: bool = False
+    min_tag_overlap: int = 1
 
 
 class BenchmarkSelectionConfig(BaseModel):
     """Run-local benchmark task selection persisted with experiment config."""
 
-    skillsbench_tasks: list[str] = Field(default_factory=list)
-    swebench_instances: list[str] = Field(default_factory=list)
+    tasks: list[str] = Field(default_factory=list)
+    family: str | None = None
+    task_set: str | None = None
 
 
 class ExperimentConfig(BaseModel):
@@ -174,18 +172,17 @@ class ExperimentConfig(BaseModel):
 class PathsConfig(BaseModel):
     skills_dir: str = "skills"
     data_dir: str = "data"
-    benchmarks_dir: str = "benchmarks/skillsbench"
+    benchmarks_dir: str = "benchmarks/skillflow"
 
 
 class ExecutorRuntimeConfig(BaseModel):
-    backend: str = "skillsbench"
-    agent_name: str = "opencode"
+    agent_name: str = "nop"
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     injected_skill_name: str = "executor"
-    remote_fetch: bool = True
-    archive_url: str = Field(default=DEFAULT_SKILLSBENCH_ARCHIVE_URL, min_length=1)
-    archive_sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
+    sync_enabled: bool = False
+    dataset: str = Field(default=DEFAULT_SKILLFLOW_DATASET, min_length=1)
+    dataset_repo_type: str = "dataset"
     # Hard wall-clock cap on a single Harbor subprocess (seconds). This must
     # exceed task agent/verifier phase limits so Harbor can finish cleanly.
     harbor_timeout_sec: float = 5400.0
@@ -203,6 +200,7 @@ class DiffusionConfig(BaseModel):
 
     enabled: bool
     policy: DiffusionPolicyName
+    graph: str = "none"
     max_artifacts: int = Field(ge=1)
     top_k_neighbors: int = Field(ge=1)
 

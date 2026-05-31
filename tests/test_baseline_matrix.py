@@ -14,6 +14,7 @@ from mediated_coevo.core.config import (
     SkillUpdateConfig,
     load_config,
 )
+from mediated_coevo.benchmarks import SkillFlowRepository
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     BASELINE_PRESETS_BY_NAME,
@@ -82,6 +83,7 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
         advisor_buffer_max=1,
         diffusion_enabled=True,
         diffusion_policy="capped_broadcast",
+        diffusion_graph="task_similarity",
         diffusion_max_artifacts=5,
         diffusion_top_k_neighbors=2,
         harbor_agent_setup_timeout_multiplier=2.5,
@@ -94,6 +96,7 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
     assert config.experiment.advisor_buffer_max == 1
     assert config.diffusion.enabled is True
     assert config.diffusion.policy == "capped_broadcast"
+    assert config.diffusion.graph == "task_similarity"
     assert config.diffusion.max_artifacts == 5
     assert config.diffusion.top_k_neighbors == 2
     assert config.executor_runtime.harbor_agent_setup_timeout_multiplier == 2.5
@@ -417,7 +420,7 @@ def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
 
     with pytest.raises(typer.BadParameter, match="no_feedback"):
         main_module.run(
-            skillsbench_tasks=["task-A"],
+            tasks=["task-A"],
             iterations=1,
             seed=42,
             condition="no_feedback",
@@ -435,7 +438,7 @@ def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path
 
     monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_if_called)
 
-    with pytest.raises(typer.BadParameter, match="provide at least one SkillsBench"):
+    with pytest.raises(typer.BadParameter, match="provide --task"):
         main_module.run(
             iterations=1,
             seed=42,
@@ -459,10 +462,10 @@ def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
     def capture_run(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr(main_module, "_run_unified_experiment", capture_run)
+    monkeypatch.setattr(main_module, "_run_skillflow_experiment", capture_run)
 
     main_module.run(
-        skillsbench_tasks=["task-A"],
+        tasks=["task-A"],
         config_dir=config_dir,
     )
 
@@ -533,14 +536,19 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
     config.experiment.num_iterations = 8
     config.paths.skills_dir = "skills"
     config.paths.data_dir = "data"
-    config.paths.benchmarks_dir = "benchmarks/skillsbench"
+    config.paths.benchmarks_dir = "benchmarks/skillflow"
     matrix_dir = tmp_path / "data" / "experiments" / "matrix"
+    benchmark_repo = SkillFlowRepository(
+        root_dir=tmp_path / "benchmarks" / "skillflow",
+        task_dirs=["tasks"],
+    )
 
     rows = _build_matrix_runtimes(
         factory=ExperimentFactory(tmp_path),
         base_config=config,
         seed=123,
         matrix_dir=matrix_dir,
+        benchmark_repo=benchmark_repo,
     )
 
     assert [row.preset_name for row in rows] == BASELINE_PRESET_NAMES
@@ -552,10 +560,10 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
         row_skill_dirs.append(skill_dir)
         assert skill_dir == matrix_dir / row.preset_name / "skills"
         assert (skill_dir / "executor" / "SKILL.md").read_text() == "# Executor\n"
-        assert benchmark_repo.root_dir == tmp_path / "benchmarks" / "skillsbench"
+        assert benchmark_repo.root_dir == tmp_path / "benchmarks" / "skillflow"
         assert (
             benchmark_repo.default_local_cache_dir()
-            == tmp_path / "benchmarks" / "skillsbench" / "tasks"
+            == tmp_path / "benchmarks" / "skillflow" / "tasks"
         )
         assert row_config.experiment.seed == 123
         assert row_config.experiment.num_iterations == 8

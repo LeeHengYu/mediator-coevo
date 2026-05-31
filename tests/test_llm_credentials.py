@@ -109,7 +109,7 @@ def test_run_cli_fails_fast_when_openrouter_key_is_missing(monkeypatch):
 
     result = CliRunner().invoke(
         app,
-        ["run", "--skillsbench-task", "demo", "--run-id", "credential-check"],
+        ["run", "--task", "demo", "--run-id", "credential-check"],
     )
 
     assert result.exit_code == 1

@@ -17,6 +17,7 @@ from mediated_coevo.diffusion import (
 from mediated_coevo.experiment.conditions import get_executor_proposal_feedback
 from mediated_coevo.main import _validate_condition_name
 from mediated_coevo.models.history_signals import MediatorSignal
+from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
@@ -790,8 +791,10 @@ async def test_capped_broadcast_builds_diffused_cross_task_context(tmp_path):
     assert "policy=capped_broadcast" in context
     assert "hint from task-B" in context or "hint from task-C" in context
     records = orch._diffusion_store.query_diffused_records(target_task_id="task-A")
-    assert len(records) == 1
-    assert records[0].selected is True
+    assert len(records) == 2
+    assert sum(1 for record in records if record.eligible) == 2
+    assert sum(1 for record in records if record.selected) == 1
+    assert sum(1 for record in records if record.rendered) == 1
 
 
 @pytest.mark.asyncio
@@ -935,6 +938,78 @@ async def test_random_k_excludes_same_task_and_same_iteration_artifacts(tmp_path
     assert all(record.policy_name == "random_k" for record in records)
     assert len(records) == 1
     assert records[0].selected is True
+
+
+@pytest.mark.asyncio
+async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "top_k_similarity"
+    orch.config.diffusion.graph = "task_similarity"
+    orch.config.diffusion.max_artifacts = 3
+    orch.config.diffusion.top_k_neighbors = 1
+    _write_weighted_graph_artifacts(
+        tmp_path / "task-graph",
+        task_ids=["task-A", "task-B", "task-C", "task-D"],
+        weighted_pairs=[
+            ("task-B", "task-A", 0.9),
+            ("task-C", "task-A", 0.7),
+            ("task-D", "task-A", 0.2),
+        ],
+    )
+    orch._ensure_diffusion_runtime_state()
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-artifact",
+        source_task_id="task-B",
+        content="hint from task-B",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-c-artifact",
+        source_task_id="task-C",
+        content="hint from task-C",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-d-artifact",
+        source_task_id="task-D",
+        content="hint from task-D",
+    )
+
+    context = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert context is not None
+    assert "hint from task-B" in context
+    assert "hint from task-C" not in context
+    assert "hint from task-D" not in context
+    records = orch._diffusion_store.query_diffused_records(
+        target_task_id="task-A",
+        recent=None,
+    )
+    assert sum(1 for record in records if record.eligible) == 3
+    assert sum(1 for record in records if record.selected) == 1
+    assert sum(1 for record in records if record.rendered) == 1
+
+    record = IterationRecord(
+        iteration=1,
+        task_id="task-A",
+        reward=0.0,
+        delta_reward=-1.0,
+    )
+    orch._attach_diffusion_context_metrics(record)
+
+    assert record.diffusion_artifacts_eligible == 3
+    assert record.diffusion_artifacts_selected == 1
+    assert record.diffusion_artifacts_rendered == 1
+    assert record.reward_after_diffusion_context == 0.0
+    assert record.regression_after_diffusion_context is True
+    assert record.source_task_ids == ["task-B"]
 
 
 @pytest.mark.asyncio

@@ -199,7 +199,7 @@ class ScoreWeights(BaseModel):
 
 
 class TaskSimilarityProfile(BaseModel):
-    """Graph node ingredients extracted from a local SkillsBench task."""
+    """Graph node ingredients extracted from a local SkillFlow task."""
 
     task_id: str
     category: str = ""

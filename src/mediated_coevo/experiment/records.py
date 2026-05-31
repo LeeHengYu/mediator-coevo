@@ -9,11 +9,7 @@ from mediated_coevo.analysis.metrics import (
     metric_verifier_status,
     token_totals_by_agent,
 )
-from mediated_coevo.benchmarks.task_sets import (
-    SKILLSBENCH_10_TASK_METADATA,
-    SKILLSBENCH_EXPECTED_REWARD_RANGE,
-    SKILLSBENCH_VERIFIER_TYPE,
-)
+from mediated_coevo.benchmarks import SKILLFLOW_VERIFIER_TYPE
 from mediated_coevo.core.config import Config
 from mediated_coevo.core.utils import as_mapping, as_nonempty_string
 from mediated_coevo.experiment.conditions import ConditionName
@@ -182,7 +178,7 @@ def experiment_record_fields(config: Config) -> ExperimentRecordFields:
         "cross_task_feedback_enabled": (config.experiment.allow_cross_task_feedback),
         "diffusion_enabled": config.diffusion.enabled,
         "diffusion_policy": config.diffusion.policy,
-        "diffusion_graph": "precomputed_similarity" if config.diffusion.enabled else None,
+        "diffusion_graph": config.diffusion.graph if config.diffusion.enabled else None,
         "skill_update_policy": config.experiment.skill_updates.model_dump(),
     }
 
@@ -204,25 +200,14 @@ def task_metadata_fields(
     """Return flat task metadata fields for metrics rows."""
     metadata = as_mapping(task_config.get("metadata")) if task_config else {}
     verifier = as_mapping(task_config.get("verifier")) if task_config else {}
-    curated_metadata = SKILLSBENCH_10_TASK_METADATA.get(task_id)
-
     category = as_nonempty_string(metadata.get("category"))
     difficulty = as_nonempty_string(metadata.get("difficulty"))
     expected_reward_range = _reward_range_value(metadata.get("expected_reward_range"))
     verifier_type = as_nonempty_string(verifier.get("type"))
 
-    if curated_metadata:
-        category = category or curated_metadata.category
-        difficulty = difficulty or curated_metadata.difficulty
-        expected_reward_range = (
-            expected_reward_range or curated_metadata.expected_reward_range
-        )
-        verifier_type = verifier_type or curated_metadata.verifier_type
-    elif task_config:
-        expected_reward_range = (
-            expected_reward_range or SKILLSBENCH_EXPECTED_REWARD_RANGE
-        )
-        verifier_type = verifier_type or SKILLSBENCH_VERIFIER_TYPE
+    if task_config:
+        expected_reward_range = expected_reward_range or (0.0, 1.0)
+        verifier_type = verifier_type or SKILLFLOW_VERIFIER_TYPE
 
     return {
         "task_category": category,
