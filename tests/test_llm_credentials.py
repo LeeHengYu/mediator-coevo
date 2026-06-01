@@ -68,6 +68,21 @@ def test_config_normalize_models_rejects_blank_model_name():
         config.normalize_models()
 
 
+def test_executor_agent_is_hermes_only_not_configurable():
+    with pytest.raises(ValueError, match="agent_name"):
+        Config(
+            models={
+                "planner": "anthropic/claude-sonnet-4.6",
+                "executor": "openrouter/openai/gpt-5.5",
+                "mediator": "openai/gpt-5.5",
+                "judge": "openai/gpt-5.5",
+            },
+            experiment=experiment_config(),
+            diffusion=diffusion_config(),
+            executor_runtime={"agent_name": "other-agent"},
+        )
+
+
 @pytest.mark.parametrize("model", ["openrouter", "openrouter/", "openai/"])
 def test_config_normalize_models_rejects_prefix_only_model_names(model: str):
     config = Config(

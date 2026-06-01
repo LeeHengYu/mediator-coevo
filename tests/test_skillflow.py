@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from mediated_coevo.benchmarks import (
+    HarborPrebuiltImageMissingError,
     HarborRunResult,
+    HarborRunner,
     SKILLFLOW_VERIFIER_TYPE,
     SkillFlowRepository,
     parse_skillflow_execution_trace,
@@ -203,6 +206,65 @@ def test_sync_cli_accepts_selected_tasks(monkeypatch, tmp_path: Path) -> None:
     assert (tmp_path / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
 
 
+def test_build_base_image_cli_runs_skillflow_build_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+        return _Completed(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("mediated_coevo.main.subprocess.run", fake_run)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "build-base-image",
+            "--base-image-tag",
+            "skillflow/harbor-cli-base:test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls[0][0] == [
+        "bash",
+        str(Path.cwd() / "docker" / "harbor-cli-base" / "build.sh"),
+        "skillflow/harbor-cli-base:test",
+    ]
+    assert calls[0][1]["cwd"] == Path.cwd()
+    assert calls[0][1]["check"] is False
+    assert "SkillFlow base image build complete" in result.output
+
+
+def test_build_base_image_cli_dry_run_does_not_run_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("dry-run should not execute subprocess.run")
+
+    monkeypatch.setattr("mediated_coevo.main.subprocess.run", fake_run)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "build-base-image",
+            "--base-image-tag",
+            "skillflow/harbor-cli-base:test",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Would build base image" in result.output
+    output_compact = result.output.replace("\n", "")
+    assert "build.sh" in output_compact
+    assert "skillflow/harbor-cli-base:test" in result.output
+    assert "SkillFlow base image dry run complete" in result.output
+    assert "SkillFlow base image build complete" not in result.output
+
+
 def test_list_cli_queries_remote_tasks(monkeypatch) -> None:
     def fake_run(command, **kwargs):
         del kwargs
@@ -285,6 +347,66 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
     assert trace.token_usage.output_tokens == 3
 
 
+def test_trace_parser_treats_harbor_trial_exception_as_env_failure(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "trials" / "trial-1"
+    trial_dir.mkdir(parents=True)
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "id": "job-1",
+                "stats": {
+                    "evals": {
+                        "verifier": {
+                            "metrics": [{"name": "reward", "mean": 0.0}]
+                        }
+                    }
+                },
+            }
+        )
+    )
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "id": "trial-1",
+                "agent_result": None,
+                "verifier_result": None,
+                "exception_info": {
+                    "exception_type": "RuntimeError",
+                    "exception_message": (
+                        "Docker compose command failed. "
+                        "Image harbor-prebuilt:task-demo Error pull access denied"
+                    ),
+                    "exception_traceback": "RuntimeError: Docker compose command failed",
+                },
+            }
+        )
+    )
+    run_result = HarborRunResult(
+        job_dir=job_dir,
+        trial_dir=trial_dir,
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    trace = parse_skillflow_execution_trace(
+        run_result=run_result,
+        task_id="demo",
+        iteration=0,
+        duration_sec=0.1,
+    )
+
+    assert trace.status == "env_failure"
+    assert trace.reward is None
+    assert trace.error_kind == "missing_prebuilt_image"
+    assert trace.error_detail["exception_type"] == "RuntimeError"
+    assert trace.run_id == "job-1"
+    assert trace.harbor_trial_id == "trial-1"
+
+
 def test_trace_parser_reads_reward_file(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
     trial_dir = job_dir / "trials" / "trial-1"
@@ -359,6 +481,80 @@ def test_trace_parser_reads_observed_trial_verifier_rewards_shape(
     assert trace.harbor_metadata["reward_source"] == "trial_verifier_rewards"
     assert trace.harbor_metadata["agent_info.name"] == "nop"
     assert trace.harbor_metadata["agent_info.model_provider"] == "google"
+
+
+@pytest.mark.asyncio
+async def test_harbor_runner_raises_for_missing_prebuilt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    captured_commands: list[list[str]] = []
+    captured_envs: list[dict[str, str]] = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        captured_commands.append(list(command))
+        captured_envs.append(kwargs["env"])
+        trial_dir = jobs_dir / "job-1" / "trials" / "trial-1"
+        trial_dir.mkdir(parents=True)
+        (trial_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "exception_info": {
+                        "exception_type": "RuntimeError",
+                        "exception_message": (
+                            "Image harbor-prebuilt:task-demo Error pull access denied"
+                        ),
+                    }
+                }
+            )
+        )
+        return _Proc()
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.shutil.which",
+        lambda name: "/usr/local/bin/harbor",
+    )
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    runner = HarborRunner(jobs_dir=jobs_dir)
+
+    with pytest.raises(HarborPrebuiltImageMissingError) as exc_info:
+        await runner.run(task_dir, "provider/model")
+
+    assert "harbor-prebuilt:task-demo" in str(exc_info.value)
+    assert "official SkillFlow quick start requires the base image" in str(
+        exc_info.value
+    )
+    assert "uv run medcoevo build-base-image" in str(exc_info.value)
+    assert "task-image prebuild is optional" in str(exc_info.value)
+    assert captured_commands == [
+        [
+            "/usr/local/bin/harbor",
+            "run",
+            "-p",
+            str(task_dir),
+            "-a",
+            "hermes",
+            "-m",
+            "provider/model",
+            "-o",
+            str(jobs_dir),
+            "--yes",
+        ]
+    ]
+    assert "OPENAI_API_KEY" not in captured_envs[0]
 
 
 def _write_task(task_dir: Path, *, family: str) -> None:

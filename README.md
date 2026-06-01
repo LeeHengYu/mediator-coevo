@@ -142,6 +142,12 @@ planner, executor, mediator, and judge loop. It emits task artifacts, builds a
 per-iteration subscription board, and renders selected cross-task artifacts into
 planner context according to the configured policy.
 
+Diffusion artifact emission is controlled by `diffusion.enabled`. Rendering
+those artifacts into another task's planner context also requires
+`experiment.allow_cross_task_feedback = true`, a non-`none` policy, and an
+iteration number. Eligible artifacts must come from a different task and a
+prior source iteration.
+
 Current diffusion policy values:
 
 - `none`: do not render diffusion context.
@@ -158,6 +164,11 @@ family rankings, metadata, task resources, output shape, and instruction text.
 Same-family edges flow only from earlier to later ranked tasks; cross-family
 edges use lower-weight semantic similarity. It writes profiles, edge weights,
 thresholds, kept/cut edges, and connected components for later inspection.
+
+When `medcoevo run` starts with `diffusion.enabled = true` and
+`diffusion.graph` set to `task_similarity` or `precomputed_similarity`, it
+materializes run-local graph artifacts under `task-graph/` using the configured
+local SkillFlow task cache and the default edge threshold `0.05`.
 
 ### What Is Not GRPO
 
@@ -177,11 +188,12 @@ repeated same-task, group-relative comparisons over many iterations.
 - `uv`
 - Harbor CLI on `PATH`
 - Docker for local Harbor execution
-- `OPENROUTER_API_KEY` for planner, mediator, and judge calls
+- `OPENROUTER_API_KEY` for planner, mediator, judge, and the Hermes executor
 
-The default executor Harbor agent is `nop`, which is useful for local smoke
-validation and parser checks. Configure `executor_runtime.agent_name` in
-`config/default.toml` when using an agent that edits task files.
+MedCoevo always runs SkillFlow tasks through Harbor's `hermes` agent. The
+executor agent is not configurable in `config/default.toml`; local Harbor
+subprocesses deliberately drop `OPENAI_API_KEY` so Hermes routes through
+`OPENROUTER_API_KEY`.
 
 ## Quick Start
 
@@ -190,6 +202,16 @@ Inspect the CLI:
 ```bash
 uv run medcoevo --help
 ```
+
+Build the required SkillFlow base image. This wraps the upstream
+`docker/harbor-cli-base/build.sh` quick-start step:
+
+```bash
+uv run medcoevo build-base-image
+```
+
+SkillFlow's task-image prebuild script is optional upstream and is not part of
+the default MedCoevo setup path.
 
 Run a short local SkillFlow smoke experiment:
 
@@ -200,6 +222,24 @@ uv run medcoevo run \
   --condition no_feedback \
   --skill-updates none \
   --run-id smoke
+```
+
+Run the current Hermes-backed Weighted-Risk-Assessment diffusion experiment:
+
+```bash
+uv run medcoevo run \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --condition no_feedback \
+  --skill-updates none \
+  --coevo-interval 99 \
+  --advisor-buffer-max 99 \
+  --diffusion-enabled \
+  --diffusion-policy top_k_similarity \
+  --diffusion-graph task_similarity \
+  --diffusion-max-artifacts 3 \
+  --diffusion-top-k-neighbors 3 \
+  --run-id all-wra-top-k-similarity-hermes
 ```
 
 Experiment outputs are written under:
@@ -228,6 +268,7 @@ uv run medcoevo run
 uv run medcoevo matrix
 uv run medcoevo inspect
 uv run medcoevo create-graph
+uv run medcoevo build-base-image
 uv run medcoevo list
 uv run medcoevo sync
 ```
@@ -261,11 +302,29 @@ Core run options:
 | `--skill-updates` | config value | Which skill families may be committed. |
 | `--advisor-buffer-max` | config value | Executor proposal batch size override. |
 | `--coevo-interval` | config value | Planner/Mediator reflection interval override. |
+| `--diffusion-enabled`, `--no-diffusion-enabled` | config value | Override diffusion emission and routing. |
+| `--diffusion-policy` | config value | Override artifact selection policy. |
+| `--diffusion-graph` | config value | Override graph policy/name. |
+| `--diffusion-max-artifacts` | config value | Maximum artifacts rendered for a target context. |
+| `--diffusion-top-k-neighbors` | config value | Neighbor cap for `top_k_similarity`. |
+| `--harbor-agent-setup-timeout-multiplier` | config value | Forward a Harbor setup timeout multiplier for slow agent setup. |
 | `--run-id` | auto suffix | Optional run id suffix for the timestamp-prefixed output directory. |
 | `--config-dir` | `config/` | Directory containing `default.toml`. |
 | `--cloud` | false | Run Harbor jobs on the configured GCP VM. |
 | `--cloud-env-file` | `.env` | Dotenv file containing GCP VM Harbor settings. |
 | `--verbose`, `-v` | false | Enable debug logging. |
+
+Diffusion override values:
+
+- `--diffusion-policy` accepts `none`, `capped_broadcast`, `random_k`, or
+  `top_k_similarity`.
+- `--diffusion-graph none` records broadcast-style snapshots for non-graph
+  policies.
+- `--diffusion-graph task_similarity` and
+  `--diffusion-graph precomputed_similarity` use run-local precomputed
+  similarity artifacts when graph-aware diffusion is enabled.
+- `--diffusion-max-artifacts` and `--diffusion-top-k-neighbors` must be at
+  least `1`.
 
 Feedback conditions:
 
@@ -287,6 +346,24 @@ Skill update values:
 - comma-separated role combinations such as `executor,planner`
 
 `none` and `all` cannot be combined with other values.
+
+Current full-family experiment command:
+
+```bash
+uv run medcoevo run \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --condition no_feedback \
+  --skill-updates none \
+  --coevo-interval 99 \
+  --advisor-buffer-max 99 \
+  --diffusion-enabled \
+  --diffusion-policy top_k_similarity \
+  --diffusion-graph task_similarity \
+  --diffusion-max-artifacts 3 \
+  --diffusion-top-k-neighbors 3 \
+  --run-id all-wra-top-k-similarity-hermes
+```
 
 ## `matrix`
 
@@ -314,6 +391,11 @@ Baseline rows:
 Each row gets an isolated copy of the skill tree under its experiment
 directory.
 
+`matrix` accepts the same task selectors as `run`, plus `--iterations`,
+`--seed`, `--coevo-interval`, `--advisor-buffer-max`, the diffusion override
+options, `--config-dir`, and `--verbose`. Condition and skill-update settings
+come from the fixed baseline presets and are not CLI options on `matrix`.
+
 ## `inspect`
 
 Inspect the newest experiment:
@@ -335,7 +417,10 @@ uv run medcoevo inspect --json
 ```
 
 `inspect` understands both single-run directories and baseline matrix
-directories.
+directories. For runs with diffusion output it reports artifact counts,
+rendered subscription counts, and graph snapshot counts. `--config-dir` is used
+only when `inspect` needs to locate the newest experiment from the configured
+`paths.data_dir`.
 
 Audit skill-update provenance, adjacent reward effects, delayed Mediator report
 effects, committed-update ledger entries, rejected reflection evidence, diff
@@ -358,6 +443,33 @@ uv run medcoevo create-graph \
 
 The graph artifacts include task profiles, directed edge components, score
 weights, active thresholds, kept/cut edges, and connected components.
+
+`create-graph` options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--threshold` | `0.05` | Minimum similarity score required to keep an edge. |
+| `--tasks-root` | `benchmarks/skillflow/tasks` | Local SkillFlow task directory to analyze. |
+| `--output-dir` | `data/task_graphs/skillflow-local` | Directory where JSON graph artifacts are written. |
+
+The command writes `task_profiles.json`, `pairwise_similarity.json`, and
+`graph_summary.json`.
+
+## `build-base-image`
+
+Build the required SkillFlow Harbor CLI base image:
+
+```bash
+uv run medcoevo build-base-image
+```
+
+Options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--base-image-tag` | `skillflow/harbor-cli-base:ubuntu24.04` | Docker tag for the base image. |
+| `--dry-run` | false | Print the build command without running it. |
+| `--verbose`, `-v` | false | Enable debug logging. |
 
 ## `sync`
 
@@ -394,6 +506,26 @@ IDs are available directly under `tasks/<Family>/<Task>/`:
 uv run medcoevo run --task Distribution-Center-Auditing/harbor_returns_disposition_audit
 ```
 
+`list` options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--family` | none | Filter task IDs by SkillFlow family. |
+| `--local` | false | List cached local tasks instead of remote Hugging Face tasks. |
+| `--dataset` | `zhang-ziao/SkillFlow-Task` | Hugging Face dataset ID for remote listing. |
+| `--config-dir` | `config/` | Directory containing `default.toml`. |
+| `--verbose`, `-v` | false | Enable debug logging. |
+
+`sync` options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--tasks`, `--task`, `-t` | all remote test tasks | Task IDs to download; repeat, comma-separate, or pass `all`. |
+| `--output-dir` | configured local cache | Destination tasks directory. |
+| `--dataset` | `zhang-ziao/SkillFlow-Task` | Hugging Face dataset ID. |
+| `--config-dir` | `config/` | Directory containing `default.toml`. |
+| `--verbose`, `-v` | false | Enable debug logging. |
+
 ## Cloud VM Harbor Setup
 
 `medcoevo run --cloud` keeps the co-evolution control plane on the local
@@ -417,7 +549,8 @@ The local machine needs:
 
 - `gcloud` installed and authenticated for the configured VM.
 - `OPENROUTER_API_KEY` exported locally for planner, mediator, and judge model
-  calls.
+  calls. The remote Hermes executor reads its OpenRouter key from the configured
+  Secret Manager secret.
 
 The VM must have Docker, `uv`, Harbor, and `gcloud` on `PATH`, plus access to
 the configured OpenRouter secret when remote execution reads credentials from
@@ -442,6 +575,7 @@ data/experiments/<timestamp>-<run-id>/
 |-- jobs/
 |-- skills/
 |-- skills_snapshots/
+|-- task-graph/
 `-- diffusion/
 ```
 
@@ -460,8 +594,20 @@ Important files:
   reflection candidates.
 - `skills/`: run-local skill copy.
 - `skills_snapshots/`: committed skill snapshots.
+- `task-graph/`: run-local precomputed graph artifacts when graph-aware
+  diffusion is enabled for `run`.
 - `diffusion/`: graph diffusion artifacts and rendered subscriptions when
   enabled.
+
+Diffusion output includes:
+
+- `diffusion/artifacts/*.json`: emitted low-risk source artifacts such as
+  failure signatures, mediator report summaries, debug hints, and regression
+  warnings.
+- `diffusion/graph_snapshots/*.json`: per-iteration graph snapshots used for
+  artifact selection.
+- `diffusion/diffused_records.jsonl`: audit ledger for eligible, selected, and
+  rendered artifact routes.
 
 Executor policy observability fields in `metrics.jsonl`:
 
@@ -472,6 +618,16 @@ Executor policy observability fields in `metrics.jsonl`:
   alongside the policy.
 - `verifier_contract_kind`: the SkillFlow verifier contract shown to the
   Executor.
+
+Diffusion observability fields in `metrics.jsonl`:
+
+- `diffusion_enabled`, `diffusion_policy`, and `diffusion_graph`.
+- `graph_snapshot_id`.
+- `diffusion_artifacts_eligible`, `diffusion_artifacts_selected`, and
+  `diffusion_artifacts_rendered`.
+- `diffusion_context_tokens` and `source_task_ids`.
+- `reward_after_diffusion_context` and `regression_after_diffusion_context`
+  when rendered diffusion context was present.
 
 ## Configuration
 
@@ -487,8 +643,9 @@ The current config controls:
 - prompt and completion token budgets;
 - default iteration cadence;
 - skill update and validation defaults;
+- diffusion emission, selection, and graph-routing settings;
 - local output and benchmark paths;
-- Harbor runtime settings;
+- Hermes/Harbor runtime settings;
 - SkillFlow dataset synchronization settings.
 
 CLI options override the loaded config for a single run. The resolved config is
@@ -499,15 +656,22 @@ otherwise the command fails before runtime setup and names the missing setting.
 Current task/runtime defaults include:
 
 ```toml
+[diffusion]
+enabled = false
+policy = "none"
+graph = "none"
+max_artifacts = 3
+top_k_neighbors = 3
+
 [paths]
 benchmarks_dir = "benchmarks/skillflow"
 
 [executor_runtime]
-agent_name = "nop"
 task_dirs = ["tasks"]
 sync_enabled = false
 dataset = "zhang-ziao/SkillFlow-Task"
 dataset_repo_type = "dataset"
+harbor_agent_setup_timeout_multiplier = 3.0
 
 [experiment.skill_validation]
 sample_size = 3
@@ -554,6 +718,19 @@ Missing SkillFlow task
 Use `uv run medcoevo list`, download with `uv run medcoevo sync --tasks ...`,
 select an existing local `--task`, or add a task under
 `benchmarks/skillflow/tasks/`.
+
+Missing SkillFlow prebuilt image
+
+MedCoevo's required setup only builds the SkillFlow base image:
+
+```bash
+uv run medcoevo build-base-image
+```
+
+If a task declares `[environment].docker_image`, that task is opting into
+SkillFlow's optional task-image prebuild path. Either remove the stale
+`docker_image` field so Harbor builds from the task Dockerfile, or run the
+optional upstream task prebuilder yourself.
 
 Invalid experiment design
 

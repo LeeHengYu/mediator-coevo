@@ -29,6 +29,7 @@ from mediated_coevo.main import (
     ExperimentFactory,
     _apply_experiment_settings,
     _build_matrix_runtimes,
+    _materialize_task_graph_for_diffusion,
 )
 from mediated_coevo.experiment.records import build_coevolution_record
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
@@ -49,6 +50,31 @@ def _config() -> Config:
         ),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
+    )
+
+
+def _write_graph_task(task_dir, *, family: str, tags: list[str]) -> None:
+    task_dir.mkdir(parents=True)
+    (task_dir / "instruction.md").write_text(
+        "Read workbook.xlsx and write result.xlsx with spreadsheet formulas."
+    )
+    (task_dir / "task.toml").write_text(
+        "\n".join(
+            [
+                'schema_version = "1.2"',
+                "",
+                "[task]",
+                f'name = "{family}/{task_dir.name}"',
+                "",
+                "[metadata]",
+                f'family = "{family}"',
+                'category = "spreadsheet-formula-reuse"',
+                "tags = [" + ", ".join(f'"{tag}"' for tag in tags) + "]",
+                "",
+                "[environment]",
+                "build_timeout_sec = 600.0",
+            ]
+        )
     )
 
 
@@ -100,6 +126,36 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
     assert config.diffusion.max_artifacts == 5
     assert config.diffusion.top_k_neighbors == 2
     assert config.executor_runtime.harbor_agent_setup_timeout_multiplier == 2.5
+
+
+def test_materialize_task_graph_for_similarity_diffusion(tmp_path):
+    tasks_root = tmp_path / "benchmarks" / "tasks"
+    _write_graph_task(
+        tasks_root / "family-a" / "task-one",
+        family="family-a",
+        tags=["excel", "formulas"],
+    )
+    _write_graph_task(
+        tasks_root / "family-a" / "task-two",
+        family="family-a",
+        tags=["excel", "statistics"],
+    )
+    config = _config()
+    config.diffusion.enabled = True
+    config.diffusion.graph = "task_similarity"
+    repo = SkillFlowRepository(root_dir=tmp_path / "benchmarks", task_dirs=["tasks"])
+
+    _materialize_task_graph_for_diffusion(
+        config=config,
+        experiment_dir=tmp_path / "experiment",
+        benchmark_repo=repo,
+    )
+
+    graph_dir = tmp_path / "experiment" / "task-graph"
+    assert (graph_dir / "task_profiles.json").is_file()
+    summary = json.loads((graph_dir / "graph_summary.json").read_text())
+    assert summary["task_count"] == 2
+    assert summary["active_threshold"] == 0.05
 
 
 def test_baseline_preset_mapping_matches_matrix_plan():

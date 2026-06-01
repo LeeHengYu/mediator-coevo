@@ -1015,6 +1015,95 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
 
 
 @pytest.mark.asyncio
+async def test_top_k_similarity_prepares_per_target_subscription_board(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.experiment.allow_cross_task_feedback = True
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "top_k_similarity"
+    orch.config.diffusion.graph = "task_similarity"
+    orch.config.diffusion.max_artifacts = 3
+    orch.config.diffusion.top_k_neighbors = 1
+    orch._diffusion_target_task_ids = ["task-A", "task-B", "task-C"]
+    _write_weighted_graph_artifacts(
+        tmp_path / "task-graph",
+        task_ids=["task-A", "task-B", "task-C"],
+        weighted_pairs=[
+            ("task-B", "task-A", 0.9),
+            ("task-C", "task-A", 0.4),
+            ("task-C", "task-B", 0.8),
+            ("task-A", "task-B", 0.6),
+            ("task-A", "task-C", 0.7),
+            ("task-B", "task-C", 0.5),
+        ],
+    )
+    orch._ensure_diffusion_runtime_state()
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-a-artifact",
+        source_task_id="task-A",
+        content="hint from task-A",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-artifact",
+        source_task_id="task-B",
+        content="hint from task-B",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-c-artifact",
+        source_task_id="task-C",
+        content="hint from task-C",
+    )
+
+    context_a = await orch._build_prior_context(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+    context_b = await orch._build_prior_context(
+        "learned_mediator",
+        "task-B",
+        current_iteration=1,
+    )
+    context_c = await orch._build_prior_context(
+        "learned_mediator",
+        "task-C",
+        current_iteration=1,
+    )
+
+    assert context_a is not None
+    assert "hint from task-B" in context_a
+    assert "hint from task-C" not in context_a
+    assert context_b is not None
+    assert "hint from task-C" in context_b
+    assert "hint from task-A" not in context_b
+    assert context_c is not None
+    assert "hint from task-A" in context_c
+    assert "hint from task-B" not in context_c
+
+    records = orch._diffusion_store.query_diffused_records(recent=None)
+    selected_by_target = {
+        record.target_task_id: record.source_task_id
+        for record in records
+        if record.selected and record.rendered
+    }
+    assert selected_by_target == {
+        "task-A": "task-B",
+        "task-B": "task-C",
+        "task-C": "task-A",
+    }
+    assert all(
+        record.metadata.get("edge_rank") == 1
+        for record in records
+        if record.selected
+    )
+    assert sum(1 for record in records if record.eligible) == 6
+    assert sum(1 for record in records if record.selected) == 3
+    assert sum(1 for record in records if record.rendered) == 3
+
+
+@pytest.mark.asyncio
 async def test_diffusion_subscription_board_consumes_target_entry(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
     orch.config.experiment.allow_cross_task_feedback = True

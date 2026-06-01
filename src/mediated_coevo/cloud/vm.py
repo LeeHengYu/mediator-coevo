@@ -21,8 +21,14 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from mediated_coevo.benchmarks import (
+    HERMES_AGENT_NAME,
+    HarborPrebuiltImageMissingError,
     HarborRunResult,
     HarborTimeoutError,
+)
+from mediated_coevo.benchmarks.skillflow import (
+    harbor_missing_prebuilt_image_message,
+    harbor_run_missing_prebuilt_image,
 )
 
 
@@ -197,7 +203,6 @@ def build_remote_harbor_script(
     *,
     config: GCPVMConfig,
     remote_run_dir: str,
-    agent_name: str,
     model: str,
     harbor_timeout_sec: float,
     agent_setup_timeout_multiplier: float | None,
@@ -226,7 +231,7 @@ def build_remote_harbor_script(
         "-p",
         "$TASK_DIR",
         "-a",
-        agent_name,
+        HERMES_AGENT_NAME,
         "-m",
         model,
         "-o",
@@ -256,6 +261,7 @@ def build_remote_harbor_script(
             'mkdir -p "$TASK_DIR" "$JOBS_DIR"',
             'tar -xzf "$TASK_TAR" -C "$TASK_DIR"',
             f'export OPENROUTER_API_KEY="$({secret_command})"',
+            "unset OPENAI_API_KEY",
             "set +e",
             (
                 'timeout --kill-after=30s "${HARBOR_TIMEOUT_SEC}s" '
@@ -280,14 +286,12 @@ class RemoteHarborRunner:
         self,
         *,
         config: GCPVMConfig,
-        agent_name: str,
         jobs_dir: Path,
         timeout_sec: float = 1800.0,
         agent_setup_timeout_multiplier: float | None = None,
         command_runner: AsyncCommandRunner | None = None,
     ) -> None:
         self.config = config
-        self.agent_name = agent_name
         self.jobs_dir = jobs_dir
         self.timeout_sec = timeout_sec
         self.agent_setup_timeout_multiplier = agent_setup_timeout_multiplier
@@ -295,6 +299,18 @@ class RemoteHarborRunner:
         self._command_runner = command_runner or _run_local_command
 
     async def run(self, task_dir: Path, model: str) -> HarborRunResult:
+        result = await self._run_once(task_dir, model)
+        if harbor_run_missing_prebuilt_image(result):
+            raise HarborPrebuiltImageMissingError(
+                harbor_missing_prebuilt_image_message(result, task_dir)
+            )
+        return result
+
+    async def _run_once(
+        self,
+        task_dir: Path,
+        model: str,
+    ) -> HarborRunResult:
         run_id = _new_remote_run_id()
         local_result_dir = self.jobs_dir / run_id
         local_result_dir.mkdir(parents=True, exist_ok=True)
@@ -328,7 +344,6 @@ class RemoteHarborRunner:
                         build_remote_harbor_script(
                             config=self.config,
                             remote_run_dir=remote_run_dir,
-                            agent_name=self.agent_name,
                             model=model,
                             harbor_timeout_sec=self.timeout_sec,
                             agent_setup_timeout_multiplier=(

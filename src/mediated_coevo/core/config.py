@@ -176,7 +176,8 @@ class PathsConfig(BaseModel):
 
 
 class ExecutorRuntimeConfig(BaseModel):
-    agent_name: str = "nop"
+    model_config = ConfigDict(extra="forbid")
+
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     injected_skill_name: str = "executor"

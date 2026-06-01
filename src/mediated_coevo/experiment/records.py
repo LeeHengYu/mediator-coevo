@@ -9,7 +9,7 @@ from mediated_coevo.analysis.metrics import (
     metric_verifier_status,
     token_totals_by_agent,
 )
-from mediated_coevo.benchmarks import SKILLFLOW_VERIFIER_TYPE
+from mediated_coevo.benchmarks import HERMES_AGENT_NAME, SKILLFLOW_VERIFIER_TYPE
 from mediated_coevo.core.config import Config
 from mediated_coevo.core.utils import as_mapping, as_nonempty_string
 from mediated_coevo.experiment.conditions import ConditionName
@@ -188,7 +188,7 @@ def runtime_record_fields(config: Config) -> dict[str, Any]:
     return {
         "seed": config.experiment.seed,
         "models": config.models.model_dump(exclude_none=True),
-        "executor_agent": config.executor_runtime.agent_name,
+        "executor_agent": HERMES_AGENT_NAME,
     }
 
 

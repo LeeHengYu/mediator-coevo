@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLFLOW_DATASET = "zhang-ziao/SkillFlow-Task"
 SKILLFLOW_VERIFIER_TYPE = "skillflow_harbor"
+HERMES_AGENT_NAME = "hermes"
 HF_TEST_TASKS_ROOT = "test_tasks"
 HF_FAMILY_RANKING_FILENAME = "ALL_TASK_DIFFICULTY_RANKING.json"
 
@@ -39,6 +41,10 @@ class HarborNotFoundError(RuntimeError):
 
 class HarborTimeoutError(RuntimeError):
     """Raised when a Harbor subprocess exceeds the configured timeout."""
+
+
+class HarborPrebuiltImageMissingError(RuntimeError):
+    """Raised when a task expects a prebuilt Harbor image that is not local."""
 
 
 class SkillFlowSyncError(RuntimeError):
@@ -354,12 +360,10 @@ class HarborRunner:
 
     def __init__(
         self,
-        agent_name: str,
         jobs_dir: Path,
         timeout_sec: float = 1800.0,
         agent_setup_timeout_multiplier: float | None = None,
     ) -> None:
-        self.agent_name = agent_name
         self.jobs_dir = jobs_dir
         self.timeout_sec = timeout_sec
         self.agent_setup_timeout_multiplier = agent_setup_timeout_multiplier
@@ -379,6 +383,18 @@ class HarborRunner:
         return self._harbor_path
 
     async def run(self, task_dir: Path, model: str) -> HarborRunResult:
+        result = await self._run_once(task_dir, model)
+        if harbor_run_missing_prebuilt_image(result):
+            raise HarborPrebuiltImageMissingError(
+                harbor_missing_prebuilt_image_message(result, task_dir)
+            )
+        return result
+
+    async def _run_once(
+        self,
+        task_dir: Path,
+        model: str,
+    ) -> HarborRunResult:
         harbor = self._resolve_harbor()
         before = {p.resolve() for p in self.jobs_dir.iterdir() if p.is_dir()}
         command = [
@@ -387,7 +403,7 @@ class HarborRunner:
             "-p",
             str(task_dir),
             "-a",
-            self.agent_name,
+            HERMES_AGENT_NAME,
             "-m",
             model,
             "-o",
@@ -402,12 +418,15 @@ class HarborRunner:
                 ]
             )
         logger.info("Running SkillFlow Harbor task: %s", " ".join(command))
+        env = os.environ.copy()
+        env.pop("OPENAI_API_KEY", None)
 
         try:
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
                 start_new_session=True,
             )
         except FileNotFoundError as exc:
@@ -484,6 +503,23 @@ class SkillFlowTraceParser:
             if self.run_result.job_dir is not None
             else None
         )
+        exception_info = as_mapping(trial_result_json.get("exception_info"))
+        if exception_info:
+            return ExecutionTrace(
+                task_id=self.task_id,
+                iteration=self.iteration,
+                duration_sec=self.duration_sec,
+                exit_code=self.run_result.returncode,
+                stdout=self.run_result.stdout,
+                stderr=self.run_result.stderr,
+                harbor_paths=_harbor_paths(self.run_result),
+                status="env_failure",
+                error_kind=_trial_exception_error_kind(exception_info),
+                error_detail=dict(exception_info),
+                harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
+                run_id=as_nonempty_string(job_result_json.get("id")),
+                harbor_metadata=_harbor_metadata(trial_result_json),
+            )
         reward = _parse_reward(job_result_json, trial_result_json, self.run_result)
         if reward is None:
             return ExecutionTrace(
@@ -720,6 +756,73 @@ def _load_json_or_empty(path: Path | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         logger.warning("Malformed Harbor JSON artifact: %s", path)
         return {}
+
+
+def _trial_exception_error_kind(exception_info: Mapping[str, Any]) -> str:
+    message = str(exception_info.get("exception_message") or "").lower()
+    traceback = str(exception_info.get("exception_traceback") or "").lower()
+    detail = f"{message}\n{traceback}"
+    if "pull access denied" in detail and "prebuilt" in detail:
+        return "missing_prebuilt_image"
+    if "docker compose command failed" in detail:
+        return "docker_compose_failed"
+    return "harbor_trial_exception"
+
+
+def harbor_run_missing_prebuilt_image(run_result: HarborRunResult) -> bool:
+    """Return True when Harbor failed only because a prebuilt image is missing."""
+    if run_result.trial_dir is None:
+        return False
+    trial_result_json = _load_json_or_empty(run_result.trial_dir / "result.json")
+    exception_info = as_mapping(trial_result_json.get("exception_info"))
+    if exception_info:
+        return _trial_exception_error_kind(exception_info) == "missing_prebuilt_image"
+    combined_output = f"{run_result.stdout}\n{run_result.stderr}".lower()
+    return "pull access denied" in combined_output and "prebuilt" in combined_output
+
+
+def harbor_missing_prebuilt_image_message(
+    run_result: HarborRunResult,
+    task_dir: Path,
+) -> str:
+    """Return an actionable error for missing prebuilt Harbor images."""
+    image_name = _missing_prebuilt_image_name(run_result)
+    image_text = f" `{image_name}`" if image_name is not None else ""
+    return (
+        f"Prebuilt Harbor image{image_text} is missing for SkillFlow task workspace "
+        f"{task_dir}. The official SkillFlow quick start requires the base image "
+        "`./docker/harbor-cli-base/build.sh`; task-image prebuild is optional. "
+        "Run `uv run medcoevo build-base-image` for the required base image. "
+        "If this task intentionally declares `[environment].docker_image`, either "
+        "remove a stale `docker_image` field so Harbor builds from the task "
+        "Dockerfile, or run SkillFlow's optional task prebuilder manually and "
+        "re-run after `docker image inspect <image>` succeeds."
+    )
+
+
+_MISSING_PREBUILT_IMAGE_RE = re.compile(
+    r"(?:Image\s+|pull access denied for\s+)"
+    r"(?P<image>[\w./:-]*prebuilt[\w./:-]*)",
+    re.IGNORECASE,
+)
+
+
+def _missing_prebuilt_image_name(run_result: HarborRunResult) -> str | None:
+    trial_result_json = {}
+    if run_result.trial_dir is not None:
+        trial_result_json = _load_json_or_empty(run_result.trial_dir / "result.json")
+    exception_info = as_mapping(trial_result_json.get("exception_info"))
+    parts = [
+        str(exception_info.get("exception_message") or ""),
+        str(exception_info.get("exception_traceback") or ""),
+        run_result.stdout,
+        run_result.stderr,
+    ]
+    for text in parts:
+        match = _MISSING_PREBUILT_IMAGE_RE.search(text)
+        if match is not None:
+            return match.group("image").rstrip(",.")
+    return None
 
 
 def _parse_reward(

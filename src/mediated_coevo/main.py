@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import random
+import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +40,8 @@ from mediated_coevo.analysis.task_similarity import (
 )
 from mediated_coevo.benchmarks import (
     DEFAULT_SKILLFLOW_DATASET,
+    HERMES_AGENT_NAME,
+    HarborPrebuiltImageMissingError,
     HarborRunner,
     SkillFlowRepository,
     SkillFlowSyncConfig,
@@ -80,6 +84,8 @@ console = Console()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VALID_CONDITION_NAMES = set(get_args(ConditionName))
 VALID_DIFFUSION_POLICY_NAMES = set(get_args(DiffusionPolicyName))
+TASK_SIMILARITY_GRAPH_NAMES = frozenset({"task_similarity", "precomputed_similarity"})
+DEFAULT_TASK_GRAPH_EDGE_THRESHOLD = 0.05
 
 
 @dataclass(frozen=True)
@@ -478,13 +484,11 @@ def _build_harbor_runner(
     if remote_harbor_config is not None:
         return RemoteHarborRunner(
             config=remote_harbor_config,
-            agent_name=config.executor_runtime.agent_name,
             jobs_dir=jobs_dir,
             timeout_sec=timeout_sec,
             agent_setup_timeout_multiplier=setup_timeout_multiplier,
         )
     return HarborRunner(
-        agent_name=config.executor_runtime.agent_name,
         jobs_dir=jobs_dir,
         timeout_sec=timeout_sec,
         agent_setup_timeout_multiplier=setup_timeout_multiplier,
@@ -545,6 +549,21 @@ def _prepare_llm_credentials_or_exit(config: Config) -> Config:
         console.print(f"[bold red]ERROR:[/] {exc}")
         raise typer.Exit(code=1) from exc
     return config
+
+
+def _run_prebuild_step_or_exit(command: list[str], *, label: str) -> None:
+    console.print(f"[bold]{label}:[/] {shlex.join(command)}")
+    try:
+        completed = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
+    except OSError as exc:
+        console.print(f"[bold red]ERROR:[/] {label} failed to start: {exc}")
+        raise typer.Exit(code=1) from exc
+    if completed.returncode != 0:
+        console.print(
+            f"[bold red]ERROR:[/] {label} failed with exit code "
+            f"{completed.returncode}."
+        )
+        raise typer.Exit(code=completed.returncode)
 
 
 def _print_result_summary(
@@ -629,6 +648,18 @@ def _annotate_judge_rewards_or_exit(
         raise typer.Exit(code=1) from exc
     except Exception as exc:
         console.print(f"[bold red]ERROR:[/] Judge reward annotation failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+def _run_experiment_or_exit(
+    runtime: ExperimentRuntime,
+    task_ids: list[str],
+    iterations: int,
+) -> list[IterationRecord]:
+    try:
+        return asyncio.run(runtime.orchestrator.run_experiment(task_ids, iterations))
+    except HarborPrebuiltImageMissingError as exc:
+        console.print(f"[bold red]ERROR:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
 
@@ -879,6 +910,12 @@ def _print_experiment_controls(config: Config) -> None:
         f"graph={config.diffusion.graph}"
     )
     console.print("[bold]Skill validation:[/] required")
+    console.print(
+        "[bold]Harbor:[/] "
+        f"agent={HERMES_AGENT_NAME} "
+        "base_image=required "
+        "task_prebuild=optional"
+    )
 
 
 def _timestamped_run_id(suffix: str) -> str:
@@ -978,6 +1015,30 @@ def _build_runtime(
     )
 
 
+def _materialize_task_graph_for_diffusion(
+    *,
+    config: Config,
+    experiment_dir: Path,
+    benchmark_repo: SkillFlowRepository,
+) -> None:
+    """Write task graph artifacts when graph-aware diffusion is enabled."""
+    if (
+        not config.diffusion.enabled
+        or config.diffusion.graph not in TASK_SIMILARITY_GRAPH_NAMES
+    ):
+        return
+
+    output_dir = experiment_dir / "task-graph"
+    if output_dir.exists():
+        return
+
+    precompute = build_task_graph_precompute(
+        benchmark_repo.default_local_cache_dir(),
+        edge_score_threshold=DEFAULT_TASK_GRAPH_EDGE_THRESHOLD,
+    )
+    write_task_graph_artifacts(precompute, output_dir)
+
+
 def _run_skillflow_experiment(
     *,
     config: Config,
@@ -1006,6 +1067,15 @@ def _run_skillflow_experiment(
         run_id=run_id,
     )
     benchmark_repo = _build_benchmark_repo(PROJECT_ROOT, config)
+    try:
+        _materialize_task_graph_for_diffusion(
+            config=config,
+            experiment_dir=experiment_dir,
+            benchmark_repo=benchmark_repo,
+        )
+    except (OSError, ValueError) as exc:
+        console.print(f"[bold red]ERROR:[/] failed to create diffusion task graph: {exc}")
+        raise typer.Exit(code=1) from exc
     runtime = _build_runtime(
         config=config,
         condition_name=condition_name,
@@ -1035,9 +1105,7 @@ def _run_skillflow_experiment(
         f"judge={config.models.judge}"
     )
     console.print(f"\n[bold green]Starting experiment:[/] {runtime.experiment_dir}\n")
-    records = asyncio.run(
-        runtime.orchestrator.run_experiment(selection.task_ids, iterations)
-    )
+    records = _run_experiment_or_exit(runtime, selection.task_ids, iterations)
     _write_and_print_result_summary(
         records=records,
         data_dir=runtime.experiment_dir,
@@ -1375,8 +1443,10 @@ def matrix(
             f"(condition={row_config.experiment.condition_name}, "
             f"skill_updates={row_config.experiment.skill_updates.model_dump()})"
         )
-        records = asyncio.run(
-            row.runtime.orchestrator.run_experiment(selection.task_ids, iterations)
+        records = _run_experiment_or_exit(
+            row.runtime,
+            selection.task_ids,
+            iterations,
         )
         _write_and_print_result_summary(
             records=records,
@@ -1420,7 +1490,7 @@ def inspect_experiment(
 @app.command("create-graph")
 def create_graph(
     threshold: float = typer.Option(
-        0.05,
+        DEFAULT_TASK_GRAPH_EDGE_THRESHOLD,
         "--threshold",
         min=0.0,
         help="Minimum similarity score required to keep an edge.",
@@ -1453,6 +1523,35 @@ def create_graph(
     console.print(f"[bold]Kept edges:[/] {precompute.kept_edge_count}")
     console.print(f"[bold]Cut edges:[/] {precompute.cut_edge_count}")
     console.print(f"[bold]Output:[/] {output_dir}")
+
+
+@app.command("build-base-image")
+def build_skillflow_base_image(
+    base_image_tag: str = typer.Option(
+        "skillflow/harbor-cli-base:ubuntu24.04",
+        help="Docker tag to build for the SkillFlow Harbor CLI base image.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        help="Show the base image build command without running it.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Build the required SkillFlow Harbor CLI base image."""
+    _setup_logging(verbose)
+    build_script = PROJECT_ROOT / "docker" / "harbor-cli-base" / "build.sh"
+
+    if not build_script.is_file():
+        console.print(f"[bold red]ERROR:[/] missing SkillFlow build script: {build_script}")
+        raise typer.Exit(code=1)
+
+    base_command = ["bash", str(build_script), base_image_tag]
+    if dry_run:
+        console.print(f"[bold]Would build base image:[/] {shlex.join(base_command)}")
+        console.print("[bold green]SkillFlow base image dry run complete.[/]")
+    else:
+        _run_prebuild_step_or_exit(base_command, label="Build SkillFlow base image")
+        console.print("[bold green]SkillFlow base image build complete.[/]")
 
 
 @app.command("sync")
