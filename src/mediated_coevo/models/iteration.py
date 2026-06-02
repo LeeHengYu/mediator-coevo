@@ -44,7 +44,6 @@ class IterationRecord(BaseModel):
     models: dict[str, str] = Field(default_factory=dict)
     executor_agent: str | None = None
     baseline_preset: str | None = None
-    cross_task_feedback_enabled: bool = False
     diffusion_policy: str = "none"
     diffusion_enabled: bool = False
     diffusion_graph: str | None = None

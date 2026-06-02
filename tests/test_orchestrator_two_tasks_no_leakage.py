@@ -164,7 +164,6 @@ async def test_learned_mediator_cross_task_feedback_is_round_causal(tmp_path):
         diffusion=diffusion_config(),
     )
     config.experiment.condition_name = "learned_mediator"
-    config.experiment.allow_cross_task_feedback = True
     config.experiment.coevo_interval = 99
     config.experiment.advisor_buffer_max = 99
     planner = _Planner()
@@ -251,12 +250,20 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
         ("task-A", 1),
         ("task-B", 1),
     ]
-    assert planner.prior_contexts == [
-        ("task-A", 0, None),
-        ("task-B", 0, None),
-        ("task-A", 1, "report for task-A iter 0"),
-        ("task-B", 1, "report for task-B iter 0"),
-    ]
+    contexts = {
+        (task_id, iteration): prior_context
+        for task_id, iteration, prior_context in planner.prior_contexts
+    }
+    assert contexts[("task-A", 0)] is None
+    assert contexts[("task-B", 0)] is None
+    task_a_iter_1 = contexts[("task-A", 1)]
+    task_b_iter_1 = contexts[("task-B", 1)]
+    assert task_a_iter_1 is not None
+    assert "report for task-A iter 0" in task_a_iter_1
+    assert "source_task=task-B iter=0" in task_a_iter_1
+    assert task_b_iter_1 is not None
+    assert "report for task-B iter 0" in task_b_iter_1
+    assert "source_task=task-A iter=0" in task_b_iter_1
 
     tagged_iter_zero = {
         entry.metadata["task_id"]: entry.reward
@@ -440,7 +447,6 @@ async def test_full_traces_cross_task_feedback_is_round_causal(tmp_path):
         diffusion=diffusion_config(),
     )
     config.experiment.condition_name = "full_traces"
-    config.experiment.allow_cross_task_feedback = True
     config.experiment.coevo_interval = 99
     config.experiment.advisor_buffer_max = 99
     planner = _Planner()

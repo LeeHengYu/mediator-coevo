@@ -34,7 +34,7 @@ def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
 
     saved = tomllib.loads((runtime.experiment_dir / "config.toml").read_text())
     assert "shared_notes" not in saved["experiment"]
-    assert saved["experiment"]["allow_cross_task_feedback"] is False
+    assert "allow_cross_task_feedback" not in saved["experiment"]
     assert saved["diffusion"]["enabled"] is False
     assert saved["diffusion"]["policy"] == "none"
     assert saved["diffusion"]["graph"] == "none"

@@ -565,7 +565,6 @@ async def test_feedback_conditions_control_planner_context_and_mediator_calls(
     assert planner.prior_contexts["task-A"] == expected_context
     assert mediator.process_calls == expected_mediator_calls
     assert record.condition_name == condition
-    assert record.cross_task_feedback_enabled is False
     assert record.diffusion_policy == "none"
     assert record.execution_trace is not None
     assert record.execution_trace.iteration == 1
@@ -652,7 +651,7 @@ async def test_withheld_mediator_report_is_recorded_for_reflection(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
+async def test_cross_task_feedback_is_available_and_labeled(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
     orch._released_cross_task_reports_by_task["task-B"] = MediatorReport(
         task_id="task-B",
@@ -660,16 +659,6 @@ async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
         content="cross-task report",
     )
 
-    assert (
-        await orch._build_prior_context(
-            "learned_mediator",
-            "task-A",
-            current_iteration=3,
-        )
-        is None
-    )
-
-    orch.config.experiment.allow_cross_task_feedback = True
     context = await orch._build_prior_context(
         "learned_mediator",
         "task-A",
@@ -678,7 +667,7 @@ async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
 
     assert context is not None
     assert "Explicit Cross-Task Feedback" in context
-    assert "allow_cross_task_feedback=true" in context
+    assert "allow_cross_task_feedback" not in context
     assert "source_task=task-B" in context
     assert "cross-task report" in context
 
@@ -686,7 +675,6 @@ async def test_cross_task_feedback_is_opt_in_and_labeled(tmp_path):
 @pytest.mark.asyncio
 async def test_cross_task_mediator_reports_are_staged_until_next_iteration(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch._staged_cross_task_reports_by_task["task-B"] = MediatorReport(
         task_id="task-B",
         iteration=0,
@@ -714,7 +702,6 @@ async def test_cross_task_mediator_reports_are_staged_until_next_iteration(tmp_p
 @pytest.mark.asyncio
 async def test_cross_task_mediator_reports_exclude_current_iteration(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch._released_cross_task_reports_by_task["task-B"] = MediatorReport(
         task_id="task-B",
         iteration=1,
@@ -763,7 +750,6 @@ async def test_same_task_prior_context_is_unchanged_without_diffusion_integratio
 @pytest.mark.asyncio
 async def test_capped_broadcast_builds_diffused_cross_task_context(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "capped_broadcast"
     orch.config.diffusion.max_artifacts = 1
@@ -802,7 +788,6 @@ async def test_capped_broadcast_builds_diffused_cross_task_context(tmp_path):
 @pytest.mark.asyncio
 async def test_capped_broadcast_excludes_same_task_and_same_iteration_artifacts(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "capped_broadcast"
     orch.config.diffusion.max_artifacts = 3
@@ -844,7 +829,6 @@ async def test_capped_broadcast_excludes_same_task_and_same_iteration_artifacts(
 async def test_random_k_builds_seeded_cross_task_context(tmp_path):
     async def selected_artifacts(run_dir: Path) -> tuple[list[str], str]:
         orch, _, _ = _orchestrator(run_dir, "learned_mediator")
-        orch.config.experiment.allow_cross_task_feedback = True
         orch.config.diffusion.enabled = True
         orch.config.diffusion.policy = "random_k"
         orch.config.diffusion.max_artifacts = 2
@@ -900,7 +884,6 @@ async def test_random_k_builds_seeded_cross_task_context(tmp_path):
 @pytest.mark.asyncio
 async def test_random_k_excludes_same_task_and_same_iteration_artifacts(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "random_k"
     orch.config.diffusion.max_artifacts = 3
@@ -945,7 +928,6 @@ async def test_random_k_excludes_same_task_and_same_iteration_artifacts(tmp_path
 @pytest.mark.asyncio
 async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "top_k_similarity"
     orch.config.diffusion.graph = "task_similarity"
@@ -1017,7 +999,6 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
 @pytest.mark.asyncio
 async def test_top_k_similarity_prepares_per_target_subscription_board(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "top_k_similarity"
     orch.config.diffusion.graph = "task_similarity"
@@ -1106,7 +1087,6 @@ async def test_top_k_similarity_prepares_per_target_subscription_board(tmp_path)
 @pytest.mark.asyncio
 async def test_diffusion_subscription_board_consumes_target_entry(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "capped_broadcast"
     orch.config.diffusion.max_artifacts = 1
@@ -1136,7 +1116,6 @@ async def test_diffusion_subscription_board_queries_artifacts_once_per_iteration
     tmp_path,
 ):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "capped_broadcast"
     orch.config.diffusion.max_artifacts = 1
@@ -1176,7 +1155,6 @@ async def test_diffusion_subscription_board_queries_artifacts_once_per_iteration
 @pytest.mark.asyncio
 async def test_cross_task_full_traces_exclude_target_task(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "full_traces")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.artifact_store.store_trace(
         ExecutionTrace(task_id="task-A", iteration=0, reward=0.1, status="ok")
     )
@@ -1224,7 +1202,6 @@ async def test_full_traces_prior_context_excludes_current_and_future_iterations(
 @pytest.mark.asyncio
 async def test_cross_task_full_traces_respect_round_causality(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "full_traces")
-    orch.config.experiment.allow_cross_task_feedback = True
     orch.artifact_store.store_trace(
         ExecutionTrace(task_id="task-B", iteration=0, reward=0.8, status="ok")
     )

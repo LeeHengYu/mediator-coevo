@@ -276,7 +276,6 @@ def _write_minimal_config(config_dir) -> None:
         advisor_buffer_max = 2
         seed = 42
         condition_name = "learned_mediator"
-        allow_cross_task_feedback = false
 
         [experiment.skill_updates]
         executor = true
@@ -317,7 +316,6 @@ def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
                 "advisor_buffer_max": 2,
                 "seed": 7,
                 "condition_name": "learned_mediator",
-                "allow_cross_task_feedback": False,
                 "skill_updates": {
                     "executor": True,
                     "planner": True,
@@ -354,7 +352,6 @@ def test_load_config_requires_diffusion_policy_from_toml_or_overrides(tmp_path):
         advisor_buffer_max = 2
         seed = 42
         condition_name = "learned_mediator"
-        allow_cross_task_feedback = false
 
         [experiment.skill_updates]
         executor = true
@@ -396,7 +393,6 @@ def test_load_config_requires_diffusion_max_artifacts_from_toml_or_overrides(tmp
         advisor_buffer_max = 2
         seed = 42
         condition_name = "learned_mediator"
-        allow_cross_task_feedback = false
 
         [experiment.skill_updates]
         executor = true
@@ -440,7 +436,6 @@ def test_load_config_requires_diffusion_top_k_neighbors_from_toml_or_overrides(
         advisor_buffer_max = 2
         seed = 42
         condition_name = "learned_mediator"
-        allow_cross_task_feedback = false
 
         [experiment.skill_updates]
         executor = true

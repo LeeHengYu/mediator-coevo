@@ -143,10 +143,9 @@ per-iteration subscription board, and renders selected cross-task artifacts into
 planner context according to the configured policy.
 
 Diffusion artifact emission is controlled by `diffusion.enabled`. Rendering
-those artifacts into another task's planner context also requires
-`experiment.allow_cross_task_feedback = true`, a non-`none` policy, and an
-iteration number. Eligible artifacts must come from a different task and a
-prior source iteration.
+those artifacts into another task's planner context also requires a non-`none`
+policy and an iteration number. Eligible artifacts must come from a different
+task and a prior source iteration.
 
 Current diffusion policy values:
 

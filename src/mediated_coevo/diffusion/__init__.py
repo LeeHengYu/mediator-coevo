@@ -18,15 +18,17 @@ from .models import (
     TaskGraphSnapshot,
 )
 from .policy import (
-    DIFFUSED_SECTION_NAME,
-    DiffusionContextBundle,
     DiffusionSubscription,
     build_capped_broadcast_context,
     build_random_k_context,
-    render_diffusion_subscriptions,
     select_capped_broadcast_subscriptions,
     select_random_k_subscriptions,
     select_top_k_similarity_subscriptions,
+)
+from .renderer import (
+    DIFFUSED_SECTION_NAME,
+    DiffusionContextBundle,
+    render_diffusion_subscriptions,
 )
 from .store import DiffusionStore
 

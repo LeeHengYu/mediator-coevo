@@ -45,7 +45,6 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "condition_name": record.condition_name,
         "seed": record.seed,
         "baseline_preset": record.baseline_preset,
-        "cross_task_feedback_enabled": record.cross_task_feedback_enabled,
         "diffusion_enabled": record.diffusion_enabled,
         "diffusion_policy": record.diffusion_policy,
         "diffusion_graph": record.diffusion_graph,

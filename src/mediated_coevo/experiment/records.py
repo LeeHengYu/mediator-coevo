@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 
 class ExperimentRecordFields(TypedDict):
     baseline_preset: str | None
-    cross_task_feedback_enabled: bool
     diffusion_enabled: bool
     diffusion_policy: str
     diffusion_graph: str | None
@@ -175,7 +174,6 @@ def experiment_record_fields(config: Config) -> ExperimentRecordFields:
     """Return shared experiment metadata for metrics records."""
     return {
         "baseline_preset": config.experiment.baseline_preset,
-        "cross_task_feedback_enabled": (config.experiment.allow_cross_task_feedback),
         "diffusion_enabled": config.diffusion.enabled,
         "diffusion_policy": config.diffusion.policy,
         "diffusion_graph": config.diffusion.graph if config.diffusion.enabled else None,

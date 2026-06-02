@@ -28,5 +28,4 @@ def experiment_config() -> ExperimentConfig:
             planner=True,
             mediator=True,
         ),
-        allow_cross_task_feedback=False,
     )

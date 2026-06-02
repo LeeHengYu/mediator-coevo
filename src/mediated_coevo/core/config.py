@@ -35,7 +35,6 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("experiment", "seed"),
     ("experiment", "advisor_buffer_max"),
     ("experiment", "condition_name"),
-    ("experiment", "allow_cross_task_feedback"),
     ("experiment", "skill_updates", "executor"),
     ("experiment", "skill_updates", "planner"),
     ("experiment", "skill_updates", "mediator"),
@@ -166,7 +165,6 @@ class ExperimentConfig(BaseModel):
     )
     baseline_preset: str | None = None
     shared_notes: str | None = None
-    allow_cross_task_feedback: bool
 
 
 class PathsConfig(BaseModel):

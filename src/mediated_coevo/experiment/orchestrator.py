@@ -540,7 +540,7 @@ class Orchestrator:
         *,
         current_iteration: int | None = None,
     ) -> str | None:
-        """Build same-task prior context, with explicit opt-in cross-task context."""
+        """Build same-task, diffusion, and eligible cross-task prior context."""
         self._ensure_diffusion_runtime_state()
         llm_client = self.mediator.llm_client if condition == "full_traces" else None
         prior_context = await get_prior_context(
@@ -555,8 +555,6 @@ class Orchestrator:
             condition_name=condition,
             current_iteration=current_iteration,
         )
-        if not self.config.experiment.allow_cross_task_feedback:
-            return prior_context
 
         diffusion_context = self._build_diffusion_context(
             task_id=task_id,
@@ -588,10 +586,9 @@ class Orchestrator:
 
         header = (
             "# Explicit Cross-Task Feedback\n\n"
-            f"condition={condition} target_task={task_id} "
-            "allow_cross_task_feedback=true\n\n"
-            "The following context came from other tasks by explicit "
-            "experiment configuration."
+            f"condition={condition} target_task={task_id}\n\n"
+            "The following context came from other tasks with causal "
+            "iteration filters applied."
         )
         logger.info(
             "Cross-task feedback injected: condition=%s target_task=%s",
