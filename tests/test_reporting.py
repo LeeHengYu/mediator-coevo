@@ -14,6 +14,7 @@ from mediated_coevo.diffusion import (
     DiffusionStore,
     TaskGraphSnapshot,
 )
+from mediated_coevo.analysis.inspection import _inspection_payload
 from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
@@ -22,11 +23,8 @@ from mediated_coevo.analysis.reporting import (
     build_score_summary,
     write_score_summary,
 )
-from mediated_coevo.main import (
-    app,
-    _inspection_payload,
-    _latest_experiment_dir,
-)
+from mediated_coevo.cli.inspect import latest_experiment_dir
+from mediated_coevo.main import app
 
 
 def _record(
@@ -248,7 +246,7 @@ def test_latest_experiment_dir_uses_newest_named_child(tmp_path):
     older.mkdir(parents=True)
     newer.mkdir()
 
-    assert _latest_experiment_dir(experiments_root) == newer
+    assert latest_experiment_dir(experiments_root) == newer
 
 
 def test_latest_experiment_dir_rejects_empty_root(tmp_path):
@@ -256,7 +254,7 @@ def test_latest_experiment_dir_rejects_empty_root(tmp_path):
     experiments_root.mkdir()
 
     with pytest.raises(typer.BadParameter, match="no experiment outputs"):
-        _latest_experiment_dir(experiments_root)
+        latest_experiment_dir(experiments_root)
 
 
 def test_single_run_inspection_payload_reports_summary_and_paths(tmp_path):

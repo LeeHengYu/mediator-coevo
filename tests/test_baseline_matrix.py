@@ -6,7 +6,7 @@ import tomllib
 import pytest
 import typer
 
-from mediated_coevo import main as main_module
+import mediated_coevo.cli.run as run_module
 from mediated_coevo.core.config import (
     Config,
     ConfigLoadError,
@@ -25,12 +25,12 @@ from mediated_coevo.experiment.conditions import (
     ExperimentDesignError,
     validate_experiment_design,
 )
-from mediated_coevo.main import (
+from mediated_coevo.experiment.runtime_factory import (
     ExperimentFactory,
-    _apply_experiment_settings,
-    _build_matrix_runtimes,
-    _materialize_task_graph_for_diffusion,
+    build_matrix_runtimes,
 )
+from mediated_coevo.cli.config import _run_config_overrides
+from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
 from mediated_coevo.experiment.records import build_coevolution_record
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.models.skill import SkillProposal
@@ -98,13 +98,12 @@ def test_parse_skill_updates_rejects_invalid_values(raw):
         parse_skill_updates(raw)
 
 
-def test_apply_experiment_settings_supports_shared_runtime_knobs():
-    config = _config()
-
-    updated = _apply_experiment_settings(
-        config,
+def test_run_config_overrides_supports_shared_runtime_knobs():
+    overrides = _run_config_overrides(
         iterations=4,
         seed=123,
+        condition=None,
+        skill_updates=None,
         coevo_interval=2,
         advisor_buffer_max=1,
         diffusion_enabled=True,
@@ -115,17 +114,24 @@ def test_apply_experiment_settings_supports_shared_runtime_knobs():
         harbor_agent_setup_timeout_multiplier=2.5,
     )
 
-    assert updated is config
-    assert config.experiment.num_iterations == 4
-    assert config.experiment.seed == 123
-    assert config.experiment.coevo_interval == 2
-    assert config.experiment.advisor_buffer_max == 1
-    assert config.diffusion.enabled is True
-    assert config.diffusion.policy == "capped_broadcast"
-    assert config.diffusion.graph == "task_similarity"
-    assert config.diffusion.max_artifacts == 5
-    assert config.diffusion.top_k_neighbors == 2
-    assert config.executor_runtime.harbor_agent_setup_timeout_multiplier == 2.5
+    assert overrides == {
+        "experiment": {
+            "num_iterations": 4,
+            "seed": 123,
+            "coevo_interval": 2,
+            "advisor_buffer_max": 1,
+        },
+        "diffusion": {
+            "enabled": True,
+            "policy": "capped_broadcast",
+            "graph": "task_similarity",
+            "max_artifacts": 5,
+            "top_k_neighbors": 2,
+        },
+        "executor_runtime": {
+            "harbor_agent_setup_timeout_multiplier": 2.5,
+        },
+    }
 
 
 def test_materialize_task_graph_for_similarity_diffusion(tmp_path):
@@ -145,7 +151,7 @@ def test_materialize_task_graph_for_similarity_diffusion(tmp_path):
     config.diffusion.graph = "task_similarity"
     repo = SkillFlowRepository(root_dir=tmp_path / "benchmarks", task_dirs=["tasks"])
 
-    _materialize_task_graph_for_diffusion(
+    materialize_task_graph_for_diffusion(
         config=config,
         experiment_dir=tmp_path / "experiment",
         benchmark_repo=repo,
@@ -467,10 +473,10 @@ def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
     def fail_if_called(config):
         raise AssertionError("harbor check should happen after design validation")
 
-    monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_if_called)
+    monkeypatch.setattr(run_module, "ensure_harbor_available", fail_if_called)
 
     with pytest.raises(typer.BadParameter, match="no_feedback"):
-        main_module.run(
+        run_module.run(
             tasks=["task-A"],
             iterations=1,
             seed=42,
@@ -487,10 +493,10 @@ def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path
     def fail_if_called(config):
         raise AssertionError("harbor check should happen after task validation")
 
-    monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_if_called)
+    monkeypatch.setattr(run_module, "ensure_harbor_available", fail_if_called)
 
     with pytest.raises(typer.BadParameter, match="provide --task"):
-        main_module.run(
+        run_module.run(
             iterations=1,
             seed=42,
             condition="learned_mediator",
@@ -507,15 +513,19 @@ def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
     _write_minimal_config(config_dir)
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(main_module, "_prepare_llm_credentials_or_exit", lambda config: config)
-    monkeypatch.setattr(main_module, "_ensure_harbor_available", lambda config: None)
+    monkeypatch.setattr(
+        run_module,
+        "prepare_llm_credentials_or_exit",
+        lambda config: config,
+    )
+    monkeypatch.setattr(run_module, "ensure_harbor_available", lambda config: None)
 
     def capture_run(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr(main_module, "_run_skillflow_experiment", capture_run)
+    monkeypatch.setattr(run_module, "run_skillflow_experiment", capture_run)
 
-    main_module.run(
+    run_module.run(
         tasks=["task-A"],
         config_dir=config_dir,
     )
@@ -594,7 +604,7 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
         task_dirs=["tasks"],
     )
 
-    rows = _build_matrix_runtimes(
+    rows = build_matrix_runtimes(
         factory=ExperimentFactory(tmp_path),
         base_config=config,
         seed=123,

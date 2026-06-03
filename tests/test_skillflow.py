@@ -215,7 +215,7 @@ def test_build_base_image_cli_runs_skillflow_build_script(
         calls.append((list(command), dict(kwargs)))
         return _Completed(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("mediated_coevo.main.subprocess.run", fake_run)
+    monkeypatch.setattr("mediated_coevo.cli.skillflow.subprocess.run", fake_run)
 
     result = CliRunner().invoke(
         app,
@@ -244,7 +244,7 @@ def test_build_base_image_cli_dry_run_does_not_run_build(
         del command, kwargs
         raise AssertionError("dry-run should not execute subprocess.run")
 
-    monkeypatch.setattr("mediated_coevo.main.subprocess.run", fake_run)
+    monkeypatch.setattr("mediated_coevo.cli.skillflow.subprocess.run", fake_run)
 
     result = CliRunner().invoke(
         app,

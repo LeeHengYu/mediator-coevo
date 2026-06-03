@@ -15,7 +15,7 @@ from mediated_coevo.diffusion import (
     DiffusionRiskLevel,
 )
 from mediated_coevo.experiment.conditions import get_executor_proposal_feedback
-from mediated_coevo.main import _validate_condition_name
+from mediated_coevo.cli.config import _run_config_overrides
 from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
@@ -1322,6 +1322,32 @@ def test_condition_assignment_and_cli_validation_reject_unknown_names():
         config.experiment.condition_name = "bad-condition"
 
     with pytest.raises(typer.BadParameter):
-        _validate_condition_name("bad-condition")
+        _run_config_overrides(
+            iterations=None,
+            seed=None,
+            condition="bad-condition",
+            skill_updates=None,
+            coevo_interval=None,
+            advisor_buffer_max=None,
+            diffusion_enabled=None,
+            diffusion_policy=None,
+            diffusion_graph=None,
+            diffusion_max_artifacts=None,
+            diffusion_top_k_neighbors=None,
+            harbor_agent_setup_timeout_multiplier=None,
+        )
 
-    assert _validate_condition_name("no_feedback") == "no_feedback"
+    assert _run_config_overrides(
+        iterations=None,
+        seed=None,
+        condition="no_feedback",
+        skill_updates=None,
+        coevo_interval=None,
+        advisor_buffer_max=None,
+        diffusion_enabled=None,
+        diffusion_policy=None,
+        diffusion_graph=None,
+        diffusion_max_artifacts=None,
+        diffusion_top_k_neighbors=None,
+        harbor_agent_setup_timeout_multiplier=None,
+    ) == {"experiment": {"condition_name": "no_feedback"}}

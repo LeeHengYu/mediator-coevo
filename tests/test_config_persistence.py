@@ -3,7 +3,7 @@ from __future__ import annotations
 import tomllib
 
 from mediated_coevo.core.config import Config
-from mediated_coevo.main import ExperimentFactory
+from mediated_coevo.experiment.runtime_factory import ExperimentFactory
 from tests.config_helpers import diffusion_config, experiment_config
 
 

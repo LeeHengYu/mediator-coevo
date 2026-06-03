@@ -5,10 +5,12 @@ import tomllib
 import pytest
 from typer.testing import CliRunner
 
-from mediated_coevo import main as main_module
+import mediated_coevo.cli.run as run_module
 from mediated_coevo.core.config import Config, ModelConfigError, ModelsConfig
+from mediated_coevo.cli.experiment import prepare_llm_credentials_or_exit
+from mediated_coevo.experiment.runtime_factory import ExperimentFactory
 from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_credentials
-from mediated_coevo.main import ExperimentFactory, app
+from mediated_coevo.main import app
 from tests.config_helpers import diffusion_config, experiment_config
 
 
@@ -120,7 +122,7 @@ def test_run_cli_fails_fast_when_openrouter_key_is_missing(monkeypatch):
         raise AssertionError("Harbor should not be checked before credentials")
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.setattr(main_module, "_ensure_harbor_available", fail_harbor_check)
+    monkeypatch.setattr(run_module, "ensure_harbor_available", fail_harbor_check)
 
     result = CliRunner().invoke(
         app,
@@ -149,7 +151,7 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
         diffusion=diffusion_config(),
     )
     config.paths.skills_dir = "skills"
-    main_module._prepare_llm_credentials_or_exit(config)
+    prepare_llm_credentials_or_exit(config)
 
     runtime = ExperimentFactory(tmp_path).build(
         config=config,
