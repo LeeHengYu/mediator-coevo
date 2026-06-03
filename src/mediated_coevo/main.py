@@ -693,28 +693,157 @@ def _artifact_dirs(experiment_dir: Path) -> list[str]:
     ]
 
 
+def _read_metrics_rows(metrics_path: Path) -> list[dict[str, Any]]:
+    rows = []
+    for line_number, line in enumerate(metrics_path.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(
+                f"invalid JSON in metrics file {metrics_path}:{line_number}"
+            ) from exc
+        if not isinstance(row, dict):
+            raise typer.BadParameter(
+                f"metrics row must be a JSON object: {metrics_path}:{line_number}"
+            )
+        rows.append(row)
+    return rows
+
+
+def _metrics_diffusion_summary(metrics_path: Path) -> dict[str, Any] | None:
+    if not metrics_path.exists():
+        return None
+    rows = _read_metrics_rows(metrics_path)
+    rendered_rows = [
+        row for row in rows if _as_int(row.get("diffusion_artifacts_rendered")) > 0
+    ]
+    token_values = _numeric_values(rendered_rows, "diffusion_context_tokens")
+    reward_values = _numeric_values(
+        rendered_rows,
+        "reward_after_diffusion_context",
+    )
+    source_task_ids = _source_task_ids(rendered_rows)
+    regression_count = sum(
+        1 for row in rendered_rows if row.get("regression_after_diffusion_context")
+    )
+
+    return {
+        "diffusion_enabled": _single_or_mixed(rows, "diffusion_enabled"),
+        "diffusion_policy": _single_or_mixed(rows, "diffusion_policy"),
+        "diffusion_graph": _single_or_mixed(rows, "diffusion_graph"),
+        "context": {
+            "rows_with_rendered_context": len(rendered_rows),
+            "diffusion_context_tokens": _numeric_summary(token_values),
+            "source_task_count": len(source_task_ids),
+            "source_task_ids": source_task_ids,
+            "reward_after_diffusion_context": _numeric_summary(reward_values),
+            "regression_after_diffusion_context": {
+                "count": regression_count,
+                "rate": (
+                    regression_count / len(rendered_rows) if rendered_rows else 0.0
+                ),
+            },
+        },
+    }
+
+
+def _single_or_mixed(rows: list[dict[str, Any]], key: str) -> Any:
+    values = [row[key] for row in rows if key in row]
+    if not values:
+        return None
+    first_value = values[0]
+    if all(value == first_value for value in values):
+        return first_value
+    return "mixed"
+
+
+def _source_task_ids(rows: list[dict[str, Any]]) -> list[str]:
+    task_ids = set()
+    for row in rows:
+        source_ids = row.get("source_task_ids")
+        if not isinstance(source_ids, list):
+            continue
+        task_ids.update(task_id for task_id in source_ids if isinstance(task_id, str))
+    return sorted(task_ids)
+
+
+def _numeric_values(rows: list[dict[str, Any]], key: str) -> list[float]:
+    values = []
+    for row in rows:
+        value = row.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        values.append(float(value))
+    return values
+
+
+def _numeric_summary(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0, "total": 0.0, "mean": None, "min": None, "max": None}
+    return {
+        "count": len(values),
+        "total": sum(values),
+        "mean": sum(values) / len(values),
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+def _as_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
 def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None:
     diffusion_dir = experiment_dir / "diffusion"
     if not diffusion_dir.exists():
         return None
+    metrics_path = experiment_dir / "metrics.jsonl"
     store = DiffusionStore(diffusion_dir)
     artifacts = store.query_artifacts(recent=None)
     snapshots = store.query_graph_snapshots(recent=None)
     records = store.query_diffused_records(recent=None)
-    return {
+    paths = {
+        "metrics": str(metrics_path) if metrics_path.exists() else None,
+        "diffused_records": str(diffusion_dir / "diffused_records.jsonl"),
+        "artifacts_dir": str(diffusion_dir / "artifacts"),
+        "graph_snapshots_dir": str(diffusion_dir / "graph_snapshots"),
+    }
+    record_counts = {
+        "eligible_count": sum(1 for record in records if record.eligible),
+        "selected_count": sum(1 for record in records if record.selected),
+        "rendered_count": sum(1 for record in records if record.rendered),
+    }
+    payload = {
         "diffusion_dir": str(diffusion_dir),
         "artifacts_dir": str(diffusion_dir / "artifacts"),
         "graph_snapshots_dir": str(diffusion_dir / "graph_snapshots"),
         "diffused_records_path": str(diffusion_dir / "diffused_records.jsonl"),
+        "paths": paths,
         "artifact_count": len(artifacts),
         "graph_snapshot_count": len(snapshots),
         "diffused_record_count": len(records),
-        "eligible_record_count": sum(1 for record in records if record.eligible),
-        "selected_record_count": sum(1 for record in records if record.selected),
-        "rendered_record_count": sum(1 for record in records if record.rendered),
+        "eligible_record_count": record_counts["eligible_count"],
+        "selected_record_count": record_counts["selected_count"],
+        "rendered_record_count": record_counts["rendered_count"],
+        "records": record_counts,
         "source_task_ids": sorted({artifact.source_task_id for artifact in artifacts}),
         "graph_snapshot_ids": [snapshot.snapshot_id for snapshot in snapshots],
     }
+    if metrics_summary := _metrics_diffusion_summary(metrics_path):
+        payload["metrics"] = metrics_summary
+    return payload
+
+
+def _format_inspection_value(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
 
 
 def _single_inspection_payload(experiment_dir: Path) -> dict[str, Any]:
@@ -807,9 +936,83 @@ def _print_single_inspection(payload: dict[str, Any]) -> None:
             console.print(f"    {artifact_dir}")
     if diffusion_payload := payload.get("diffusion"):
         console.print("  Diffusion:")
-        console.print(f"    Records: {diffusion_payload['diffused_record_count']}")
-        console.print(f"    Rendered: {diffusion_payload['rendered_record_count']}")
-        console.print(f"    Graph snapshots: {diffusion_payload['graph_snapshot_count']}")
+        _print_diffusion_inspection(diffusion_payload)
+
+
+def _print_diffusion_inspection(diffusion_payload: dict[str, Any]) -> None:
+    metrics_summary = diffusion_payload.get("metrics") or {}
+    paths = diffusion_payload.get("paths") or {}
+    console.print(
+        f"    Enabled: "
+        f"{_format_inspection_value(metrics_summary.get('diffusion_enabled'))}"
+    )
+    console.print(
+        f"    Policy: "
+        f"{_format_inspection_value(metrics_summary.get('diffusion_policy'))}"
+    )
+    console.print(
+        f"    Graph: "
+        f"{_format_inspection_value(metrics_summary.get('diffusion_graph'))}"
+    )
+    console.print(f"    Metrics: {paths.get('metrics') or 'n/a'}")
+    console.print(f"    Diffusion records: {paths.get('diffused_records') or 'n/a'}")
+    console.print(f"    Graph snapshots: {paths.get('graph_snapshots_dir') or 'n/a'}")
+    console.print("    Records:")
+    console.print(f"      Eligible: {diffusion_payload['eligible_record_count']}")
+    console.print(f"      Selected: {diffusion_payload['selected_record_count']}")
+    console.print(f"      Rendered: {diffusion_payload['rendered_record_count']}")
+    if context_summary := metrics_summary.get("context"):
+        _print_diffusion_context_summary(context_summary)
+
+
+def _print_diffusion_context_summary(context_summary: dict[str, Any]) -> None:
+    token_summary = context_summary["diffusion_context_tokens"]
+    reward_summary = context_summary["reward_after_diffusion_context"]
+    regression_summary = context_summary["regression_after_diffusion_context"]
+    source_task_ids = context_summary["source_task_ids"]
+    console.print("    Context:")
+    console.print(
+        f"      Rows with rendered context: "
+        f"{context_summary['rows_with_rendered_context']}"
+    )
+    console.print(
+        "      Context tokens: "
+        f"total={_format_summary_number(token_summary['total'])} "
+        f"mean={_format_summary_number(token_summary['mean'])} "
+        f"max={_format_summary_number(token_summary['max'])}"
+    )
+    console.print(
+        f"      Source tasks: "
+        f"{_format_source_tasks(context_summary['source_task_count'], source_task_ids)}"
+    )
+    console.print(
+        "      Reward after context: "
+        f"count={reward_summary['count']} "
+        f"mean={_format_summary_number(reward_summary['mean'])} "
+        f"min={_format_summary_number(reward_summary['min'])} "
+        f"max={_format_summary_number(reward_summary['max'])}"
+    )
+    console.print(
+        "      Regressions after context: "
+        f"{regression_summary['count']} "
+        f"rate={_format_summary_number(regression_summary['rate'])}"
+    )
+
+
+def _format_source_tasks(source_task_count: int, source_task_ids: list[str]) -> str:
+    if not source_task_ids:
+        return str(source_task_count)
+    if len(source_task_ids) > 8:
+        return f"{source_task_count} ({', '.join(source_task_ids[:8])}, ...)"
+    return f"{source_task_count} ({', '.join(source_task_ids)})"
+
+
+def _format_summary_number(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.3f}"
 
 
 def _print_matrix_inspection(payload: dict[str, Any]) -> None:
@@ -826,11 +1029,7 @@ def _print_matrix_inspection(payload: dict[str, Any]) -> None:
     table.add_column("Metrics")
     for row in payload["rows"]:
         diffusion_payload = row.get("diffusion") or {}
-        diffusion_summary = (
-            f"{diffusion_payload.get('rendered_record_count', 0)} rendered"
-            if diffusion_payload
-            else "n/a"
-        )
+        diffusion_summary = _matrix_diffusion_summary(diffusion_payload)
         summary_data = row.get("summary")
         if summary_data is None:
             table.add_row(
@@ -856,6 +1055,17 @@ def _print_matrix_inspection(payload: dict[str, Any]) -> None:
             row.get("metrics_path") or "n/a",
         )
     console.print(table)
+
+
+def _matrix_diffusion_summary(diffusion_payload: dict[str, Any]) -> str:
+    if not diffusion_payload:
+        return "n/a"
+    rendered_count = diffusion_payload.get("rendered_record_count", 0)
+    metrics_summary = diffusion_payload.get("metrics") or {}
+    policy = metrics_summary.get("diffusion_policy")
+    if policy:
+        return f"{policy}: {rendered_count} rendered"
+    return f"{rendered_count} rendered"
 
 
 def _print_inspection_payload(payload: dict[str, Any]) -> None:

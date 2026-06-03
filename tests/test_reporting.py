@@ -286,6 +286,37 @@ def test_single_run_inspection_payload_reports_diffusion_bundle(tmp_path):
         build_score_summary([_record("task-a", 1.0)], bootstrap_samples=50),
         run_dir / "summary.json",
     )
+    metrics_path = run_dir / "metrics.jsonl"
+    metrics_path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {
+                    "task_id": "task-a",
+                    "diffusion_enabled": True,
+                    "diffusion_policy": "top_k_similarity",
+                    "diffusion_graph": "precomputed_similarity",
+                    "diffusion_artifacts_rendered": 1,
+                    "diffusion_context_tokens": 20,
+                    "source_task_ids": ["task-b"],
+                    "reward_after_diffusion_context": 0.5,
+                    "regression_after_diffusion_context": False,
+                },
+                {
+                    "task_id": "task-c",
+                    "diffusion_enabled": True,
+                    "diffusion_policy": "top_k_similarity",
+                    "diffusion_graph": "precomputed_similarity",
+                    "diffusion_artifacts_rendered": 1,
+                    "diffusion_context_tokens": 10,
+                    "source_task_ids": ["task-b", "task-d"],
+                    "reward_after_diffusion_context": 0.0,
+                    "regression_after_diffusion_context": True,
+                },
+            ]
+        )
+        + "\n"
+    )
     store = DiffusionStore(run_dir / "diffusion")
     store.store_artifact(
         DiffusionArtifact(
@@ -295,6 +326,16 @@ def test_single_run_inspection_payload_reports_diffusion_bundle(tmp_path):
             artifact_type=DiffusionArtifactType.DEBUG_HINT,
             risk_level=DiffusionRiskLevel.LOW,
             content="hint",
+        )
+    )
+    store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="artifact-2",
+            source_task_id="task-d",
+            source_iteration=0,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="another hint",
         )
     )
     store.store_graph_snapshot(
@@ -319,15 +360,52 @@ def test_single_run_inspection_payload_reports_diffusion_bundle(tmp_path):
             rendered=True,
         )
     )
+    store.append_diffused_record(
+        DiffusedRecord(
+            artifact_id="artifact-2",
+            source_task_id="task-d",
+            source_iteration=0,
+            target_task_id="task-c",
+            target_iteration=1,
+            snapshot_id="snapshot-1",
+            policy_name="top_k_similarity",
+            selected=True,
+            rendered=True,
+        )
+    )
 
     payload = _inspection_payload(run_dir)
 
-    assert payload["diffusion"]["artifact_count"] == 1
+    assert payload["diffusion"]["artifact_count"] == 2
     assert payload["diffusion"]["graph_snapshot_count"] == 1
-    assert payload["diffusion"]["diffused_record_count"] == 1
-    assert payload["diffusion"]["rendered_record_count"] == 1
-    assert payload["diffusion"]["source_task_ids"] == ["task-b"]
+    assert payload["diffusion"]["diffused_record_count"] == 2
+    assert payload["diffusion"]["rendered_record_count"] == 2
+    assert payload["diffusion"]["source_task_ids"] == ["task-b", "task-d"]
     assert payload["diffusion"]["graph_snapshot_ids"] == ["snapshot-1"]
+    assert payload["diffusion"]["paths"]["metrics"] == str(metrics_path)
+    assert payload["diffusion"]["paths"]["diffused_records"] == str(
+        run_dir / "diffusion" / "diffused_records.jsonl"
+    )
+    assert payload["diffusion"]["records"] == {
+        "eligible_count": 2,
+        "selected_count": 2,
+        "rendered_count": 2,
+    }
+    metrics = payload["diffusion"]["metrics"]
+    assert metrics["diffusion_enabled"] is True
+    assert metrics["diffusion_policy"] == "top_k_similarity"
+    assert metrics["diffusion_graph"] == "precomputed_similarity"
+    context = metrics["context"]
+    assert context["rows_with_rendered_context"] == 2
+    assert context["diffusion_context_tokens"]["total"] == pytest.approx(30.0)
+    assert context["diffusion_context_tokens"]["mean"] == pytest.approx(15.0)
+    assert context["diffusion_context_tokens"]["max"] == pytest.approx(20.0)
+    assert context["source_task_count"] == 2
+    assert context["source_task_ids"] == ["task-b", "task-d"]
+    assert context["reward_after_diffusion_context"]["count"] == 2
+    assert context["reward_after_diffusion_context"]["mean"] == pytest.approx(0.25)
+    assert context["regression_after_diffusion_context"]["count"] == 1
+    assert context["regression_after_diffusion_context"]["rate"] == pytest.approx(0.5)
 
 
 def test_single_run_inspection_payload_warns_when_summary_missing(tmp_path):
@@ -342,6 +420,68 @@ def test_single_run_inspection_payload_warns_when_summary_missing(tmp_path):
     assert payload["summary_path"] is None
     assert payload["metrics_path"] == str(metrics_path)
     assert "summary.json is missing" in payload["warning"]
+
+
+def test_inspect_command_prints_diffusion_context_summary(tmp_path):
+    run_dir = tmp_path / "20260502-000000-42-learned_mediator"
+    run_dir.mkdir()
+    write_score_summary(
+        build_score_summary([_record("task-a", 1.0)], bootstrap_samples=50),
+        run_dir / "summary.json",
+    )
+    (run_dir / "metrics.jsonl").write_text(
+        json.dumps(
+            {
+                "task_id": "task-a",
+                "diffusion_enabled": True,
+                "diffusion_policy": "top_k_similarity",
+                "diffusion_graph": "precomputed_similarity",
+                "diffusion_artifacts_rendered": 1,
+                "diffusion_context_tokens": 12,
+                "source_task_ids": ["task-b"],
+                "reward_after_diffusion_context": 0.0,
+                "regression_after_diffusion_context": True,
+            }
+        )
+        + "\n"
+    )
+    store = DiffusionStore(run_dir / "diffusion")
+    store.store_artifact(
+        DiffusionArtifact(
+            artifact_id="artifact-1",
+            source_task_id="task-b",
+            source_iteration=0,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="hint",
+        )
+    )
+    store.append_diffused_record(
+        DiffusedRecord(
+            artifact_id="artifact-1",
+            source_task_id="task-b",
+            source_iteration=0,
+            target_task_id="task-a",
+            target_iteration=1,
+            snapshot_id="snapshot-1",
+            policy_name="top_k_similarity",
+            selected=True,
+            rendered=True,
+        )
+    )
+
+    result = CliRunner().invoke(app, ["inspect", str(run_dir)])
+
+    assert result.exit_code == 0
+    assert "Enabled: true" in result.stdout
+    assert "Policy: top_k_similarity" in result.stdout
+    assert "Metrics:" in result.stdout
+    assert "Diffusion records:" in result.stdout
+    assert "Rows with rendered context: 1" in result.stdout
+    assert "Context tokens: total=12 mean=12 max=12" in result.stdout
+    assert "Source tasks: 1 (task-b)" in result.stdout
+    assert "Reward after context: count=1 mean=0 min=0 max=0" in result.stdout
+    assert "Regressions after context: 1 rate=1" in result.stdout
 
 
 def test_matrix_inspection_payload_reports_row_summaries(tmp_path):
