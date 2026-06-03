@@ -132,8 +132,10 @@ feedback through the executor validation gate.
 
 Executor validation compares old and candidate Executor policies on selected
 SkillFlow tasks under the same task instruction, task resources, and verifier
-contract. It accepts only when the candidate improves by at least
-`min_mean_delta` without violating configured regression or usability rules.
+contract. It accepts only when the candidate's summed validation reward exceeds
+the current skill's summed validation reward by more than
+`min_mean_delta * validation_task_count`; per-task regressions are recorded as
+validation evidence but do not veto an aggregate improvement.
 
 ### Diffusion
 

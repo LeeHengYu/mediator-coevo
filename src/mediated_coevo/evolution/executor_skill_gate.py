@@ -617,10 +617,28 @@ class ExecutorSkillGate:
     ) -> SkillValidationResult:
         validation_config = self.config.experiment.skill_validation
         usable_results = [result for result in task_results if result.usable]
-        current_mean = _mean_reward(result.current_reward for result in usable_results)
-        candidate_mean = _mean_reward(
-            result.candidate_reward for result in usable_results
+        current_rewards = [
+            result.current_reward
+            for result in usable_results
+            if result.current_reward is not None
+        ]
+        candidate_rewards = [
+            result.candidate_reward
+            for result in usable_results
+            if result.candidate_reward is not None
+        ]
+        has_complete_rewards = (
+            len(current_rewards) == len(usable_results)
+            and len(candidate_rewards) == len(usable_results)
         )
+        aggregate_improved = (
+            has_complete_rewards
+            and sum(candidate_rewards)
+            > sum(current_rewards)
+            + validation_config.min_mean_delta * len(usable_results)
+        )
+        current_mean = _mean_reward(current_rewards)
+        candidate_mean = _mean_reward(candidate_rewards)
         mean_delta = (
             candidate_mean - current_mean
             if current_mean is not None and candidate_mean is not None
@@ -639,14 +657,7 @@ class ExecutorSkillGate:
         elif not usable_results:
             decision = "rejected"
             reason = "no_usable_validation_tasks"
-        elif any(result.regressed for result in usable_results):
-            decision = "rejected"
-            reason = "task_regression"
-        elif (
-            mean_delta is None
-            or mean_delta
-            < validation_config.min_mean_delta - validation_config.reward_tolerance
-        ):
+        elif not aggregate_improved:
             decision = "rejected"
             reason = "mean_not_improved"
 
