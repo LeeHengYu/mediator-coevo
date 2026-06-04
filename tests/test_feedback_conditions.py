@@ -25,7 +25,7 @@ from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 class _Task:
@@ -387,6 +387,7 @@ def _orchestrator(
             mediator="test-mediator",
             judge="test-judge",
         ),
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -1315,6 +1316,7 @@ def test_condition_assignment_and_cli_validation_reject_unknown_names():
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )

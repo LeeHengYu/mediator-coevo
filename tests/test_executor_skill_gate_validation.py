@@ -7,7 +7,7 @@ import pytest
 from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.models.skill import SkillValidationTaskResult
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 def _validation_gate(*, min_mean_delta: float) -> ExecutorSkillGate:
@@ -18,6 +18,7 @@ def _validation_gate(*, min_mean_delta: float) -> ExecutorSkillGate:
             mediator="test-mediator",
             judge="test-judge",
         ),
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )

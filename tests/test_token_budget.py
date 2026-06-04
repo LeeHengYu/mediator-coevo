@@ -19,7 +19,7 @@ from mediated_coevo.runtime.token_budget import (
     fit_text_to_tokens,
     pack_sections,
 )
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 def test_token_count_falls_back_when_litellm_counter_fails(monkeypatch):
@@ -218,6 +218,7 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -274,6 +275,7 @@ def test_planner_constructed_prompt_fits_budget():
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -313,6 +315,7 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )

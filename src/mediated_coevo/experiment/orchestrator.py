@@ -107,6 +107,14 @@ class _MediatorValidationContext:
     task_metadata: TaskMetadataFields
 
 
+@dataclass(frozen=True)
+class _PlannerPriorContextBundle:
+    same_task_prior: str | None = None
+    cross_task_prior: str | None = None
+    diffusion_context: str | None = None
+    context_budget_violation: bool = False
+
+
 class Orchestrator:
     """Runs the plan → execute → mediate → update loop."""
 
@@ -157,6 +165,7 @@ class Orchestrator:
         self._released_cross_task_reports_by_task: dict[str, MediatorReport] = {}
         self._staged_cross_task_reports_by_task: dict[str, MediatorReport] = {}
         self._previous_reward_by_task: dict[str, float] = {}
+        self._prior_context_by_target: dict[tuple[str, int], dict[str, Any]] = {}
         self._diffusion_context_by_target: dict[tuple[str, int], dict[str, Any]] = {}
         self._diffusion_sub_board: dict[
             tuple[int, str],
@@ -541,9 +550,34 @@ class Orchestrator:
         current_iteration: int | None = None,
     ) -> str | None:
         """Build same-task, diffusion, and eligible cross-task prior context."""
+        bundle = await self._build_prior_context_bundle(
+            condition,
+            task_id,
+            current_iteration=current_iteration,
+        )
+        fitted_bundle = self._fit_prior_context_bundle(condition, bundle)
+        flattened = self._flatten_prior_context_bundle(fitted_bundle)
+        if current_iteration is not None:
+            self._record_prior_context_metrics(
+                condition=condition,
+                task_id=task_id,
+                current_iteration=current_iteration,
+                bundle=fitted_bundle,
+                flattened=flattened,
+            )
+        return flattened
+
+    async def _build_prior_context_bundle(
+        self,
+        condition: ConditionName,
+        task_id: str,
+        *,
+        current_iteration: int | None = None,
+    ) -> _PlannerPriorContextBundle:
+        """Build structured prior-context sections before planner flattening."""
         self._ensure_diffusion_runtime_state()
         llm_client = self.mediator.llm_client if condition == "full_traces" else None
-        prior_context = await get_prior_context(
+        same_task_prior = await get_prior_context(
             condition=condition,
             task_id=task_id,
             artifact_store=self.artifact_store,
@@ -556,7 +590,7 @@ class Orchestrator:
             current_iteration=current_iteration,
         )
 
-        diffusion_context = self._build_diffusion_context(
+        diffusion_context = await self._build_diffusion_context(
             task_id=task_id,
             current_iteration=current_iteration,
         )
@@ -566,9 +600,10 @@ class Orchestrator:
                 self.config.diffusion.policy,
                 task_id,
             )
-            if prior_context:
-                return f"{prior_context}\n\n{diffusion_context}"
-            return diffusion_context
+            return _PlannerPriorContextBundle(
+                same_task_prior=same_task_prior,
+                diffusion_context=diffusion_context,
+            )
 
         cross_context = await get_cross_task_prior_context(
             condition=condition,
@@ -582,7 +617,7 @@ class Orchestrator:
             current_iteration=current_iteration,
         )
         if not cross_context:
-            return prior_context
+            return _PlannerPriorContextBundle(same_task_prior=same_task_prior)
 
         header = (
             "# Explicit Cross-Task Feedback\n\n"
@@ -595,9 +630,134 @@ class Orchestrator:
             condition,
             task_id,
         )
-        if prior_context:
-            return f"{prior_context}\n\n{header}\n\n{cross_context}"
-        return f"{header}\n\n{cross_context}"
+        return _PlannerPriorContextBundle(
+            same_task_prior=same_task_prior,
+            cross_task_prior=f"{header}\n\n{cross_context}",
+        )
+
+    def _fit_prior_context_bundle(
+        self,
+        condition: ConditionName,
+        bundle: _PlannerPriorContextBundle,
+    ) -> _PlannerPriorContextBundle:
+        """Fit structured prior-context sections before planner flattening."""
+        from mediated_coevo.runtime.token_budget import count_text_tokens, fit_text_to_tokens
+
+        model = self.planner.llm_client.model
+        total_cap = self.config.budgets.mediator_report_tokens
+        diffusion_context = bundle.diffusion_context
+        diffusion_tokens = (
+            count_text_tokens(model, diffusion_context) if diffusion_context else 0
+        )
+        remaining_for_non_diffusion = max(0, total_cap - diffusion_tokens)
+
+        same_task_prior = bundle.same_task_prior
+        cross_task_prior = bundle.cross_task_prior
+        original_same_tokens = count_text_tokens(model, same_task_prior or "")
+        original_cross_tokens = count_text_tokens(model, cross_task_prior or "")
+        if remaining_for_non_diffusion:
+            if same_task_prior:
+                same_cap = min(
+                    self._same_task_prior_cap(condition),
+                    remaining_for_non_diffusion,
+                )
+                same_task_prior = fit_text_to_tokens(model, same_task_prior, same_cap)
+                remaining_for_non_diffusion = max(
+                    0,
+                    remaining_for_non_diffusion
+                    - count_text_tokens(model, same_task_prior),
+                )
+            if cross_task_prior:
+                cross_cap = min(
+                    self._cross_task_prior_cap(condition),
+                    remaining_for_non_diffusion,
+                )
+                cross_task_prior = fit_text_to_tokens(model, cross_task_prior, cross_cap)
+        else:
+            same_task_prior = None
+            cross_task_prior = None
+
+        fitted_same_tokens = count_text_tokens(model, same_task_prior or "")
+        fitted_cross_tokens = count_text_tokens(model, cross_task_prior or "")
+        fitted_total_tokens = count_text_tokens(
+            model,
+            self._flatten_prior_context_bundle(
+                _PlannerPriorContextBundle(
+                    same_task_prior=same_task_prior,
+                    cross_task_prior=cross_task_prior,
+                    diffusion_context=diffusion_context,
+                )
+            )
+            or "",
+        )
+        budget_violation = (
+            bundle.context_budget_violation
+            or original_same_tokens > fitted_same_tokens
+            or original_cross_tokens > fitted_cross_tokens
+            or fitted_total_tokens > total_cap
+        )
+        return _PlannerPriorContextBundle(
+            same_task_prior=same_task_prior,
+            cross_task_prior=cross_task_prior,
+            diffusion_context=diffusion_context,
+            context_budget_violation=budget_violation,
+        )
+
+    def _flatten_prior_context_bundle(
+        self,
+        bundle: _PlannerPriorContextBundle,
+    ) -> str | None:
+        """Flatten structured prior context while preserving the LiteLLM call path."""
+        sections = [
+            section
+            for section in (
+                bundle.same_task_prior,
+                bundle.diffusion_context,
+                bundle.cross_task_prior,
+            )
+            if section
+        ]
+        if not sections:
+            return None
+        return "\n\n".join(sections)
+
+    def _record_prior_context_metrics(
+        self,
+        *,
+        condition: ConditionName,
+        task_id: str,
+        current_iteration: int,
+        bundle: _PlannerPriorContextBundle,
+        flattened: str | None,
+    ) -> None:
+        from mediated_coevo.runtime.token_budget import count_text_tokens
+
+        model = self.planner.llm_client.model
+        flattened_tokens = count_text_tokens(model, flattened or "")
+        same_task_tokens = count_text_tokens(model, bundle.same_task_prior or "")
+        cross_task_tokens = count_text_tokens(model, bundle.cross_task_prior or "")
+        total_cap = self.config.budgets.mediator_report_tokens
+        self._prior_context_by_target[(task_id, current_iteration)] = {
+            "same_task_prior_tokens": same_task_tokens,
+            "cross_task_prior_tokens": cross_task_tokens,
+            "total_planner_prior_context_tokens": flattened_tokens,
+            "max_same_task_prior_tokens": self._same_task_prior_cap(condition),
+            "max_cross_task_prior_tokens": self._cross_task_prior_cap(condition),
+            "max_total_prior_context_tokens": total_cap,
+            "context_budget_violation": (
+                bundle.context_budget_violation or flattened_tokens > total_cap
+            ),
+        }
+
+    def _same_task_prior_cap(self, condition: ConditionName) -> int:
+        if condition == "full_traces":
+            return self.config.budgets.historical_summary_tokens
+        return self.config.budgets.mediator_report_tokens
+
+    def _cross_task_prior_cap(self, condition: ConditionName) -> int:
+        if condition == "full_traces":
+            return self.config.budgets.historical_summary_tokens
+        return self.config.budgets.mediator_report_tokens
 
     async def _emit_diffusion_artifacts(
         self,
@@ -626,7 +786,7 @@ class Orchestrator:
         for artifact in artifacts:
             self._diffusion_store.store_artifact(artifact, overwrite=True)
 
-    def _build_diffusion_context(
+    async def _build_diffusion_context(
         self,
         *,
         task_id: str,
@@ -662,7 +822,7 @@ class Orchestrator:
             )
             return None
 
-        bundle = render_diffusion_subscriptions(
+        bundle = await render_diffusion_subscriptions(
             store=self._diffusion_store,
             snapshot=snapshot,
             model=self.planner.llm_client.model,
@@ -674,6 +834,8 @@ class Orchestrator:
                 (task_id, current_iteration),
                 {},
             ).get("eligible_count"),
+            max_context_tokens=self.config.budgets.max_diffusion_context_tokens,
+            compact_artifact_content=self._compact_diffusion_artifact_content,
         )
         self._diffusion_context_by_target[(task_id, current_iteration)] = {
             "graph_snapshot_id": bundle.snapshot_id,
@@ -683,8 +845,28 @@ class Orchestrator:
             "rendered_count": bundle.rendered_count,
             "context_tokens": bundle.context_tokens,
             "source_task_ids": bundle.source_task_ids,
+            "compacted_artifact_ids": list(bundle.compacted_artifact_ids or []),
+            "dropped_artifact_ids": list(bundle.dropped_for_budget_artifact_ids or []),
+            "budget_violation": bundle.budget_violation,
         }
         return bundle.text
+
+    async def _compact_diffusion_artifact_content(
+        self,
+        artifact: DiffusionArtifact,
+        budget_tokens: int,
+    ) -> str:
+        from mediated_coevo.evolution.compactor import compact_text_for_context
+
+        return await compact_text_for_context(
+            artifact.content,
+            llm_client=self.mediator.llm_client,
+            label=f"diffusion artifact {artifact.artifact_id}",
+            model=self.planner.llm_client.model,
+            budget_tokens=budget_tokens,
+            completion_tokens=self.config.budgets.mediator_completion_tokens,
+            condition_name=self.config.experiment.condition_name,
+        )
 
     def _prepare_diffusion_subscriptions(
         self,
@@ -826,6 +1008,9 @@ class Orchestrator:
             "rendered_count": 0,
             "context_tokens": 0,
             "source_task_ids": [],
+            "compacted_artifact_ids": [],
+            "dropped_artifact_ids": [],
+            "budget_violation": False,
         }
 
     def _record_prepared_diffusion_context(
@@ -850,6 +1035,9 @@ class Orchestrator:
                     for subscription in subscriptions
                 )
             ),
+            "compacted_artifact_ids": [],
+            "dropped_artifact_ids": [],
+            "budget_violation": False,
         }
 
     def _record_unselected_diffusion_candidates(
@@ -917,6 +1105,30 @@ class Orchestrator:
 
     def _attach_diffusion_context_metrics(self, record: IterationRecord) -> None:
         self._ensure_diffusion_runtime_state()
+        prior_context = self._prior_context_by_target.get(
+            (record.task_id, record.iteration)
+        )
+        if prior_context is not None:
+            record.same_task_prior_tokens = prior_context["same_task_prior_tokens"]
+            record.cross_task_prior_tokens = prior_context["cross_task_prior_tokens"]
+            record.total_planner_prior_context_tokens = prior_context[
+                "total_planner_prior_context_tokens"
+            ]
+            record.max_same_task_prior_tokens = prior_context[
+                "max_same_task_prior_tokens"
+            ]
+            record.max_cross_task_prior_tokens = prior_context[
+                "max_cross_task_prior_tokens"
+            ]
+            record.max_total_prior_context_tokens = prior_context[
+                "max_total_prior_context_tokens"
+            ]
+            record.context_budget_violation = prior_context[
+                "context_budget_violation"
+            ]
+        record.max_diffusion_context_tokens = (
+            self.config.budgets.max_diffusion_context_tokens
+        )
         context = self._diffusion_context_by_target.get((record.task_id, record.iteration))
         if context is None:
             return
@@ -927,6 +1139,13 @@ class Orchestrator:
         record.diffusion_artifacts_rendered = context["rendered_count"]
         record.diffusion_context_tokens = context["context_tokens"]
         record.source_task_ids = list(context["source_task_ids"])
+        record.compacted_diffusion_artifact_ids = list(
+            context["compacted_artifact_ids"]
+        )
+        record.dropped_for_budget_artifact_ids = list(context["dropped_artifact_ids"])
+        record.context_budget_violation = (
+            record.context_budget_violation or context["budget_violation"]
+        )
         if record.diffusion_artifacts_rendered > 0:
             record.reward_after_diffusion_context = record.reward
             record.regression_after_diffusion_context = (
@@ -938,6 +1157,8 @@ class Orchestrator:
             self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
         if not hasattr(self, "_diffusion_context_by_target"):
             self._diffusion_context_by_target = {}
+        if not hasattr(self, "_prior_context_by_target"):
+            self._prior_context_by_target = {}
         if not hasattr(self, "_diffusion_sub_board"):
             self._diffusion_sub_board = {}
         if not hasattr(self, "_diffusion_prepared_iterations"):

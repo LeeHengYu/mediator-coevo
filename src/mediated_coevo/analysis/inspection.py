@@ -59,6 +59,16 @@ def _numeric_summary(values: list[float]) -> dict[str, Any]:
     }
 
 
+def _list_values(rows: list[dict[str, Any]], key: str) -> list[str]:
+    values: list[str] = []
+    for row in rows:
+        raw_values = row.get(key)
+        if not isinstance(raw_values, list):
+            continue
+        values.extend(value for value in raw_values if isinstance(value, str))
+    return values
+
+
 def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None:
     diffusion_dir = experiment_dir / "diffusion"
     if not diffusion_dir.exists():
@@ -142,11 +152,35 @@ def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None
             for row in rendered_rows
             if row.get("regression_after_diffusion_context")
         )
+        prior_context_summary = {
+            "same_task_prior_tokens": _numeric_summary(
+                _numeric_values(rows, "same_task_prior_tokens")
+            ),
+            "cross_task_prior_tokens": _numeric_summary(
+                _numeric_values(rows, "cross_task_prior_tokens")
+            ),
+            "diffusion_context_tokens": _numeric_summary(
+                _numeric_values(rows, "diffusion_context_tokens")
+            ),
+            "total_planner_prior_context_tokens": _numeric_summary(
+                _numeric_values(rows, "total_planner_prior_context_tokens")
+            ),
+            "context_budget_violation_count": sum(
+                1 for row in rows if row.get("context_budget_violation") is True
+            ),
+            "compacted_diffusion_artifact_count": len(
+                set(_list_values(rows, "compacted_diffusion_artifact_ids"))
+            ),
+            "dropped_for_budget_artifact_count": len(
+                set(_list_values(rows, "dropped_for_budget_artifact_ids"))
+            ),
+        }
 
         payload["metrics"] = {
             "diffusion_enabled": _single_or_mixed(rows, "diffusion_enabled"),
             "diffusion_policy": _single_or_mixed(rows, "diffusion_policy"),
             "diffusion_graph": _single_or_mixed(rows, "diffusion_graph"),
+            "planner_prior_context": prior_context_summary,
             "context": {
                 "rows_with_rendered_context": len(rendered_rows),
                 "diffusion_context_tokens": _numeric_summary(token_values),

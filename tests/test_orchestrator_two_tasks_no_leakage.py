@@ -22,7 +22,7 @@ from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 class _LLM:
@@ -160,6 +160,7 @@ async def test_learned_mediator_cross_task_feedback_is_round_causal(tmp_path):
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -216,6 +217,7 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -344,6 +346,7 @@ def test_snapshot_and_write_metrics_records_skill_update_ledger(tmp_path):
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -443,6 +446,7 @@ async def test_full_traces_cross_task_feedback_is_round_causal(tmp_path):
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )

@@ -149,6 +149,12 @@ those artifacts into another task's planner context also requires a non-`none`
 policy and an iteration number. Eligible artifacts must come from a different
 task and a prior source iteration.
 
+Rendered diffusion context is capped by
+`budgets.max_diffusion_context_tokens`. When a selected artifact overflows that
+cap, the renderer first compacts the artifact with the same compactor path used
+for other planner-facing context. If the compacted artifact still cannot fit, it
+is dropped from the prompt and recorded in the diffusion audit ledger.
+
 Current diffusion policy values:
 
 - `none`: do not render diffusion context.
@@ -170,18 +176,6 @@ When `medcoevo run` starts with `diffusion.enabled = true` and
 `diffusion.graph` set to `task_similarity` or `precomputed_similarity`, it
 materializes run-local graph artifacts under `task-graph/` using the configured
 local SkillFlow task cache and the default edge threshold `0.05`.
-
-### What Is Not GRPO
-
-The framework is GRPO-like only at the skill-editing layer. It does not:
-
-- update LLM weights;
-- compute token-level policy gradients;
-- use a learned value model;
-- treat one reward tag as causal proof.
-
-The reward tags are noisy downstream labels. The intended signal comes from
-repeated same-task, group-relative comparisons over many iterations.
 
 ## Requirements
 
@@ -238,9 +232,7 @@ uv run medcoevo run \
   --diffusion-enabled \
   --diffusion-policy top_k_similarity \
   --diffusion-graph task_similarity \
-  --diffusion-max-artifacts 3 \
-  --diffusion-top-k-neighbors 3 \
-  --run-id all-wra-top-k-similarity-hermes
+  --run-id all-wra-top-k-similarity
 ```
 
 Experiment outputs are written under:
@@ -267,7 +259,8 @@ Top-level commands:
 ```bash
 uv run medcoevo run
 uv run medcoevo matrix
-uv run medcoevo inspect
+uv run medcoevo inspect <run-path>
+uv run medcoevo compare-context-budgets <run-a-path> <run-b-path>
 uv run medcoevo create-graph
 uv run medcoevo build-base-image
 uv run medcoevo list
@@ -295,25 +288,25 @@ Selectors:
 
 Core run options:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--iterations` | config value | Number of experiment iterations. |
-| `--seed` | config value | Random seed. |
-| `--condition` | config value | Feedback routing condition. |
-| `--skill-updates` | config value | Which skill families may be committed. |
-| `--advisor-buffer-max` | config value | Executor proposal batch size override. |
-| `--coevo-interval` | config value | Planner/Mediator reflection interval override. |
-| `--diffusion-enabled`, `--no-diffusion-enabled` | config value | Override diffusion emission and routing. |
-| `--diffusion-policy` | config value | Override artifact selection policy. |
-| `--diffusion-graph` | config value | Override graph policy/name. |
-| `--diffusion-max-artifacts` | config value | Maximum artifacts rendered for a target context. |
-| `--diffusion-top-k-neighbors` | config value | Neighbor cap for `top_k_similarity`. |
-| `--harbor-agent-setup-timeout-multiplier` | config value | Forward a Harbor setup timeout multiplier for slow agent setup. |
-| `--run-id` | auto suffix | Optional run id suffix for the timestamp-prefixed output directory. |
-| `--config-dir` | `config/` | Directory containing `default.toml`. |
-| `--cloud` | false | Run Harbor jobs on the configured GCP VM. |
-| `--cloud-env-file` | `.env` | Dotenv file containing GCP VM Harbor settings. |
-| `--verbose`, `-v` | false | Enable debug logging. |
+| Option                                          | Default      | Meaning                                                             |
+| ----------------------------------------------- | ------------ | ------------------------------------------------------------------- |
+| `--iterations`                                  | config value | Number of experiment iterations.                                    |
+| `--seed`                                        | config value | Random seed.                                                        |
+| `--condition`                                   | config value | Feedback routing condition.                                         |
+| `--skill-updates`                               | config value | Which skill families may be committed.                              |
+| `--advisor-buffer-max`                          | config value | Executor proposal batch size override.                              |
+| `--coevo-interval`                              | config value | Planner/Mediator reflection interval override.                      |
+| `--diffusion-enabled`, `--no-diffusion-enabled` | config value | Override diffusion emission and routing.                            |
+| `--diffusion-policy`                            | config value | Override artifact selection policy.                                 |
+| `--diffusion-graph`                             | config value | Override graph policy/name.                                         |
+| `--diffusion-max-artifacts`                     | config value | Maximum artifacts rendered for a target context.                    |
+| `--diffusion-top-k-neighbors`                   | config value | Neighbor cap for `top_k_similarity`.                                |
+| `--harbor-agent-setup-timeout-multiplier`       | config value | Forward a Harbor setup timeout multiplier for slow agent setup.     |
+| `--run-id`                                      | auto suffix  | Optional run id suffix for the timestamp-prefixed output directory. |
+| `--config-dir`                                  | `config/`    | Directory containing `default.toml`.                                |
+| `--cloud`                                       | false        | Run Harbor jobs on the configured GCP VM.                           |
+| `--cloud-env-file`                              | `.env`       | Dotenv file containing GCP VM Harbor settings.                      |
+| `--verbose`, `-v`                               | false        | Enable debug logging.                                               |
 
 Diffusion override values:
 
@@ -380,14 +373,14 @@ uv run medcoevo matrix \
 
 Baseline rows:
 
-| Preset | Condition | Skill updates |
-| --- | --- | --- |
-| `no_feedback` | `no_feedback` | `none` |
-| `full_trace_same_task` | `full_traces` | `none` |
-| `static_mediator_same_task` | `static_mediator` | `none` |
-| `planner_only_skill_evolution` | `learned_mediator` | `planner` |
-| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator` |
-| `full_coevolution` | `learned_mediator` | `executor,planner,mediator` |
+| Preset                             | Condition          | Skill updates               |
+| ---------------------------------- | ------------------ | --------------------------- |
+| `no_feedback`                      | `no_feedback`      | `none`                      |
+| `full_trace_same_task`             | `full_traces`      | `none`                      |
+| `static_mediator_same_task`        | `static_mediator`  | `none`                      |
+| `planner_only_skill_evolution`     | `learned_mediator` | `planner`                   |
+| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator`                  |
+| `full_coevolution`                 | `learned_mediator` | `executor,planner,mediator` |
 
 Each row gets an isolated copy of the skill tree under its experiment
 directory.
@@ -419,9 +412,38 @@ uv run medcoevo inspect --json
 
 `inspect` understands both single-run directories and baseline matrix
 directories. For runs with diffusion output it reports artifact counts,
-rendered subscription counts, and graph snapshot counts. `--config-dir` is used
-only when `inspect` needs to locate the newest experiment from the configured
-`paths.data_dir`.
+rendered subscription counts, graph snapshot counts, and planner prior-context
+token summaries. `--config-dir` is used only when `inspect` needs to locate the
+newest experiment from the configured `paths.data_dir`.
+
+## `compare-context-budgets`
+
+`compare-context-budgets` is a read-only evaluation command for two completed
+experiment directories. It does not call Harbor or any LLM. It reads
+`config.toml`, `metrics.jsonl`, and diffusion audit artifacts, then reports
+whether the runs are comparable, which budget fields differ, how realized
+prior-context tokens changed, and whether rendered diffusion records pass
+basic provenance checks.
+
+```bash
+uv run medcoevo compare-context-budgets \
+  data/experiments/<run-a> \
+  data/experiments/<run-b>
+```
+
+Emit JSON for notebooks or scripts:
+
+```bash
+uv run medcoevo compare-context-budgets \
+  data/experiments/<run-a> \
+  data/experiments/<run-b> \
+  --json
+```
+
+The command treats same-task prior tokens, cross-task prior tokens, diffusion
+tokens, and total planner prior-context tokens as observed metrics, not config
+knobs. A change to `budgets.max_diffusion_context_tokens` is an experiment setup
+difference; changes in the token fields are outcomes of that setup.
 
 Audit skill-update provenance, adjacent reward effects, delayed Mediator report
 effects, committed-update ledger entries, rejected reflection evidence, diff
@@ -447,11 +469,11 @@ weights, active thresholds, kept/cut edges, and connected components.
 
 `create-graph` options:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--threshold` | `0.05` | Minimum similarity score required to keep an edge. |
-| `--tasks-root` | `benchmarks/skillflow/tasks` | Local SkillFlow task directory to analyze. |
-| `--output-dir` | `data/task_graphs/skillflow-local` | Directory where JSON graph artifacts are written. |
+| Option         | Default                            | Meaning                                            |
+| -------------- | ---------------------------------- | -------------------------------------------------- |
+| `--threshold`  | `0.05`                             | Minimum similarity score required to keep an edge. |
+| `--tasks-root` | `benchmarks/skillflow/tasks`       | Local SkillFlow task directory to analyze.         |
+| `--output-dir` | `data/task_graphs/skillflow-local` | Directory where JSON graph artifacts are written.  |
 
 The command writes `task_profiles.json`, `pairwise_similarity.json`, and
 `graph_summary.json`.
@@ -466,11 +488,11 @@ uv run medcoevo build-base-image
 
 Options:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--base-image-tag` | `skillflow/harbor-cli-base:ubuntu24.04` | Docker tag for the base image. |
-| `--dry-run` | false | Print the build command without running it. |
-| `--verbose`, `-v` | false | Enable debug logging. |
+| Option             | Default                                 | Meaning                                     |
+| ------------------ | --------------------------------------- | ------------------------------------------- |
+| `--base-image-tag` | `skillflow/harbor-cli-base:ubuntu24.04` | Docker tag for the base image.              |
+| `--dry-run`        | false                                   | Print the build command without running it. |
+| `--verbose`, `-v`  | false                                   | Enable debug logging.                       |
 
 ## `sync`
 
@@ -509,23 +531,23 @@ uv run medcoevo run --task Distribution-Center-Auditing/harbor_returns_dispositi
 
 `list` options:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--family` | none | Filter task IDs by SkillFlow family. |
-| `--local` | false | List cached local tasks instead of remote Hugging Face tasks. |
-| `--dataset` | `zhang-ziao/SkillFlow-Task` | Hugging Face dataset ID for remote listing. |
-| `--config-dir` | `config/` | Directory containing `default.toml`. |
-| `--verbose`, `-v` | false | Enable debug logging. |
+| Option            | Default                     | Meaning                                                       |
+| ----------------- | --------------------------- | ------------------------------------------------------------- |
+| `--family`        | none                        | Filter task IDs by SkillFlow family.                          |
+| `--local`         | false                       | List cached local tasks instead of remote Hugging Face tasks. |
+| `--dataset`       | `zhang-ziao/SkillFlow-Task` | Hugging Face dataset ID for remote listing.                   |
+| `--config-dir`    | `config/`                   | Directory containing `default.toml`.                          |
+| `--verbose`, `-v` | false                       | Enable debug logging.                                         |
 
 `sync` options:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--tasks`, `--task`, `-t` | all remote test tasks | Task IDs to download; repeat, comma-separate, or pass `all`. |
-| `--output-dir` | configured local cache | Destination tasks directory. |
-| `--dataset` | `zhang-ziao/SkillFlow-Task` | Hugging Face dataset ID. |
-| `--config-dir` | `config/` | Directory containing `default.toml`. |
-| `--verbose`, `-v` | false | Enable debug logging. |
+| Option                    | Default                     | Meaning                                                      |
+| ------------------------- | --------------------------- | ------------------------------------------------------------ |
+| `--tasks`, `--task`, `-t` | all remote test tasks       | Task IDs to download; repeat, comma-separate, or pass `all`. |
+| `--output-dir`            | configured local cache      | Destination tasks directory.                                 |
+| `--dataset`               | `zhang-ziao/SkillFlow-Task` | Hugging Face dataset ID.                                     |
+| `--config-dir`            | `config/`                   | Directory containing `default.toml`.                         |
+| `--verbose`, `-v`         | false                       | Enable debug logging.                                        |
 
 ## Cloud VM Harbor Setup
 
@@ -626,7 +648,14 @@ Diffusion observability fields in `metrics.jsonl`:
 - `graph_snapshot_id`.
 - `diffusion_artifacts_eligible`, `diffusion_artifacts_selected`, and
   `diffusion_artifacts_rendered`.
-- `diffusion_context_tokens` and `source_task_ids`.
+- `same_task_prior_tokens`, `cross_task_prior_tokens`,
+  `diffusion_context_tokens`, and `total_planner_prior_context_tokens`.
+- `max_same_task_prior_tokens`, `max_cross_task_prior_tokens`,
+  `max_diffusion_context_tokens`, and `max_total_prior_context_tokens`, recorded
+  as the effective caps used for that row.
+- `context_budget_violation`, `compacted_diffusion_artifact_ids`, and
+  `dropped_for_budget_artifact_ids`.
+- `source_task_ids`.
 - `reward_after_diffusion_context` and `regression_after_diffusion_context`
   when rendered diffusion context was present.
 
@@ -641,7 +670,7 @@ config/default.toml
 The current config controls:
 
 - model IDs for Planner, Executor, Mediator, and Judge;
-- prompt and completion token budgets;
+- prompt, completion, and diffusion-context token budgets;
 - default iteration cadence;
 - skill update and validation defaults;
 - diffusion emission, selection, and graph-routing settings;
@@ -653,10 +682,20 @@ CLI options override the loaded config for a single run. The resolved config is
 persisted in the experiment directory as `config.toml`. Required experiment
 settings must be present in `default.toml` unless the CLI provides an override;
 otherwise the command fails before runtime setup and names the missing setting.
+Budget fields are required config fields as well; `core/config.py` intentionally
+does not provide runtime defaults for `[budgets]`.
 
 Current task/runtime defaults include:
 
 ```toml
+[budgets]
+max_skill_tokens = 4000
+max_diffusion_context_tokens = 4000
+trace_excerpt_tokens = 6000
+historical_summary_tokens = 3000
+mediator_report_tokens = 4000
+planner_context_tokens = 24000
+
 [diffusion]
 enabled = false
 policy = "none"

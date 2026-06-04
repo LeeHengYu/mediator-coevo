@@ -30,7 +30,7 @@ class DiffusionSubscription:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def build_capped_broadcast_context(
+async def build_capped_broadcast_context(
     *,
     store: DiffusionStore,
     snapshot: TaskGraphSnapshot,
@@ -51,7 +51,7 @@ def build_capped_broadcast_context(
         max_artifacts=max_artifacts,
     )
     store.store_graph_snapshot(snapshot, overwrite=True)
-    return render_diffusion_subscriptions(
+    return await render_diffusion_subscriptions(
         store=store,
         snapshot=snapshot,
         model=model,
@@ -63,7 +63,7 @@ def build_capped_broadcast_context(
     )
 
 
-def build_random_k_context(
+async def build_random_k_context(
     *,
     store: DiffusionStore,
     snapshot: TaskGraphSnapshot,
@@ -88,7 +88,7 @@ def build_random_k_context(
         seed=seed,
     )
     store.store_graph_snapshot(snapshot, overwrite=True)
-    return render_diffusion_subscriptions(
+    return await render_diffusion_subscriptions(
         store=store,
         snapshot=snapshot,
         model=model,
@@ -241,4 +241,3 @@ def _eligible_artifacts(
         for artifact in visible_artifacts
         if artifact.source_task_id != target_task_id
     ]
-

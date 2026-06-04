@@ -53,6 +53,18 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "diffusion_artifacts_selected": record.diffusion_artifacts_selected,
         "diffusion_artifacts_rendered": record.diffusion_artifacts_rendered,
         "diffusion_context_tokens": record.diffusion_context_tokens,
+        "same_task_prior_tokens": record.same_task_prior_tokens,
+        "cross_task_prior_tokens": record.cross_task_prior_tokens,
+        "total_planner_prior_context_tokens": (
+            record.total_planner_prior_context_tokens
+        ),
+        "max_same_task_prior_tokens": record.max_same_task_prior_tokens,
+        "max_cross_task_prior_tokens": record.max_cross_task_prior_tokens,
+        "max_diffusion_context_tokens": record.max_diffusion_context_tokens,
+        "max_total_prior_context_tokens": record.max_total_prior_context_tokens,
+        "context_budget_violation": record.context_budget_violation,
+        "compacted_diffusion_artifact_ids": record.compacted_diffusion_artifact_ids,
+        "dropped_for_budget_artifact_ids": record.dropped_for_budget_artifact_ids,
         "source_task_ids": record.source_task_ids,
         "reward_after_diffusion_context": record.reward_after_diffusion_context,
         "regression_after_diffusion_context": (

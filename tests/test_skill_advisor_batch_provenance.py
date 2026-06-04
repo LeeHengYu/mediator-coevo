@@ -16,7 +16,7 @@ from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 def _models_config() -> ModelsConfig:
@@ -98,6 +98,7 @@ def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _Skill
             mediator="test-mediator",
             judge="test-judge",
         ),
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )

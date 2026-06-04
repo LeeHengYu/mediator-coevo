@@ -37,7 +37,7 @@ from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 def _config() -> Config:
@@ -48,6 +48,7 @@ def _config() -> Config:
             mediator="test-mediator",
             judge="test-judge",
         ),
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -276,6 +277,24 @@ def _write_minimal_config(config_dir) -> None:
         mediator = "test-mediator"
         judge = "test-judge"
 
+        [budgets]
+        max_skill_tokens = 4000
+        max_diffusion_context_tokens = 4000
+        trace_excerpt_tokens = 6000
+        historical_summary_tokens = 3000
+        mediator_report_tokens = 4000
+        planner_context_tokens = 24000
+        skill_update_diff_tokens = 6000
+        mediator_prompt_tokens = 16000
+        advisor_prompt_tokens = 12000
+        reflector_prompt_tokens = 16000
+        judge_prompt_tokens = 16000
+        planner_completion_tokens = 4096
+        mediator_completion_tokens = 2048
+        advisor_completion_tokens = 512
+        reflector_completion_tokens = 4096
+        judge_completion_tokens = 2048
+
         [experiment]
         num_iterations = 2
         coevo_interval = 2
@@ -307,6 +326,24 @@ def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
         executor = "test-executor"
         mediator = "test-mediator"
         judge = "test-judge"
+
+        [budgets]
+        max_skill_tokens = 4000
+        max_diffusion_context_tokens = 4000
+        trace_excerpt_tokens = 6000
+        historical_summary_tokens = 3000
+        mediator_report_tokens = 4000
+        planner_context_tokens = 24000
+        skill_update_diff_tokens = 6000
+        mediator_prompt_tokens = 16000
+        advisor_prompt_tokens = 12000
+        reflector_prompt_tokens = 16000
+        judge_prompt_tokens = 16000
+        planner_completion_tokens = 4096
+        mediator_completion_tokens = 2048
+        advisor_completion_tokens = 512
+        reflector_completion_tokens = 4096
+        judge_completion_tokens = 2048
         """
     )
 
@@ -341,6 +378,41 @@ def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
     assert config.experiment.seed == 7
 
 
+def test_load_config_requires_budget_settings_from_toml(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "default.toml").write_text(
+        """
+        [models]
+        planner = "test-planner"
+        executor = "test-executor"
+        mediator = "test-mediator"
+        judge = "test-judge"
+
+        [experiment]
+        num_iterations = 2
+        coevo_interval = 2
+        advisor_buffer_max = 2
+        seed = 42
+        condition_name = "learned_mediator"
+
+        [experiment.skill_updates]
+        executor = true
+        planner = true
+        mediator = true
+
+        [diffusion]
+        enabled = false
+        policy = "none"
+        max_artifacts = 3
+        top_k_neighbors = 3
+        """
+    )
+
+    with pytest.raises(ConfigLoadError, match="budgets.max_diffusion_context_tokens"):
+        load_config(config_dir)
+
+
 def test_load_config_requires_diffusion_policy_from_toml_or_overrides(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -351,6 +423,24 @@ def test_load_config_requires_diffusion_policy_from_toml_or_overrides(tmp_path):
         executor = "test-executor"
         mediator = "test-mediator"
         judge = "test-judge"
+
+        [budgets]
+        max_skill_tokens = 4000
+        max_diffusion_context_tokens = 4000
+        trace_excerpt_tokens = 6000
+        historical_summary_tokens = 3000
+        mediator_report_tokens = 4000
+        planner_context_tokens = 24000
+        skill_update_diff_tokens = 6000
+        mediator_prompt_tokens = 16000
+        advisor_prompt_tokens = 12000
+        reflector_prompt_tokens = 16000
+        judge_prompt_tokens = 16000
+        planner_completion_tokens = 4096
+        mediator_completion_tokens = 2048
+        advisor_completion_tokens = 512
+        reflector_completion_tokens = 4096
+        judge_completion_tokens = 2048
 
         [experiment]
         num_iterations = 2
@@ -392,6 +482,24 @@ def test_load_config_requires_diffusion_max_artifacts_from_toml_or_overrides(tmp
         executor = "test-executor"
         mediator = "test-mediator"
         judge = "test-judge"
+
+        [budgets]
+        max_skill_tokens = 4000
+        max_diffusion_context_tokens = 4000
+        trace_excerpt_tokens = 6000
+        historical_summary_tokens = 3000
+        mediator_report_tokens = 4000
+        planner_context_tokens = 24000
+        skill_update_diff_tokens = 6000
+        mediator_prompt_tokens = 16000
+        advisor_prompt_tokens = 12000
+        reflector_prompt_tokens = 16000
+        judge_prompt_tokens = 16000
+        planner_completion_tokens = 4096
+        mediator_completion_tokens = 2048
+        advisor_completion_tokens = 512
+        reflector_completion_tokens = 4096
+        judge_completion_tokens = 2048
 
         [experiment]
         num_iterations = 2
@@ -435,6 +543,24 @@ def test_load_config_requires_diffusion_top_k_neighbors_from_toml_or_overrides(
         executor = "test-executor"
         mediator = "test-mediator"
         judge = "test-judge"
+
+        [budgets]
+        max_skill_tokens = 4000
+        max_diffusion_context_tokens = 4000
+        trace_excerpt_tokens = 6000
+        historical_summary_tokens = 3000
+        mediator_report_tokens = 4000
+        planner_context_tokens = 24000
+        skill_update_diff_tokens = 6000
+        mediator_prompt_tokens = 16000
+        advisor_prompt_tokens = 12000
+        reflector_prompt_tokens = 16000
+        judge_prompt_tokens = 16000
+        planner_completion_tokens = 4096
+        mediator_completion_tokens = 2048
+        advisor_completion_tokens = 512
+        reflector_completion_tokens = 4096
+        judge_completion_tokens = 2048
 
         [experiment]
         num_iterations = 2

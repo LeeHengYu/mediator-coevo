@@ -13,7 +13,7 @@ from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 class _LLM:
@@ -69,6 +69,7 @@ def _config(*, diffusion_enabled: bool) -> Config:
             mediator="test-mediator",
             judge="test-judge",
         ),
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )

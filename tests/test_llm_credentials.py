@@ -11,7 +11,7 @@ from mediated_coevo.cli.experiment import prepare_llm_credentials_or_exit
 from mediated_coevo.experiment.runtime_factory import ExperimentFactory
 from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_credentials
 from mediated_coevo.main import app
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 def test_config_normalize_models_keeps_executor_model_harbor_ready():
@@ -22,6 +22,7 @@ def test_config_normalize_models_keeps_executor_model_harbor_ready():
             "mediator": "openai/gpt-5.5",
             "judge": "openai/gpt-5.5",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -42,6 +43,7 @@ def test_config_normalize_models_collapses_duplicate_openrouter_prefixes():
             "mediator": "openrouter/openrouter/openai/gpt-5.5",
             "judge": "openrouter/openrouter/qwen/qwen3.6-flash",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -62,6 +64,7 @@ def test_config_normalize_models_rejects_blank_model_name():
             "mediator": "openai/gpt-5.5",
             "judge": "   ",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -79,6 +82,7 @@ def test_executor_agent_is_hermes_only_not_configurable():
                 "mediator": "openai/gpt-5.5",
                 "judge": "openai/gpt-5.5",
             },
+            budgets=budgets_config(),
             experiment=experiment_config(),
             diffusion=diffusion_config(),
             executor_runtime={"agent_name": "other-agent"},
@@ -94,6 +98,7 @@ def test_config_normalize_models_rejects_prefix_only_model_names(model: str):
             mediator="openai/gpt-5.5",
             judge=model,
         ),
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
@@ -147,6 +152,7 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
             "mediator": "openrouter/openai/gpt-5.5",
             "judge": "openai/gpt-5.5",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )

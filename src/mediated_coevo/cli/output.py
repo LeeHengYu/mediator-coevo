@@ -181,6 +181,23 @@ def print_inspection_payload(payload: dict[str, Any]) -> None:
     console.print(f"      Selected: {diffusion_payload['selected_record_count']}")
     console.print(f"      Rendered: {diffusion_payload['rendered_record_count']}")
 
+    prior_summary = metrics_summary.get("planner_prior_context")
+    if prior_summary:
+        total_prior_tokens = prior_summary["total_planner_prior_context_tokens"]
+        console.print("    Planner prior context:")
+        console.print(
+            "      Total tokens: "
+            f"total={_format_summary_number(total_prior_tokens['total'])} "
+            f"mean={_format_summary_number(total_prior_tokens['mean'])} "
+            f"max={_format_summary_number(total_prior_tokens['max'])}"
+        )
+        console.print(
+            "      Budget events: "
+            f"violations={prior_summary['context_budget_violation_count']} "
+            f"compacted={prior_summary['compacted_diffusion_artifact_count']} "
+            f"dropped={prior_summary['dropped_for_budget_artifact_count']}"
+        )
+
     context_summary = metrics_summary.get("context")
     if not context_summary:
         return
@@ -224,6 +241,55 @@ def print_inspection_payload(payload: dict[str, Any]) -> None:
         f"{regression_summary['count']} "
         f"rate={_format_summary_number(regression_summary['rate'])}"
     )
+
+
+def print_context_budget_comparison(comparison: Any) -> None:
+    """Print a concise context-budget comparison."""
+    console.print("\n[bold]Context-budget comparison:[/]")
+    console.print(f"  Status: {comparison.comparability_status}")
+    console.print(f"  Run A: {comparison.run_a.experiment_dir}")
+    console.print(f"  Run B: {comparison.run_b.experiment_dir}")
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Field")
+    table.add_column("Run A mean", justify="right")
+    table.add_column("Run B mean", justify="right")
+    table.add_column("Delta", justify="right")
+    for field, delta in comparison.token_delta_percent.items():
+        table.add_row(
+            field,
+            _format_summary_number(comparison.run_a.token_means.get(field)),
+            _format_summary_number(comparison.run_b.token_means.get(field)),
+            _format_percent(delta),
+        )
+    console.print(table)
+
+    if comparison.setup_mismatches:
+        console.print("  [red]Setup mismatches:[/]")
+        for mismatch in comparison.setup_mismatches:
+            console.print(
+                f"    {mismatch.path}: "
+                f"{mismatch.run_a!r} != {mismatch.run_b!r}"
+            )
+    if comparison.budget_differences:
+        console.print("  Budget differences:")
+        for difference in comparison.budget_differences:
+            console.print(
+                f"    {difference.path}: "
+                f"{difference.run_a!r} != {difference.run_b!r}"
+            )
+    if comparison.artifact_validity_failures:
+        console.print("  [red]Artifact validity failures:[/]")
+        for failure in comparison.artifact_validity_failures[:10]:
+            console.print(
+                "    "
+                f"{failure.run_label} {failure.artifact_id}: "
+                f"{failure.description}"
+            )
+        remaining = len(comparison.artifact_validity_failures) - 10
+        if remaining > 0:
+            console.print(f"    ... {remaining} more")
+    console.print(f"  Interpretation: {comparison.recommended_interpretation}")
 
 
 def print_task_selection(selection: TaskSelectionDisplay) -> None:
@@ -281,3 +347,9 @@ def _format_summary_number(value: float | None) -> str:
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.3f}"
+
+
+def _format_percent(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.1f}%"

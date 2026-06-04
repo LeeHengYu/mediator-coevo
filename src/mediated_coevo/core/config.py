@@ -30,6 +30,22 @@ class ConfigLoadError(ValueError):
 
 
 REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
+    ("budgets", "max_skill_tokens"),
+    ("budgets", "max_diffusion_context_tokens"),
+    ("budgets", "trace_excerpt_tokens"),
+    ("budgets", "historical_summary_tokens"),
+    ("budgets", "mediator_report_tokens"),
+    ("budgets", "planner_context_tokens"),
+    ("budgets", "skill_update_diff_tokens"),
+    ("budgets", "mediator_prompt_tokens"),
+    ("budgets", "advisor_prompt_tokens"),
+    ("budgets", "reflector_prompt_tokens"),
+    ("budgets", "judge_prompt_tokens"),
+    ("budgets", "planner_completion_tokens"),
+    ("budgets", "mediator_completion_tokens"),
+    ("budgets", "advisor_completion_tokens"),
+    ("budgets", "reflector_completion_tokens"),
+    ("budgets", "judge_completion_tokens"),
     ("experiment", "num_iterations"),
     ("experiment", "coevo_interval"),
     ("experiment", "seed"),
@@ -45,6 +61,22 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
 )
 
 CONFIG_CLI_HINTS: dict[str, str] = {
+    "budgets.max_skill_tokens": "config/default.toml",
+    "budgets.max_diffusion_context_tokens": "config/default.toml",
+    "budgets.trace_excerpt_tokens": "config/default.toml",
+    "budgets.historical_summary_tokens": "config/default.toml",
+    "budgets.mediator_report_tokens": "config/default.toml",
+    "budgets.planner_context_tokens": "config/default.toml",
+    "budgets.skill_update_diff_tokens": "config/default.toml",
+    "budgets.mediator_prompt_tokens": "config/default.toml",
+    "budgets.advisor_prompt_tokens": "config/default.toml",
+    "budgets.reflector_prompt_tokens": "config/default.toml",
+    "budgets.judge_prompt_tokens": "config/default.toml",
+    "budgets.planner_completion_tokens": "config/default.toml",
+    "budgets.mediator_completion_tokens": "config/default.toml",
+    "budgets.advisor_completion_tokens": "config/default.toml",
+    "budgets.reflector_completion_tokens": "config/default.toml",
+    "budgets.judge_completion_tokens": "config/default.toml",
     "experiment.num_iterations": "--iterations",
     "experiment.coevo_interval": "--coevo-interval",
     "experiment.seed": "--seed",
@@ -97,21 +129,22 @@ class ModelsConfig(BaseModel):
 
 
 class BudgetsConfig(BaseModel):
-    max_skill_tokens: int = 4000
-    trace_excerpt_tokens: int = 6000
-    historical_summary_tokens: int = 3000
-    mediator_report_tokens: int = 4000
-    planner_context_tokens: int = 24000
-    skill_update_diff_tokens: int = 6000
-    mediator_prompt_tokens: int = 16000
-    advisor_prompt_tokens: int = 12000
-    reflector_prompt_tokens: int = 16000
-    judge_prompt_tokens: int = 16000
-    planner_completion_tokens: int = 4096
-    mediator_completion_tokens: int = 2048
-    advisor_completion_tokens: int = 512
-    reflector_completion_tokens: int = 4096
-    judge_completion_tokens: int = 2048
+    max_skill_tokens: int
+    max_diffusion_context_tokens: int
+    trace_excerpt_tokens: int
+    historical_summary_tokens: int
+    mediator_report_tokens: int
+    planner_context_tokens: int
+    skill_update_diff_tokens: int
+    mediator_prompt_tokens: int
+    advisor_prompt_tokens: int
+    reflector_prompt_tokens: int
+    judge_prompt_tokens: int
+    planner_completion_tokens: int
+    mediator_completion_tokens: int
+    advisor_completion_tokens: int
+    reflector_completion_tokens: int
+    judge_completion_tokens: int
 
 
 class JudgeConfig(BaseModel):
@@ -208,7 +241,7 @@ class Config(BaseModel):
     """Top-level configuration. Loaded from TOML."""
 
     models: ModelsConfig
-    budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
+    budgets: BudgetsConfig
     experiment: ExperimentConfig
     diffusion: DiffusionConfig
     judge: JudgeConfig = Field(default_factory=JudgeConfig)

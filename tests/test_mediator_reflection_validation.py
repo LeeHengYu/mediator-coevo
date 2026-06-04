@@ -20,7 +20,7 @@ from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
-from tests.config_helpers import diffusion_config, experiment_config
+from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
 class _LLM:
@@ -225,6 +225,7 @@ def _orchestrator(tmp_path):
             "mediator": "test-mediator",
             "judge": "test-judge",
         },
+        budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
     )
