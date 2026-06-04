@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from mediated_coevo.analysis.judge_rewards import (
+    JUDGE_SYSTEM_PROMPT,
     annotate_judge_rewards,
     append_judge_reward_record,
     compute_judge_reward,
@@ -234,6 +235,24 @@ def test_true_flag_requires_evidence():
         )
 
 
+def test_judge_prompt_requires_nested_axis_schema():
+    assert '"axis_scores": {' in JUDGE_SYSTEM_PROMPT
+    assert '"flags": {' in JUDGE_SYSTEM_PROMPT
+    assert '"confidence": 0.0' in JUDGE_SYSTEM_PROMPT
+    assert '"rationale": "concise evidence-grounded explanation"' in JUDGE_SYSTEM_PROMPT
+    assert '"flag_evidence": {}' in JUDGE_SYSTEM_PROMPT
+    assert (
+        "Allowed top-level keys are exactly: axis_scores, flags, confidence, "
+        "rationale,"
+    ) in JUDGE_SYSTEM_PROMPT
+    assert "flag_evidence. Do not add any other top-level keys." in JUDGE_SYSTEM_PROMPT
+    assert "Rubric axis names must appear only inside axis_scores" in JUDGE_SYSTEM_PROMPT
+    assert (
+        "top-level task_outcome, evidence_quality,\n"
+        "skill_update_usefulness, token_efficiency, or reflection_depth is invalid"
+    ) in JUDGE_SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_live_judge_reward_returns_evolution_metadata(tmp_path):
     trace = _trace()
@@ -373,6 +392,48 @@ async def test_malformed_judge_response_falls_back_to_verifier_reward(tmp_path):
     entries = history.query(recent=10)
     assert entries[0].metadata["judge_reward"] == pytest.approx(0.5)
     assert entries[0].metadata["judge_confidence"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_flat_legacy_judge_response_falls_back_with_specific_error(tmp_path):
+    run_dir, history, _ = _scored_run_with_history(tmp_path)
+    flat_payload = {
+        "task_outcome": 0.8,
+        "evidence_quality": 0.6,
+        "skill_update_usefulness": 0.4,
+        "token_efficiency": 0.5,
+        "reflection_depth": 0.2,
+        "flags": {
+            "benchmark_gaming_or_obscured_failure": False,
+            "no_meaningful_progress": False,
+            "brittle_or_one_off_patch": False,
+            "unverifiable_outcome": False,
+        },
+        "confidence": 0.9,
+        "rationale": "Old flat schema.",
+        "flag_evidence": {},
+    }
+
+    records = await annotate_judge_rewards(
+        data_dir=run_dir,
+        config=_config(),
+        history_store=history,
+        llm_client=_FakeJudgeClient(content=json.dumps(flat_payload)),
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.raw_reward == pytest.approx(0.5)
+    assert record.judge_reward == pytest.approx(0.5)
+    assert record.metadata["judge_reward_fallback"] is True
+    assert record.metadata["fallback_reason"] == "invalid_judge_response"
+    assert (
+        "judge_returned_top_level_axis_scores"
+        in record.metadata["fallback_error"]
+    )
+    assert "task_outcome" in record.metadata["fallback_error"]
+    assert "evidence_quality" in record.metadata["fallback_error"]
+    assert "reflection_depth" in record.metadata["fallback_error"]
 
 
 @pytest.mark.asyncio

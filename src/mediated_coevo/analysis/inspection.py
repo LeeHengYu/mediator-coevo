@@ -123,7 +123,7 @@ def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None
             if rendered_count > 0:
                 rendered_rows.append(row)
 
-        source_task_ids = set()
+        source_task_ids: set[str] = set()
         for row in rendered_rows:
             source_ids = row.get("source_task_ids")
             if not isinstance(source_ids, list):

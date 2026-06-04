@@ -31,17 +31,47 @@ from mediated_coevo.stores.history_store import HistoryStore
 logger = logging.getLogger(__name__)
 
 JUDGE_REWARDS_PATH = Path("artifacts") / "judge_rewards.jsonl"
+JUDGE_AXIS_SCORE_KEYS = frozenset(
+    {
+        "task_outcome",
+        "evidence_quality",
+        "skill_update_usefulness",
+        "token_efficiency",
+        "reflection_depth",
+    }
+)
 JUDGE_SYSTEM_PROMPT = """\
 You are an LLM-as-judge reward annotator.
 
-Return ONLY a JSON object with exactly these fields:
-- axis_scores: object with task_outcome, evidence_quality,
-  skill_update_usefulness, token_efficiency, reflection_depth, each in [0, 1]
-- flags: object with benchmark_gaming_or_obscured_failure,
-  no_meaningful_progress, brittle_or_one_off_patch, unverifiable_outcome booleans
-- confidence: number in [0, 1]
-- rationale: concise evidence-grounded explanation
-- flag_evidence: object mapping every true flag name to concrete evidence text
+Return ONLY a JSON object matching this exact schema shape:
+{
+  "axis_scores": {
+    "task_outcome": 0.0,
+    "evidence_quality": 0.0,
+    "skill_update_usefulness": 0.0,
+    "token_efficiency": 0.0,
+    "reflection_depth": 0.0
+  },
+  "flags": {
+    "benchmark_gaming_or_obscured_failure": false,
+    "no_meaningful_progress": false,
+    "brittle_or_one_off_patch": false,
+    "unverifiable_outcome": false
+  },
+  "confidence": 0.0,
+  "rationale": "concise evidence-grounded explanation",
+  "flag_evidence": {}
+}
+
+Allowed top-level keys are exactly: axis_scores, flags, confidence, rationale,
+flag_evidence. Do not add any other top-level keys.
+
+Rubric axis names must appear only inside axis_scores and must not appear at
+top level. A response with top-level task_outcome, evidence_quality,
+skill_update_usefulness, token_efficiency, or reflection_depth is invalid.
+
+Each axis score and confidence must be a number in [0, 1]. Each flag must be a
+boolean. flag_evidence must map every true flag name to concrete evidence text.
 
 Do not compute the final scalar reward. Code will apply weights and caps.
 """
@@ -427,12 +457,22 @@ async def _judge_candidate(
             condition_name=config.experiment.condition_name,
         )
         payload = parse_json_object(result["content"])
+        _reject_top_level_axis_scores(payload)
         return JudgeLLMResponse.model_validate(payload)
     except Exception as exc:
         raise JudgeRewardAnnotationError(
             f"invalid judge response for {candidate.task_id} "
             f"iteration {candidate.iteration}: {exc}"
         ) from exc
+
+
+def _reject_top_level_axis_scores(payload: dict[str, Any]) -> None:
+    top_level_axis_keys = sorted(JUDGE_AXIS_SCORE_KEYS.intersection(payload))
+    if top_level_axis_keys:
+        raise ValueError(
+            "judge_returned_top_level_axis_scores: "
+            + ", ".join(top_level_axis_keys)
+        )
 
 
 def _candidate_prompt(candidate: _JudgeCandidate) -> str:

@@ -17,9 +17,14 @@ from mediated_coevo.core.config import Config
 
 
 class TaskSelectionDisplay(Protocol):
-    task_ids: list[str]
-    family: str | None
-    task_set: str | None
+    @property
+    def task_ids(self) -> list[str]: ...
+
+    @property
+    def family(self) -> str | None: ...
+
+    @property
+    def task_set(self) -> str | None: ...
 
 
 console = Console()
