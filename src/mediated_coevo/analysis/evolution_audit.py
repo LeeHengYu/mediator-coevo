@@ -110,7 +110,7 @@ class SkillUpdateEffectAudit(BaseModel):
 
 
 class MediatorReportEffectAudit(BaseModel):
-    """Delayed same-task outcome movement after one Mediator report."""
+    """Same-task outcome movement associated with one Mediator report."""
 
     entry_id: str
     report_iteration: int

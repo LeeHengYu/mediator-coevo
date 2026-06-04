@@ -73,10 +73,10 @@ The main online evolution reward is the Judge reward. The verifier reward is
 kept as provenance and used as fallback when Judge scoring is unavailable.
 
 After a usable task run finishes, the Judge-scored evolution reward is assigned
-to pending same-task history entries from the prior iteration. This delayed
-tagging matches the loop timing: a Mediator report, Planner edit, or buffered
-Executor proposal produced at iteration `N` can only affect the downstream task
-run at iteration `N + 1`.
+directly to same-task history entries from that run once those entries exist.
+This keeps the reward label aligned with the trace/report/proposal record from
+the same iteration, while preserving verifier reward provenance for audit and
+fallback scoring.
 
 History entries keep:
 
@@ -445,7 +445,7 @@ tokens, and total planner prior-context tokens as observed metrics, not config
 knobs. A change to `budgets.max_diffusion_context_tokens` is an experiment setup
 difference; changes in the token fields are outcomes of that setup.
 
-Audit skill-update provenance, adjacent reward effects, delayed Mediator report
+Audit skill-update provenance, adjacent reward effects, Mediator report
 effects, committed-update ledger entries, rejected reflection evidence, diff
 artifact paths, and adjacent reward regressions from an experiment metrics file:
 

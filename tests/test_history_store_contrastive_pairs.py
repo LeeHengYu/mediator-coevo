@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
-from mediated_coevo.models.skill import RejectedReflectionBatch, SkillValidationResult
+from mediated_coevo.models.skill import (
+    RejectedReflectionBatch,
+    SkillProposal,
+    SkillValidationResult,
+)
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 
@@ -92,18 +96,18 @@ def test_contrastive_pairs_use_judge_evolution_reward_over_verifier_metadata(
 ):
     store = HistoryStore(history_dir=tmp_path / "history")
     first = _add_entry(store, task_id="task-A", reward=None, iteration=0)
-    store.remember_pending_outcome("task-A", planner_entry_id=first)
-    store.tag_pending_outcome(
+    store.tag_outcome(
         "task-A",
-        _trace("task-A", iteration=1, reward=0.0),
+        _trace("task-A", iteration=0, reward=0.0),
+        entry_ids=[first],
         outcome_reward=0.7,
         outcome_metadata={"reward_source": "judge", "judge_reward": 0.7},
     )
     second = _add_entry(store, task_id="task-A", reward=None, iteration=1)
-    store.remember_pending_outcome("task-A", planner_entry_id=second)
-    store.tag_pending_outcome(
+    store.tag_outcome(
         "task-A",
-        _trace("task-A", iteration=2, reward=1.0),
+        _trace("task-A", iteration=1, reward=1.0),
+        entry_ids=[second],
         outcome_reward=0.4,
         outcome_metadata={"reward_source": "judge", "judge_reward": 0.4},
     )
@@ -115,7 +119,39 @@ def test_contrastive_pairs_use_judge_evolution_reward_over_verifier_metadata(
     ]
     assert pairs[0].worse.metadata["verifier_reward"] == pytest.approx(1.0)
     assert pairs[0].better.metadata["verifier_reward"] == pytest.approx(0.0)
+    assert pairs[0].worse.iteration == pairs[0].worse.metadata["outcome_iteration"]
+    assert pairs[0].better.iteration == pairs[0].better.metadata["outcome_iteration"]
     assert _reward_gap(pairs[0]) == pytest.approx(0.3)
+
+
+def test_tag_outcome_updates_current_iteration_proposals(tmp_path):
+    store = HistoryStore(history_dir=tmp_path / "history")
+    current = SkillProposal(
+        old_content="old",
+        new_content="new",
+        iteration=2,
+        task_id="task-A",
+    )
+    previous = SkillProposal(
+        old_content="old",
+        new_content="new",
+        iteration=1,
+        task_id="task-A",
+    )
+
+    store.tag_outcome(
+        "task-A",
+        _trace("task-A", iteration=2, reward=1.0),
+        proposals=[current, previous],
+        outcome_reward=0.8,
+        outcome_metadata={"reward_source": "judge", "judge_reward": 0.8},
+    )
+
+    assert current.reward == pytest.approx(0.8)
+    assert current.reward_source == "judge"
+    assert current.verifier_reward == pytest.approx(1.0)
+    assert current.judge_reward == pytest.approx(0.8)
+    assert previous.reward is None
 
 
 def test_tagged_task_counts_group_by_role_and_task(tmp_path):

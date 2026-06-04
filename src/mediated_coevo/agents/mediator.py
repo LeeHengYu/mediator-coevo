@@ -10,7 +10,7 @@ The Mediator actions:
   1. FILTER   — select relevant artifacts based on task context
   2. COMPRESS — distill raw traces into concise reports within token budget
   3. DECIDE   — expose or withhold (sometimes surfacing nothing is best)
-  4. TAG      — annotate past reports with downstream results (deferred)
+  4. TAG      — annotate reports with task outcome rewards
 
 Trace and report persistence is owned by the Orchestrator.
 The Mediator has read-only access to the artifact store (query_summaries).

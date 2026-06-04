@@ -346,7 +346,7 @@ class Orchestrator:
             feedback=proposal_feedback,
         )
 
-        self.history_store.tag_pending_outcome(
+        self.history_store.tag_outcome(
             task_id,
             trace,
             proposals=self._proposal_buffer,
@@ -359,13 +359,20 @@ class Orchestrator:
             proposal_buffer=self._proposal_buffer,
         )
         mediator_entry_id, planner_entry_id = (
-            await self._record_history_and_remember_outcome(
+            await self._record_history_entries(
                 task_id=task_id,
                 iteration=iteration,
                 condition=condition,
                 report=report,
                 skill_update=skill_update,
             )
+        )
+        self.history_store.tag_outcome(
+            task_id,
+            trace,
+            entry_ids=[mediator_entry_id, planner_entry_id],
+            outcome_reward=outcome_reward,
+            outcome_metadata=outcome_metadata,
         )
 
         duration = time.time() - start
@@ -443,11 +450,6 @@ class Orchestrator:
             error_detail=str(exc),
         )
         self.artifact_store.store_trace(trace)
-        self.history_store.tag_pending_outcome(
-            task_id,
-            trace,
-            proposals=self._proposal_buffer,
-        )
         llm_token_events = self._drain_llm_token_events()
         logger.warning(
             "Iteration %d skipped before planning: task=%s status=%s error_kind=%s",
@@ -502,7 +504,7 @@ class Orchestrator:
         else:
             logger.info("Planner decided: no proposal needed.")
 
-    async def _record_history_and_remember_outcome(
+    async def _record_history_entries(
         self,
         *,
         task_id: str,
@@ -532,11 +534,6 @@ class Orchestrator:
                 payload=build_planner_signal(skill_update),
             )
 
-        self.history_store.remember_pending_outcome(
-            task_id,
-            mediator_entry_id=mediator_entry_id,
-            planner_entry_id=planner_entry_id,
-        )
         if report is not None and report.is_exposed:
             self._previous_report_by_task[task_id] = report
             self._staged_cross_task_reports_by_task[task_id] = report

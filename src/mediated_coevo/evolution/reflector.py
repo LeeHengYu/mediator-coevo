@@ -562,8 +562,8 @@ class Reflector:
                 "You are reflecting on your performance as a Mediator agent. "
                 "Your coordination-protocol skill defines HOW you curate "
                 "execution feedback for the Planner. You will see contrastive "
-                "pairs: cases where your reporting led to better vs. worse "
-                "downstream outcomes. Use these to revise your protocol.\n\n"
+                "pairs: reports associated with better vs. worse same-iteration "
+                "same-task outcome rewards. Use these to revise your protocol.\n\n"
                 "If you believe the current protocol already captures the "
                 "lessons from the evidence, include a no_update candidate. "
                 "Otherwise, return JSON with 2-3 candidate protocol updates. "
@@ -578,8 +578,9 @@ class Reflector:
             current_skill=current_skill,
             evidence_intro=(
                 "Below are pairs of your past reports. In each pair, one report "
-                "led to a WORSE downstream evolution reward and the other to a BETTER one "
-                "relative to the same task's average outcome. "
+                "is associated with a WORSE same-iteration same-task outcome "
+                "reward and the other with a BETTER one relative to the same "
+                "task's average outcome. "
                 "Each entry shows the mediator's headline, decision, abstraction "
                 "level, evolution reward, task-relative delta, and a diagnostic excerpt "
                 "of the report."
@@ -587,7 +588,7 @@ class Reflector:
             instructions=(
                 "Revise your coordination protocol based on the patterns above. "
                 "Keep the same JSON output format. Focus on:\n"
-                "1. What reporting style led to better outcomes?\n"
+                "1. What reporting patterns appear in better-outcome entries?\n"
                 "2. When should you withhold vs. expose?\n"
                 "3. What abstraction level works best?\n"
                 "Make minimal, targeted changes. Do not rewrite from scratch."
@@ -619,9 +620,9 @@ class Reflector:
             system_text=(
                 "You are reflecting on your performance as a Planner agent. "
                 "Your skill-refiner skill defines HOW you decide to edit the "
-                "Executor's skills. You will see contrastive pairs: skill edits "
-                "that led to better vs. worse outcomes. Use these to revise "
-                "your editing strategy.\n\n"
+                "Executor's skills. You will see contrastive pairs: skill-edit "
+                "records associated with better vs. worse same-iteration same-task "
+                "outcome rewards. Use these to revise your editing strategy.\n\n"
                 "If you believe the current guidelines already capture the "
                 "lessons from the evidence, include a no_update candidate. "
                 f"Otherwise, {candidate_instruction}. Each candidate must include "
@@ -636,15 +637,16 @@ class Reflector:
             current_skill=current_skill,
             evidence_intro=(
                 "Below are pairs of your past skill edits. In each pair, one "
-                "edit led to a WORSE downstream evolution reward and the other to a "
-                "BETTER one relative to the same task's average outcome. Each "
+                "edit record is associated with a WORSE same-iteration same-task "
+                "outcome reward and the other with a BETTER one relative to the "
+                "same task's average outcome. Each "
                 "entry shows your full reasoning, evolution reward, task-relative "
                 "delta, the diff size, and a head+tail excerpt of the diff itself."
             ),
             instructions=(
                 "Revise your skill-refiner guidelines based on the patterns "
                 "above. Focus on:\n"
-                "1. What kinds of edits led to better outcomes?\n"
+                "1. What edit patterns appear in better-outcome entries?\n"
                 "2. What edit patterns should you avoid?\n"
                 "3. How should you interpret the Mediator's feedback?\n"
                 "Make minimal, targeted changes. Do not rewrite from scratch."

@@ -19,6 +19,19 @@ def test_reflector_prompts_require_integrated_rewrites():
     assert "avoid appended addenda" in planner_system
 
 
+def test_reflector_prompts_describe_same_iteration_outcome_evidence():
+    mediator_messages = Reflector._build_mediator_prompt("", [])
+    planner_messages = Reflector._build_planner_prompt("", [])
+    prompt_text = "\n".join(
+        message["content"] for message in mediator_messages + planner_messages
+    )
+
+    assert "same-iteration same-task outcome reward" in prompt_text
+    assert "associated with better vs. worse same-iteration same-task" in prompt_text
+    assert "led to better" not in prompt_text
+    assert "downstream" not in prompt_text
+
+
 def test_planner_batch_prompt_includes_rejected_update_history():
     prompt = PlannerAgent._build_update_prompt(
         {

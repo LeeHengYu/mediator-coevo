@@ -267,15 +267,20 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
     assert "report for task-B iter 0" in task_b_iter_1
     assert "source_task=task-A iter=0" in task_b_iter_1
 
-    tagged_iter_zero = {
-        entry.metadata["task_id"]: entry.reward
+    tagged_rewards = {
+        (entry.metadata["task_id"], entry.iteration): entry.reward
         for entry in history_store._entries
-        if entry.iteration == 0
     }
-    assert tagged_iter_zero == {
-        "task-A": pytest.approx(0.25),
-        "task-B": pytest.approx(0.95),
+    assert tagged_rewards == {
+        ("task-A", 0): pytest.approx(0.10),
+        ("task-B", 0): pytest.approx(0.80),
+        ("task-A", 1): pytest.approx(0.25),
+        ("task-B", 1): pytest.approx(0.95),
     }
+    assert all(
+        entry.metadata["outcome_iteration"] == entry.iteration
+        for entry in history_store._entries
+    )
     assert sorted(
         (trace.task_id, trace.iteration)
         for trace in artifact_store.query_traces(recent=10)

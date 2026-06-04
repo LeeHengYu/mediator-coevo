@@ -18,9 +18,9 @@ class AbstractionLevel(str, Enum):
 
 
 class OutcomeTag(BaseModel):
-    """Retroactively added by outcome_tagger after downstream results are known."""
+    """Task outcome annotation added after reward scoring is available."""
 
-    reward: float  # Reward on the iteration after this report
+    reward: float  # Outcome reward associated with this report
     skill_changed: bool  # Whether the Planner edited skills after this report
 
 

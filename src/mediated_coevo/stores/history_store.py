@@ -1,7 +1,7 @@
 """History store — outcome-tagged history for co-evolution.
 
 Stores the history of mediator reports and planner skill edits, each tagged
-with the downstream reward. Used by the reflector to build contrastive pairs
+with its task outcome reward. Used by the reflector to build contrastive pairs
 and reflection prompts. Rejected executor skill proposal batches are stored in
 a separate sidecar file so they can be inspected later without becoming
 committed skill-update history.
@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import random
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
@@ -44,7 +44,7 @@ class HistoryEntry(BaseModel):
     iteration: int
     agent_role: str
     payload: HistorySignal
-    reward: float | None = None  # Filled by tag_outcome_by_id
+    reward: float | None = None  # Filled by tag_outcome
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.now)
 
@@ -96,8 +96,6 @@ class HistoryStore:
         self._entries: list[HistoryEntry] = []
         self._rejected_proposal_batches: list[RejectedProposalBatch] = []
         self._rejected_reflection_batches: list[RejectedReflectionBatch] = []
-        self._pending_mediator_entry_id_by_task: dict[str, str] = {}
-        self._pending_planner_entry_id_by_task: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -190,40 +188,25 @@ class HistoryStore:
             )
         )
 
-    def remember_pending_outcome(
-        self,
-        task_id: str,
-        *,
-        mediator_entry_id: str | None = None,
-        planner_entry_id: str | None = None,
-    ) -> None:
-        """Remember entries that should be tagged by the next clean reward."""
-        if mediator_entry_id:
-            self._pending_mediator_entry_id_by_task[task_id] = mediator_entry_id
-        if planner_entry_id:
-            self._pending_planner_entry_id_by_task[task_id] = planner_entry_id
-
-    def tag_pending_outcome(
+    def tag_outcome(
         self,
         task_id: str,
         trace: ExecutionTrace,
         *,
+        entry_ids: Iterable[str | None] = (),
         proposals: list[SkillProposal] | None = None,
         outcome_reward: float | None = None,
         outcome_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Tag pending role entries with this trace's evolution reward."""
-        if trace.iteration <= 0:
-            return
-
-        mediator_entry_id = self._pending_mediator_entry_id_by_task.pop(task_id, None)
-        planner_entry_id = self._pending_planner_entry_id_by_task.pop(task_id, None)
-
+        """Tag same-iteration history entries and proposals with this outcome."""
+        tagged_entry_ids: list[str] = [
+            entry_id for entry_id in entry_ids if entry_id is not None
+        ]
         reward = trace.reward if outcome_reward is None else outcome_reward
         if not trace.is_usable_feedback_signal or reward is None:
-            if mediator_entry_id or planner_entry_id:
+            if tagged_entry_ids:
                 logger.info(
-                    "Dropping carry-forward entry IDs untagged for task=%s "
+                    "Leaving history entry IDs untagged for task=%s "
                     "(trace status=%s reward=%s)",
                     task_id,
                     trace.status,
@@ -241,23 +224,14 @@ class HistoryStore:
         if outcome_metadata:
             metadata.update(outcome_metadata)
 
-        if mediator_entry_id:
+        for entry_id in tagged_entry_ids:
             self.tag_outcome_by_id(
-                mediator_entry_id,
-                reward=reward,
-                metadata=metadata,
-            )
-        if planner_entry_id:
-            self.tag_outcome_by_id(
-                planner_entry_id,
+                entry_id,
                 reward=reward,
                 metadata=metadata,
             )
         for proposal in proposals or []:
-            if (
-                proposal.iteration == trace.iteration - 1
-                and proposal.task_id == task_id
-            ):
+            if proposal.iteration == trace.iteration and proposal.task_id == task_id:
                 proposal.reward = reward
                 reward_source = metadata.get("reward_source")
                 proposal.reward_source = (
