@@ -77,6 +77,11 @@ def sync_skillflow(
             ),
         ),
     ] = None,
+    family: str | None = typer.Option(
+        None,
+        "--family",
+        help="Download all remote SkillFlow tasks from this family.",
+    ),
     output_dir: Path | None = typer.Option(
         None,
         "--output-dir",
@@ -97,10 +102,19 @@ def sync_skillflow(
     repository = build_benchmark_repo(PROJECT_ROOT, config)
     task_ids = _task_ids_from_repeatable_cli(tasks) if tasks else None
     if task_ids is not None and any(task_id.lower() == "all" for task_id in task_ids):
-        if len(task_ids) > 1:
-            raise typer.BadParameter("--tasks all cannot be combined with task IDs")
+        if len(task_ids) > 1 or family is not None:
+            raise typer.BadParameter(
+                "--tasks all cannot be combined with task IDs or --family"
+            )
         task_ids = None
     try:
+        if family is not None:
+            family_task_ids = repository.list_remote_task_ids(family=family)
+            if not family_task_ids:
+                raise typer.BadParameter(
+                    f"no SkillFlow tasks found for family {family!r}"
+                )
+            task_ids = (task_ids or []) + family_task_ids
         destination = repository.sync_tasks(
             destination=output_dir,
             task_ids=task_ids,

@@ -124,6 +124,7 @@ def build_benchmark_repo(project_root: Path, config: Config) -> SkillFlowReposit
             dataset=config.executor_runtime.dataset,
             repo_type=config.executor_runtime.dataset_repo_type,
             local_dir=config.executor_runtime.task_dirs[0],
+            remote_task_cache_path=project_root / "docs" / "skillflow_tasks.txt",
         ),
     )
 

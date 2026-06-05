@@ -59,6 +59,7 @@ class SkillFlowSyncConfig:
     dataset: str = DEFAULT_SKILLFLOW_DATASET
     repo_type: str = "dataset"
     local_dir: str = "tasks"
+    remote_task_cache_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -143,6 +144,32 @@ class SkillFlowRepository:
 
     def list_remote_task_ids(self, *, family: str | None = None) -> list[str]:
         """Return task IDs advertised by the configured remote SkillFlow dataset."""
+        task_ids = self._cached_remote_task_ids()
+        if task_ids is None:
+            task_ids = self._list_remote_task_ids_from_hf()
+        if family is None:
+            return task_ids
+        return [
+            task_id
+            for task_id in task_ids
+            if task_id.split("/", 1)[0] == family
+        ]
+
+    def _cached_remote_task_ids(self) -> list[str] | None:
+        if self.sync.remote_task_cache_path is None:
+            return None
+        if not self.sync.remote_task_cache_path.is_file():
+            return None
+        return sorted(
+            {
+                task_id
+                for line in self.sync.remote_task_cache_path.read_text().splitlines()
+                for task_id in [_remote_task_id_from_cache_line(line)]
+                if task_id is not None
+            }
+        )
+
+    def _list_remote_task_ids_from_hf(self) -> list[str]:
         command = [
             "hf",
             "datasets",
@@ -164,13 +191,7 @@ class SkillFlowRepository:
                 if task_id is not None
             }
         )
-        if family is None:
-            return task_ids
-        return [
-            task_id
-            for task_id in task_ids
-            if task_id.split("/", 1)[0] == family
-        ]
+        return task_ids
 
     def sync_tasks(
         self,
@@ -669,6 +690,15 @@ def _remote_task_id_from_file_line(line: str) -> str | None:
         task_id = normalized.split(marker, 1)[1].removesuffix("/task.toml")
         if "/" in task_id and _is_safe_task_id(task_id):
             return task_id
+    return None
+
+
+def _remote_task_id_from_cache_line(line: str) -> str | None:
+    normalized = line.strip().strip('"').strip("'")
+    if not normalized or normalized.startswith("#"):
+        return None
+    if "/" in normalized and _is_safe_task_id(normalized):
+        return normalized
     return None
 
 

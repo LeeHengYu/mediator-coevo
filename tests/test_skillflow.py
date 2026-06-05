@@ -12,8 +12,10 @@ from mediated_coevo.benchmarks import (
     HarborRunner,
     SKILLFLOW_VERIFIER_TYPE,
     SkillFlowRepository,
+    SkillFlowSyncConfig,
     parse_skillflow_execution_trace,
 )
+from mediated_coevo.cli import skillflow as skillflow_cli
 from mediated_coevo.main import app
 
 
@@ -102,6 +104,46 @@ def test_repository_lists_remote_task_ids(monkeypatch, tmp_path: Path) -> None:
         "--format",
         "quiet",
     ]
+
+
+def test_repository_lists_cached_remote_task_ids_before_hf(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skillflow"
+    task_cache_path = tmp_path / "skillflow_tasks.txt"
+    task_cache_path.write_text(
+        "\n".join(
+            [
+                "# cached SkillFlow tasks",
+                "family-b/task-two",
+                "family-a/task-one",
+                "family-a/task-one",
+                "invalid-without-family",
+                "",
+            ]
+        )
+    )
+    repo = SkillFlowRepository(
+        root_dir=root,
+        task_dirs=["tasks"],
+        sync=SkillFlowSyncConfig(remote_task_cache_path=task_cache_path),
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("cached task listing should not call hf")
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.subprocess.run",
+        fake_run,
+    )
+
+    assert repo.list_remote_task_ids() == [
+        "family-a/task-one",
+        "family-b/task-two",
+    ]
+    assert repo.list_remote_task_ids(family="family-a") == ["family-a/task-one"]
 
 
 def test_sync_tasks_downloads_all_test_tasks_to_configured_task_cache(
@@ -206,6 +248,72 @@ def test_sync_cli_accepts_selected_tasks(monkeypatch, tmp_path: Path) -> None:
     assert (tmp_path / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
 
 
+def test_sync_cli_accepts_family_selector(monkeypatch, tmp_path: Path) -> None:
+    task_cache_path = tmp_path / "skillflow_tasks.txt"
+    task_cache_path.write_text(
+        "\n".join(
+            [
+                "family-a/task-one",
+                "family-a/task-two",
+                "family-b/task-three",
+            ]
+        )
+    )
+    repo = SkillFlowRepository(
+        root_dir=tmp_path / "skillflow",
+        task_dirs=["tasks"],
+        sync=SkillFlowSyncConfig(
+            dataset="demo/dataset",
+            remote_task_cache_path=task_cache_path,
+        ),
+    )
+    calls = []
+
+    def fake_build_benchmark_repo(project_root, config):
+        del project_root
+        assert config.executor_runtime.dataset == "demo/dataset"
+        return repo
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        local_dir = Path(command[command.index("--local-dir") + 1])
+        _write_task(local_dir / "test_tasks" / "family-a" / "task-one", family="family-a")
+        _write_task(local_dir / "test_tasks" / "family-a" / "task-two", family="family-a")
+        return _Completed(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        skillflow_cli,
+        "build_benchmark_repo",
+        fake_build_benchmark_repo,
+    )
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.subprocess.run",
+        fake_run,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "sync",
+            "--output-dir",
+            str(tmp_path / "tasks"),
+            "--dataset",
+            "demo/dataset",
+            "--family",
+            "family-a",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Downloaded SkillFlow tasks to:" in result.output
+    assert "test_tasks/family-a/task-one/**" in calls[0]
+    assert "test_tasks/family-a/task-two/**" in calls[0]
+    assert "test_tasks/family-b/task-three/**" not in calls[0]
+    assert (tmp_path / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
+    assert (tmp_path / "tasks" / "family-a" / "task-two" / "task.toml").is_file()
+
+
 def test_build_base_image_cli_runs_skillflow_build_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -265,24 +373,40 @@ def test_build_base_image_cli_dry_run_does_not_run_build(
     assert "SkillFlow base image build complete" not in result.output
 
 
-def test_list_cli_queries_remote_tasks(monkeypatch) -> None:
-    def fake_run(command, **kwargs):
-        del kwargs
-        assert command == [
-            "hf",
-            "datasets",
-            "ls",
-            "demo/dataset",
-            "-R",
-            "--format",
-            "quiet",
-        ]
-        return _Completed(
-            returncode=0,
-            stdout="test_tasks/family-a/task-one/task.toml\n",
-            stderr="",
+def test_list_cli_uses_cached_remote_tasks(monkeypatch, tmp_path: Path) -> None:
+    task_cache_path = tmp_path / "skillflow_tasks.txt"
+    task_cache_path.write_text(
+        "\n".join(
+            [
+                "family-a/task-one",
+                "family-a/task-two",
+                "family-b/task-three",
+            ]
         )
+    )
+    repo = SkillFlowRepository(
+        root_dir=tmp_path / "skillflow",
+        task_dirs=["tasks"],
+        sync=SkillFlowSyncConfig(
+            dataset="demo/dataset",
+            remote_task_cache_path=task_cache_path,
+        ),
+    )
 
+    def fake_build_benchmark_repo(project_root, config):
+        del project_root
+        assert config.executor_runtime.dataset == "demo/dataset"
+        return repo
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("cached list should not call hf")
+
+    monkeypatch.setattr(
+        skillflow_cli,
+        "build_benchmark_repo",
+        fake_build_benchmark_repo,
+    )
     monkeypatch.setattr(
         "mediated_coevo.benchmarks.skillflow.subprocess.run",
         fake_run,
@@ -290,11 +414,11 @@ def test_list_cli_queries_remote_tasks(monkeypatch) -> None:
 
     result = CliRunner().invoke(
         app,
-        ["list", "--dataset", "demo/dataset"],
+        ["list", "--dataset", "demo/dataset", "--family", "family-a"],
     )
 
     assert result.exit_code == 0
-    assert result.output.strip() == "family-a/task-one"
+    assert result.output.splitlines() == ["family-a/task-one", "family-a/task-two"]
 
 
 def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
