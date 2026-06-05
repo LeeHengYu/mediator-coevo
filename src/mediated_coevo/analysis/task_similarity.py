@@ -200,10 +200,6 @@ class ScoreWeights(BaseModel):
     same_family_tags: float = 0.10
     same_family_category: float = 0.05
     same_family_io_shape: float = 0.05
-    cross_family_tags: float = 0.20
-    cross_family_category: float = 0.10
-    cross_family_io_shape: float = 0.10
-    cross_family_instruction_text: float = 0.05
 
 
 class TaskSimilarityProfile(BaseModel):
@@ -277,7 +273,7 @@ def build_task_graph_precompute(
     edge_score_threshold: float | None = None,
     score_weights: ScoreWeights | None = None,
 ) -> TaskGraphPrecompute:
-    """Build metadata profiles, all pair scores, and threshold-pruned edges."""
+    """Build metadata profiles, family-scoped pair scores, and pruned edges."""
     features = load_task_features(tasks_root)
     if not features:
         raise ValueError(f"no task directories found under {tasks_root}")
@@ -353,17 +349,29 @@ def compute_pairwise_similarity(
 ) -> list[PairSimilarity]:
     """Compute weighted directed SkillFlow edge candidates."""
     pairs: list[PairSimilarity] = []
-    for source, target in itertools.permutations(sorted(features), 2):
-        source_features = features[source]
-        target_features = features[target]
-        pair = _score_directed_edge(
-            source_features=source_features,
-            target_features=target_features,
-            score_weights=score_weights,
-        )
-        if pair is not None:
-            pairs.append(pair)
+    for task_ids in _task_ids_by_family(features).values():
+        for source, target in itertools.permutations(task_ids, 2):
+            source_features = features[source]
+            target_features = features[target]
+            pair = _score_directed_edge(
+                source_features=source_features,
+                target_features=target_features,
+                score_weights=score_weights,
+            )
+            if pair is not None:
+                pairs.append(pair)
     return pairs
+
+
+def _task_ids_by_family(
+    features: dict[str, _ProfileFeatures],
+) -> dict[str, list[str]]:
+    family_task_ids: dict[str, list[str]] = {}
+    for task_id in sorted(features):
+        family_id = features[task_id].profile.family_id
+        if family_id:
+            family_task_ids.setdefault(family_id, []).append(task_id)
+    return family_task_ids
 
 
 def percentile_threshold(values: list[float], percentile: float) -> float:
@@ -531,37 +539,27 @@ def _score_directed_edge(
     components = _component_scores(source_features, target_features)
     source = source_features.profile
     target = target_features.profile
-    same_family = bool(source.family_id) and source.family_id == target.family_id
+    if not source.family_id or source.family_id != target.family_id:
+        return None
     rank_gap: int | None = None
     rank_affinity = 0.0
 
-    if same_family:
-        if source.rank is None or target.rank is None:
-            return None
-        rank_gap = target.rank - source.rank
-        if rank_gap <= 0:
-            return None
-        rank_affinity = _rank_affinity(
-            rank_gap=rank_gap,
-            family_size=source.family_size or target.family_size or 0,
-        )
-        score = (
-            score_weights.same_family_base
-            + score_weights.rank_affinity * rank_affinity
-            + score_weights.same_family_tags * components["tags"]
-            + score_weights.same_family_category * components["category"]
-            + score_weights.same_family_io_shape * components["io_shape"]
-        )
-        edge_kind = "same_family_forward"
-    else:
-        score = (
-            score_weights.cross_family_tags * components["tags"]
-            + score_weights.cross_family_category * components["category"]
-            + score_weights.cross_family_io_shape * components["io_shape"]
-            + score_weights.cross_family_instruction_text
-            * components["instruction_text"]
-        )
-        edge_kind = "cross_family"
+    if source.rank is None or target.rank is None:
+        return None
+    rank_gap = target.rank - source.rank
+    if rank_gap <= 0:
+        return None
+    rank_affinity = _rank_affinity(
+        rank_gap=rank_gap,
+        family_size=source.family_size or target.family_size or 0,
+    )
+    score = (
+        score_weights.same_family_base
+        + score_weights.rank_affinity * rank_affinity
+        + score_weights.same_family_tags * components["tags"]
+        + score_weights.same_family_category * components["category"]
+        + score_weights.same_family_io_shape * components["io_shape"]
+    )
 
     return PairSimilarity(
         source=source.task_id,
@@ -571,8 +569,8 @@ def _score_directed_edge(
         shared=_shared_evidence(source_features, target_features),
         metadata={
             "directed": True,
-            "edge_kind": edge_kind,
-            "same_family": same_family,
+            "edge_kind": "same_family_forward",
+            "same_family": True,
             "source_family": source.family_id,
             "target_family": target.family_id,
             "source_rank": source.rank,

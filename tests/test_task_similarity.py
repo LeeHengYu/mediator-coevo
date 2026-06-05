@@ -72,14 +72,20 @@ def test_task_graph_precompute_scores_directed_skillflow_edges_and_cuts_below_p2
     precompute = build_task_graph_precompute(tasks_root)
 
     assert precompute.task_count == 4
-    assert precompute.pair_count == 9
-    assert precompute.kept_edge_count + precompute.cut_edge_count == 9
+    assert precompute.pair_count == 3
+    assert precompute.kept_edge_count + precompute.cut_edge_count == 3
+    assert precompute.components_after_cut == [
+        ["family-a/task-one", "family-a/task-three", "family-a/task-two"],
+        ["family-b/task-x"],
+    ]
 
     pairs = {
         (pair.source, pair.target): pair for pair in precompute.pairwise_similarity
     }
     forward_pair = pairs[("family-a/task-one", "family-a/task-two")]
     assert ("family-a/task-two", "family-a/task-one") not in pairs
+    assert ("family-a/task-one", "family-b/task-x") not in pairs
+    assert ("family-b/task-x", "family-a/task-one") not in pairs
     assert forward_pair.score == pytest.approx(1.0)
     assert forward_pair.metadata["edge_kind"] == "same_family_forward"
     assert forward_pair.metadata["rank_gap"] == 1
@@ -89,10 +95,7 @@ def test_task_graph_precompute_scores_directed_skillflow_edges_and_cuts_below_p2
 
     skipped_pair = pairs[("family-a/task-one", "family-a/task-three")]
     assert skipped_pair.metadata["rank_affinity"] == pytest.approx(0.0)
-    cross_pair = pairs[("family-a/task-one", "family-b/task-x")]
-    assert pairs[("family-b/task-x", "family-a/task-one")].score == cross_pair.score
-    assert cross_pair.metadata["edge_kind"] == "cross_family"
-    assert cross_pair.score < skipped_pair.score
+    assert all(pair.metadata["same_family"] for pair in precompute.pairwise_similarity)
 
     for pair in precompute.pairwise_similarity:
         if pair.score < precompute.p20_threshold:
@@ -154,7 +157,8 @@ def test_write_task_graph_artifacts(tmp_path: Path) -> None:
     tasks_root = tmp_path / "tasks"
     _write_task(
         tasks_root,
-        "task-a",
+        "family-a/task-a",
+        family="family-a",
         category="data",
         difficulty="easy",
         tags=["json"],
@@ -162,12 +166,14 @@ def test_write_task_graph_artifacts(tmp_path: Path) -> None:
     )
     _write_task(
         tasks_root,
-        "task-b",
+        "family-a/task-b",
+        family="family-a",
         category="data",
         difficulty="easy",
         tags=["json"],
         instruction="Write report.json.",
     )
+    _write_ranking(tasks_root, "family-a", ["task-a", "task-b"])
 
     output_dir = tmp_path / "graph"
     precompute = build_task_graph_precompute(tasks_root)
@@ -178,13 +184,14 @@ def test_write_task_graph_artifacts(tmp_path: Path) -> None:
     summary = json.loads((output_dir / "graph_summary.json").read_text())
 
     assert profiles["task_count"] == 2
-    assert sorted(profiles["profiles"]) == ["task-a", "task-b"]
+    assert sorted(profiles["profiles"]) == ["family-a/task-a", "family-a/task-b"]
     assert pairwise["graph_kind"] == "skillflow_ranked_similarity"
-    assert pairwise["pair_count"] == 2
+    assert pairwise["pair_count"] == 1
     assert pairwise["active_threshold"] == pairwise["p20_threshold"]
     assert pairwise["threshold_kind"] == "p20"
-    assert pairwise["pairs"][0]["source"] == "task-a"
+    assert pairwise["pairs"][0]["source"] == "family-a/task-a"
     assert pairwise["pairs"][0]["metadata"]["directed"] is True
+    assert pairwise["pairs"][0]["metadata"]["same_family"] is True
     assert summary["graph_kind"] == "skillflow_ranked_similarity"
     assert summary["task_count"] == 2
     assert "profiles" not in summary
@@ -196,7 +203,8 @@ def test_create_graph_cli_writes_thresholded_artifacts(tmp_path: Path) -> None:
     output_dir = tmp_path / "graph"
     _write_task(
         tasks_root,
-        "task-a",
+        "family-a/task-a",
+        family="family-a",
         category="Compilation & Build",
         difficulty="easy",
         tags=["build", "ci"],
@@ -204,7 +212,8 @@ def test_create_graph_cli_writes_thresholded_artifacts(tmp_path: Path) -> None:
     )
     _write_task(
         tasks_root,
-        "task-b",
+        "family-a/task-b",
+        family="family-a",
         category="Compilation & Build",
         difficulty="easy",
         tags=["build", "debugging"],
@@ -212,12 +221,15 @@ def test_create_graph_cli_writes_thresholded_artifacts(tmp_path: Path) -> None:
     )
     _write_task(
         tasks_root,
-        "task-c",
+        "family-b/task-c",
+        family="family-b",
         category="research",
         difficulty="medium",
         tags=["citation"],
         instruction="Write answer.json with fake citations.",
     )
+    _write_ranking(tasks_root, "family-a", ["task-a", "task-b"])
+    _write_ranking(tasks_root, "family-b", ["task-c"])
 
     result = CliRunner().invoke(
         app,
@@ -239,12 +251,16 @@ def test_create_graph_cli_writes_thresholded_artifacts(tmp_path: Path) -> None:
     pairwise = json.loads((output_dir / "pairwise_similarity.json").read_text())
 
     assert summary["task_count"] == 3
-    assert summary["pair_count"] == 6
+    assert summary["pair_count"] == 1
     assert summary["threshold_kind"] == "absolute_score"
     assert summary["active_threshold"] == 0.05
     assert summary["edge_score_threshold"] == 0.05
+    assert summary["components_after_cut"] == [
+        ["family-a/task-a", "family-a/task-b"],
+        ["family-b/task-c"],
+    ]
     assert pairwise["active_threshold"] == 0.05
-    assert len(pairwise["pairs"]) == 6
+    assert len(pairwise["pairs"]) == 1
 
 
 def _write_task(
