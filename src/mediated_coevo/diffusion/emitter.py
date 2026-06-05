@@ -51,17 +51,24 @@ class DiffusionEmitter:
         metadata = self._common_metadata(trace, task_metadata)
         trace_refs = [_trace_ref(trace)]
 
-        failure_signature = await self._failure_signature_content(trace)
-        if failure_signature:
+        run_outcome = await self._run_outcome_content(
+            trace,
+            record=record,
+            judge_reward=judge_reward,
+        )
+        if run_outcome:
             artifacts.append(
                 self._build_artifact(
-                    artifact_type=DiffusionArtifactType.FAILURE_SIGNATURE,
+                    artifact_type=DiffusionArtifactType.RUN_OUTCOME,
                     trace=trace,
-                    content=failure_signature,
+                    content=run_outcome,
                     evidence_trace_ids=trace_refs,
                     verifier_reward=trace.reward,
                     judge_reward=judge_reward,
-                    metadata=metadata,
+                    metadata={
+                        **metadata,
+                        "outcome_signal": _outcome_signal(trace, record),
+                    },
                 )
             )
 
@@ -136,15 +143,67 @@ class DiffusionEmitter:
             ),
         )
 
-    async def _failure_signature_content(self, trace: ExecutionTrace) -> str | None:
-        if not _is_task_failure(trace):
+    async def _run_outcome_content(
+        self,
+        trace: ExecutionTrace,
+        *,
+        record: IterationRecord,
+        judge_reward: float | None,
+    ) -> str | None:
+        if trace.status not in {"ok", "task_failed"} or trace.reward is None:
             return None
-        evidence = _failure_evidence_text(trace)
-        if not evidence:
-            return None
+
+        evidence_parts = [
+            f"task_id={trace.task_id}",
+            f"iteration={trace.iteration}",
+            f"status={trace.status}",
+            f"verifier_reward={_reward_text(trace.reward)}",
+            f"judge_reward={_reward_text(judge_reward)}",
+            f"record_success={record.success}",
+            f"record_verifier_status={record.verifier_status}",
+        ]
+        if record.delta_reward is not None:
+            evidence_parts.append(f"delta_reward={record.delta_reward:+.2f}")
+        if trace.stdout:
+            evidence_parts.append(f"stdout\n{trace.stdout}")
+        if trace.stderr:
+            evidence_parts.append(f"stderr\n{trace.stderr}")
+        if trace.test_results:
+            evidence_parts.append(
+                "test_results\n"
+                + json.dumps(trace.test_results, sort_keys=True, default=str)
+            )
+        if trace.error_detail is not None:
+            evidence_parts.append(f"error_detail\n{trace.error_detail}")
+
+        evidence = "\n\n".join(evidence_parts)
+        signal = _outcome_signal(trace, record)
+        if signal == "success":
+            focus = (
+                "This run succeeded. Emphasize what worked and why it is reusable, "
+                "while still naming avoidable pitfalls or assumptions."
+            )
+        elif signal == "failure":
+            focus = (
+                "This run failed. Emphasize what to avoid and the concrete failure "
+                "mode, while still preserving any partial progress or useful setup."
+            )
+        else:
+            focus = (
+                "This run had a mixed or partial outcome. Balance what worked, what "
+                "failed, and what a later run should verify."
+            )
+        content = (
+            f"{focus}\n\n"
+            "Return a mixed run-outcome signal with:\n"
+            "- what worked or seemed promising\n"
+            "- what to avoid or re-check\n"
+            "- concrete verifier evidence\n\n"
+            f"{evidence}"
+        )
         return await self._compact_text(
-            evidence,
-            label=f"failure signature for {trace.task_id} iter {trace.iteration}",
+            content,
+            label=f"run outcome for {trace.task_id} iter {trace.iteration}",
             budget_tokens=(
                 self.budgets.historical_summary_tokens if self.budgets else None
             ),
@@ -311,33 +370,14 @@ def _report_artifact_path(report: MediatorReport) -> str:
     )
 
 
-def _failure_evidence_text(trace: ExecutionTrace) -> str | None:
-    parts = [
-        f"task_id={trace.task_id}",
-        f"iteration={trace.iteration}",
-        f"status={trace.status}",
-        f"reward={_reward_text(trace.reward)}",
-    ]
-    if trace.stderr:
-        parts.append(f"stderr\n{trace.stderr}")
-    if trace.test_results:
-        parts.append(
-            "test_results\n"
-            + json.dumps(trace.test_results, sort_keys=True, default=str)
-        )
-    if trace.error_detail is not None:
-        parts.append(f"error_detail\n{trace.error_detail}")
-    if len(parts) == 4:
-        return None
-    return "\n\n".join(parts)
-
-
-def _is_task_failure(trace: ExecutionTrace) -> bool:
-    if trace.status == "task_failed":
-        return True
-    if trace.status != "ok" or trace.reward is None:
-        return False
-    return trace.reward <= 0.0
+def _outcome_signal(trace: ExecutionTrace, record: IterationRecord) -> str:
+    if record.success is True:
+        return "success"
+    if record.success is False or trace.status == "task_failed":
+        return "failure"
+    if trace.status == "ok" and trace.reward is not None and trace.reward <= 0.0:
+        return "failure"
+    return "mixed"
 
 
 def _previous_reward(

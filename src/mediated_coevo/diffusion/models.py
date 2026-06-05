@@ -17,7 +17,7 @@ def _record_id() -> str:
 class DiffusionArtifactType(str, Enum):
     """Planner-safe artifact categories allowed to diffuse across tasks."""
 
-    FAILURE_SIGNATURE = "failure_signature"
+    RUN_OUTCOME = "run_outcome"
     DEBUG_HINT = "debug_hint"
     MEDIATOR_REPORT_SUMMARY = "mediator_report_summary"
     REGRESSION_WARNING = "regression_warning"

@@ -149,6 +149,11 @@ those artifacts into another task's planner context also requires a non-`none`
 policy and an iteration number. Eligible artifacts must come from a different
 task and a prior source iteration.
 
+Run-outcome artifacts summarize each usable verifier run as mixed signal: what
+worked or looked promising, what to avoid or re-check, and concrete verifier
+evidence. Successful runs emphasize reusable choices; failed runs emphasize
+failure modes while preserving useful partial progress.
+
 Rendered diffusion context is capped by
 `budgets.max_diffusion_context_tokens`. When a selected artifact overflows that
 cap, the renderer first compacts the artifact with the same compactor path used
@@ -625,8 +630,8 @@ Important files:
 Diffusion output includes:
 
 - `diffusion/artifacts/*.json`: emitted low-risk source artifacts such as
-  failure signatures, mediator report summaries, debug hints, and regression
-  warnings.
+  `run_outcome` summaries, mediator report summaries, debug hints, and
+  regression warnings.
 - `diffusion/graph_snapshots/*.json`: per-iteration graph snapshots used for
   artifact selection.
 - `diffusion/diffused_records.jsonl`: audit ledger for eligible, selected, and

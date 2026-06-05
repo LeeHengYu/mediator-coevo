@@ -132,9 +132,12 @@ async def test_emit_diffusion_artifacts_uses_compactor_for_report_summary(monkey
         for artifact in artifacts
         if artifact.artifact_type == DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY
     )
-    assert compact_calls
-    assert compact_calls[0][0].startswith("Investigate the failing auth refresh path.")
-    assert "mediator report for task-A iter 2" == compact_calls[0][1]["label"]
+    report_call = next(
+        call
+        for call in compact_calls
+        if call[1]["label"] == "mediator report for task-A iter 2"
+    )
+    assert report_call[0].startswith("Investigate the failing auth refresh path.")
     assert summary.content == "COMPACTED REPORT SUMMARY"
     assert summary.evidence_report_ids == [report.report_id]
 
@@ -152,7 +155,12 @@ async def test_emit_diffusion_artifacts_skips_infra_failures():
     artifacts = await emit_diffusion_artifacts(
         trace=trace,
         report=None,
-        record=_record(iteration=3, reward=None, success=False, verifier_status="env_failure"),
+        record=_record(
+            iteration=3,
+            reward=None,
+            success=False,
+            verifier_status="env_failure",
+        ),
         model="test-model",
     )
 
@@ -184,8 +192,15 @@ async def test_emit_diffusion_artifacts_emits_failure_and_regression_warnings():
     )
 
     artifact_types = {artifact.artifact_type for artifact in artifacts}
-    assert DiffusionArtifactType.FAILURE_SIGNATURE in artifact_types
+    assert DiffusionArtifactType.RUN_OUTCOME in artifact_types
     assert DiffusionArtifactType.REGRESSION_WARNING in artifact_types
+    run_outcome = next(
+        artifact
+        for artifact in artifacts
+        if artifact.artifact_type == DiffusionArtifactType.RUN_OUTCOME
+    )
+    assert run_outcome.metadata["outcome_signal"] == "failure"
+    assert "expected 200 got 500" in run_outcome.content
     regression = next(
         artifact
         for artifact in artifacts
@@ -193,6 +208,35 @@ async def test_emit_diffusion_artifacts_emits_failure_and_regression_warnings():
     )
     assert "regressed from 0.40 to 0.00" in regression.content
     assert regression.metadata["trace_ref"] == "task-A:iter0004"
+
+
+@pytest.mark.asyncio
+async def test_emit_diffusion_artifacts_emits_success_run_outcome():
+    trace = ExecutionTrace(
+        task_id="task-A",
+        iteration=5,
+        reward=1.0,
+        status="ok",
+        stdout="1 passed in 0.12s",
+        test_results={"summary": {"passed": 1, "failed": 0}},
+    )
+
+    artifacts = await emit_diffusion_artifacts(
+        trace=trace,
+        report=None,
+        record=_record(iteration=5, reward=1.0, success=True),
+        model="test-model",
+        judge_reward=0.82,
+    )
+
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact.artifact_type == DiffusionArtifactType.RUN_OUTCOME
+    assert artifact.metadata["outcome_signal"] == "success"
+    assert artifact.verifier_reward == pytest.approx(1.0)
+    assert artifact.judge_reward == pytest.approx(0.82)
+    assert "what worked" in artifact.content
+    assert "1 passed" in artifact.content
 
 
 @pytest.mark.asyncio
@@ -227,6 +271,7 @@ async def test_orchestrator_emits_diffusion_artifacts_only_when_enabled(tmp_path
 
     artifacts = orchestrator._diffusion_store.query_artifacts(recent=10)
     assert {artifact.artifact_type for artifact in artifacts} == {
+        DiffusionArtifactType.RUN_OUTCOME,
         DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY,
         DiffusionArtifactType.DEBUG_HINT,
     }
