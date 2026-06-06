@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from mediated_coevo.core.config import Config, ModelsConfig
+from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.models.skill import (
@@ -16,16 +16,12 @@ from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
-from tests.config_helpers import budgets_config, diffusion_config, experiment_config
-
-
-def _models_config() -> ModelsConfig:
-    return ModelsConfig(
-        planner="test-planner",
-        executor="test-executor",
-        mediator="test-mediator",
-        judge="test-judge",
-    )
+from tests.config_helpers import (
+    budgets_config,
+    diffusion_config,
+    experiment_config,
+    models_config,
+)
 
 
 class _LLM:
@@ -92,12 +88,7 @@ def _orchestrator(tmp_path, advisor: SkillAdvisor) -> tuple[Orchestrator, _Skill
     skill_store = _SkillStore()
     orch: Any = Orchestrator.__new__(Orchestrator)
     orch.config = Config(
-        models=ModelsConfig(
-            planner="test-planner",
-            executor="test-executor",
-            mediator="test-mediator",
-            judge="test-judge",
-        ),
+        models=models_config(),
         budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),

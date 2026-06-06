@@ -4,6 +4,7 @@ from mediated_coevo.core.config import (
     BudgetsConfig,
     DiffusionConfig,
     ExperimentConfig,
+    ModelsConfig,
     SkillUpdateConfig,
 )
 
@@ -26,6 +27,15 @@ def budgets_config() -> BudgetsConfig:
         advisor_completion_tokens=512,
         reflector_completion_tokens=4096,
         judge_completion_tokens=2048,
+    )
+
+
+def models_config() -> ModelsConfig:
+    return ModelsConfig(
+        planner="test-planner",
+        executor="test-executor",
+        mediator="test-mediator",
+        judge="test-judge",
     )
 
 

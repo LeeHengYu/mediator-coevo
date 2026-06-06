@@ -33,6 +33,10 @@ SKILLFLOW_VERIFIER_TYPE = "skillflow_harbor"
 HERMES_AGENT_NAME = "hermes"
 HF_TEST_TASKS_ROOT = "test_tasks"
 HF_FAMILY_RANKING_FILENAME = "ALL_TASK_DIFFICULTY_RANKING.json"
+HARBOR_PREBUILT_IMAGE_PREFIX = "harbor-prebuilt:"
+LEGACY_HARBOR_BASE_IMAGE = "skillevlove/harbor-cli-openhands:ubuntu24.04"
+SKILLFLOW_HARBOR_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
+DOCKERFILE_FROM_IMAGE_RE = re.compile(r"^\s*FROM\s+(?P<image>[^\s]+)", re.IGNORECASE)
 
 
 class HarborNotFoundError(RuntimeError):
@@ -404,6 +408,7 @@ class HarborRunner:
         return self._harbor_path
 
     async def run(self, task_dir: Path, model: str) -> HarborRunResult:
+        await asyncio.to_thread(_ensure_declared_prebuilt_image, task_dir)
         result = await self._run_once(task_dir, model)
         if harbor_run_missing_prebuilt_image(result):
             raise HarborPrebuiltImageMissingError(
@@ -619,6 +624,121 @@ def _skillflow_task_resource_names(run_dir: Path) -> tuple[str, ...]:
         skill_dir.name
         for skill_dir in sorted(skills_dir.iterdir(), key=lambda path: path.name)
         if skill_dir.is_dir() and (skill_dir / "SKILL.md").is_file()
+    )
+
+
+def _ensure_declared_prebuilt_image(task_dir: Path) -> None:
+    image_name = _declared_task_docker_image(task_dir)
+    if image_name is None or not image_name.startswith(HARBOR_PREBUILT_IMAGE_PREFIX):
+        return
+    if _docker_image_exists(image_name):
+        return
+
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    if not dockerfile.is_file():
+        logger.warning(
+            "Prebuilt image %s is missing, but task Dockerfile is absent: %s",
+            image_name,
+            dockerfile,
+        )
+        return
+
+    logger.info(
+        "Prebuilt image %s is missing; rebuilding from %s",
+        image_name,
+        dockerfile,
+    )
+    _ensure_legacy_base_image_alias(dockerfile)
+    _run_docker_command(
+        [
+            "docker",
+            "build",
+            "--progress=plain",
+            "-f",
+            str(dockerfile),
+            "-t",
+            image_name,
+            str(dockerfile.parent),
+        ],
+        failure_message=(
+            f"Prebuilt Harbor image `{image_name}` is missing and automatic "
+            f"rebuild failed for SkillFlow task workspace {task_dir}"
+        ),
+    )
+
+
+def _declared_task_docker_image(task_dir: Path) -> str | None:
+    task_toml_path = task_dir / "task.toml"
+    if not task_toml_path.is_file():
+        return None
+    with open(task_toml_path, "rb") as f:
+        task_config = tomllib.load(f)
+    environment = as_mapping(task_config.get("environment"))
+    return as_nonempty_string(environment.get("docker_image"))
+
+
+def _docker_image_exists(image_name: str) -> bool:
+    completed = subprocess.run(
+        ["docker", "image", "inspect", image_name],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return completed.returncode == 0
+
+
+def _ensure_legacy_base_image_alias(dockerfile: Path) -> None:
+    if LEGACY_HARBOR_BASE_IMAGE not in _dockerfile_base_images(dockerfile):
+        return
+    if _docker_image_exists(LEGACY_HARBOR_BASE_IMAGE):
+        return
+    if not _docker_image_exists(SKILLFLOW_HARBOR_BASE_IMAGE):
+        logger.warning(
+            "Task Dockerfile uses legacy Harbor base image %s, but local base "
+            "image %s is missing. Run `uv run medcoevo build-base-image` first.",
+            LEGACY_HARBOR_BASE_IMAGE,
+            SKILLFLOW_HARBOR_BASE_IMAGE,
+        )
+        return
+    _run_docker_command(
+        [
+            "docker",
+            "tag",
+            SKILLFLOW_HARBOR_BASE_IMAGE,
+            LEGACY_HARBOR_BASE_IMAGE,
+        ],
+        failure_message=(
+            f"Failed to tag {SKILLFLOW_HARBOR_BASE_IMAGE} as "
+            f"{LEGACY_HARBOR_BASE_IMAGE}"
+        ),
+    )
+
+
+def _dockerfile_base_images(dockerfile: Path) -> set[str]:
+    images: set[str] = set()
+    for line in dockerfile.read_text(encoding="utf-8").splitlines():
+        match = DOCKERFILE_FROM_IMAGE_RE.match(line)
+        if match:
+            images.add(match.group("image"))
+    return images
+
+
+def _run_docker_command(command: list[str], *, failure_message: str) -> None:
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode == 0:
+        if completed.stdout.strip():
+            logger.debug("Docker command output: %s", completed.stdout.strip())
+        return
+    details = completed.stderr.strip() or completed.stdout.strip()
+    raise HarborPrebuiltImageMissingError(
+        f"{failure_message}. Command: {' '.join(command)}. {details}"
     )
 
 

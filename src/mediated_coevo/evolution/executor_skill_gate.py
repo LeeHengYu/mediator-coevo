@@ -16,6 +16,7 @@ from mediated_coevo.analysis.judge_rewards import (
 )
 from mediated_coevo.benchmarks import SkillFlowRepository
 from mediated_coevo.core.config import Config
+from mediated_coevo.core.utils import format_optional_reward
 from mediated_coevo.evolution.candidates import (
     build_candidate_batch,
     candidate_batch_artifact_path,
@@ -800,11 +801,7 @@ def _log_validation_judge_reward(
         variant,
         trace.task_id,
         trace.iteration + 1,
-        _format_reward(trace.reward),
-        _format_reward(judge_record.judge_reward),
+        format_optional_reward(trace.reward),
+        format_optional_reward(judge_record.judge_reward),
         metadata["reward_source"],
     )
-
-
-def _format_reward(reward: float | None) -> str:
-    return f"{reward:.2f}" if reward is not None else "n/a"

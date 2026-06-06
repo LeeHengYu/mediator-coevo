@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,22 @@ def as_optional_float(value: object) -> float | None:
     if math.isnan(number):
         return None
     return number
+
+
+def string_list_values(rows: Sequence[Mapping[str, Any]], key: str) -> list[str]:
+    """Extract string members from list-valued row fields."""
+    values: list[str] = []
+    for row in rows:
+        raw_values = row.get(key)
+        if not isinstance(raw_values, list):
+            continue
+        values.extend(value for value in raw_values if isinstance(value, str))
+    return values
+
+
+def format_optional_reward(reward: float | None) -> str:
+    """Render optional rewards consistently for logs."""
+    return f"{reward:.2f}" if reward is not None else "n/a"
 
 
 def parse_json_object(text: str) -> dict:

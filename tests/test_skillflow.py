@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import mediated_coevo.benchmarks.skillflow as skillflow_benchmark
 from mediated_coevo.benchmarks import (
     HarborPrebuiltImageMissingError,
     HarborRunResult,
@@ -605,6 +606,71 @@ def test_trace_parser_reads_observed_trial_verifier_rewards_shape(
     assert trace.harbor_metadata["reward_source"] == "trial_verifier_rewards"
     assert trace.harbor_metadata["agent_info.name"] == "nop"
     assert trace.harbor_metadata["agent_info.model_provider"] == "google"
+
+
+def test_declared_prebuilt_image_is_rebuilt_when_harbor_cleanup_removed_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "task"
+    environment_dir = task_dir / "environment"
+    environment_dir.mkdir(parents=True)
+    image_name = "harbor-prebuilt:task-demo"
+    (task_dir / "task.toml").write_text(
+        "\n".join(
+            [
+                "[environment]",
+                f'docker_image = "{image_name}"',
+            ]
+        )
+    )
+    (environment_dir / "Dockerfile").write_text(
+        f"FROM {skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE}\n",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        command = list(command)
+        calls.append(command)
+        if command == ["docker", "image", "inspect", image_name]:
+            return _Completed(returncode=1, stdout="", stderr="missing")
+        if command == [
+            "docker",
+            "image",
+            "inspect",
+            skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE,
+        ]:
+            return _Completed(returncode=1, stdout="", stderr="missing")
+        if command == [
+            "docker",
+            "image",
+            "inspect",
+            skillflow_benchmark.SKILLFLOW_HARBOR_BASE_IMAGE,
+        ]:
+            return _Completed(returncode=0, stdout="", stderr="")
+        return _Completed(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("mediated_coevo.benchmarks.skillflow.subprocess.run", fake_run)
+
+    skillflow_benchmark._ensure_declared_prebuilt_image(task_dir)
+
+    assert [
+        "docker",
+        "tag",
+        skillflow_benchmark.SKILLFLOW_HARBOR_BASE_IMAGE,
+        skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE,
+    ] in calls
+    assert [
+        "docker",
+        "build",
+        "--progress=plain",
+        "-f",
+        str(environment_dir / "Dockerfile"),
+        "-t",
+        image_name,
+        str(environment_dir),
+    ] in calls
 
 
 @pytest.mark.asyncio

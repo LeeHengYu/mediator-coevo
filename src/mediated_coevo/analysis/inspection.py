@@ -9,6 +9,7 @@ from typing import Any
 import typer
 
 from mediated_coevo.analysis.reporting import ExperimentScoreSummary
+from mediated_coevo.core.utils import string_list_values
 from mediated_coevo.diffusion import DiffusionStore
 
 
@@ -57,16 +58,6 @@ def _numeric_summary(values: list[float]) -> dict[str, Any]:
         "min": min(values),
         "max": max(values),
     }
-
-
-def _list_values(rows: list[dict[str, Any]], key: str) -> list[str]:
-    values: list[str] = []
-    for row in rows:
-        raw_values = row.get(key)
-        if not isinstance(raw_values, list):
-            continue
-        values.extend(value for value in raw_values if isinstance(value, str))
-    return values
 
 
 def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None:
@@ -169,10 +160,10 @@ def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None
                 1 for row in rows if row.get("context_budget_violation") is True
             ),
             "compacted_diffusion_artifact_count": len(
-                set(_list_values(rows, "compacted_diffusion_artifact_ids"))
+                set(string_list_values(rows, "compacted_diffusion_artifact_ids"))
             ),
             "dropped_for_budget_artifact_count": len(
-                set(_list_values(rows, "dropped_for_budget_artifact_ids"))
+                set(string_list_values(rows, "dropped_for_budget_artifact_ids"))
             ),
         }
 

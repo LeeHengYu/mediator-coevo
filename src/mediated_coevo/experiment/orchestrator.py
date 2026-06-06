@@ -25,6 +25,7 @@ from mediated_coevo.analysis.judge_rewards import (
 from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.benchmarks import SkillFlowRepository
 from mediated_coevo.core.config import Config
+from mediated_coevo.core.utils import format_optional_reward
 from mediated_coevo.diffusion import (
     DiffusedRecord,
     DiffusionArtifact,
@@ -310,8 +311,8 @@ class Orchestrator:
                     "verifier_reward=%s judge_reward=%s reward_source=%s",
                     task_id,
                     _display_iteration(trace.iteration),
-                    _format_reward(trace.reward),
-                    _format_reward(judge_record.judge_reward),
+                    format_optional_reward(trace.reward),
+                    format_optional_reward(judge_record.judge_reward),
                     outcome_metadata["reward_source"],
                 )
         else:
@@ -321,7 +322,7 @@ class Orchestrator:
                 task_id,
                 _display_iteration(trace.iteration),
                 trace.status,
-                _format_reward(trace.reward),
+                format_optional_reward(trace.reward),
             )
 
         report = await self.mediator.mediate_trace(condition, trace, task_spec)
@@ -653,11 +654,9 @@ class Orchestrator:
         original_same_tokens = count_text_tokens(model, same_task_prior or "")
         original_cross_tokens = count_text_tokens(model, cross_task_prior or "")
         if remaining_for_non_diffusion:
+            prior_context_cap = self._prior_context_cap(condition)
             if same_task_prior:
-                same_cap = min(
-                    self._same_task_prior_cap(condition),
-                    remaining_for_non_diffusion,
-                )
+                same_cap = min(prior_context_cap, remaining_for_non_diffusion)
                 same_task_prior = fit_text_to_tokens(model, same_task_prior, same_cap)
                 remaining_for_non_diffusion = max(
                     0,
@@ -665,10 +664,7 @@ class Orchestrator:
                     - count_text_tokens(model, same_task_prior),
                 )
             if cross_task_prior:
-                cross_cap = min(
-                    self._cross_task_prior_cap(condition),
-                    remaining_for_non_diffusion,
-                )
+                cross_cap = min(prior_context_cap, remaining_for_non_diffusion)
                 cross_task_prior = fit_text_to_tokens(model, cross_task_prior, cross_cap)
         else:
             same_task_prior = None
@@ -734,24 +730,20 @@ class Orchestrator:
         same_task_tokens = count_text_tokens(model, bundle.same_task_prior or "")
         cross_task_tokens = count_text_tokens(model, bundle.cross_task_prior or "")
         total_cap = self.config.budgets.mediator_report_tokens
+        prior_context_cap = self._prior_context_cap(condition)
         self._prior_context_by_target[(task_id, current_iteration)] = {
             "same_task_prior_tokens": same_task_tokens,
             "cross_task_prior_tokens": cross_task_tokens,
             "total_planner_prior_context_tokens": flattened_tokens,
-            "max_same_task_prior_tokens": self._same_task_prior_cap(condition),
-            "max_cross_task_prior_tokens": self._cross_task_prior_cap(condition),
+            "max_same_task_prior_tokens": prior_context_cap,
+            "max_cross_task_prior_tokens": prior_context_cap,
             "max_total_prior_context_tokens": total_cap,
             "context_budget_violation": (
                 bundle.context_budget_violation or flattened_tokens > total_cap
             ),
         }
 
-    def _same_task_prior_cap(self, condition: ConditionName) -> int:
-        if condition == "full_traces":
-            return self.config.budgets.historical_summary_tokens
-        return self.config.budgets.mediator_report_tokens
-
-    def _cross_task_prior_cap(self, condition: ConditionName) -> int:
+    def _prior_context_cap(self, condition: ConditionName) -> int:
         if condition == "full_traces":
             return self.config.budgets.historical_summary_tokens
         return self.config.budgets.mediator_report_tokens
@@ -2085,7 +2077,3 @@ def _mediator_validation_run_from_trace(
 def _display_iteration(iteration: int) -> int:
     """Return the human-facing iteration number for terminal logs."""
     return iteration + 1
-
-
-def _format_reward(reward: float | None) -> str:
-    return f"{reward:.2f}" if reward is not None else "n/a"

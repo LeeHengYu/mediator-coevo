@@ -5,7 +5,9 @@ from mediated_coevo.core.utils import (
     as_mapping,
     as_nonempty_string,
     as_optional_float,
+    format_optional_reward,
     parse_json_object,
+    string_list_values,
 )
 
 
@@ -41,6 +43,22 @@ def test_as_optional_float_returns_none_for_invalid_and_nan_values():
     assert as_optional_float("not-a-number") is None
     assert as_optional_float(None) is None
     assert as_optional_float(math.nan) is None
+
+
+def test_string_list_values_extracts_string_members_from_list_fields():
+    rows = [
+        {"ids": ["a", 1, "b"]},
+        {"ids": "not-a-list"},
+        {"ids": ["c"]},
+        {"other": ["d"]},
+    ]
+
+    assert string_list_values(rows, "ids") == ["a", "b", "c"]
+
+
+def test_format_optional_reward_formats_numbers_and_missing_values():
+    assert format_optional_reward(1.234) == "1.23"
+    assert format_optional_reward(None) == "n/a"
 
 
 def test_parse_json_object_plain_object():

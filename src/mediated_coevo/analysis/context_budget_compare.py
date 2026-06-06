@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from mediated_coevo.core.utils import string_list_values
 from mediated_coevo.diffusion.models import DiffusedRecord
 
 CONTEXT_TOKEN_FIELDS: tuple[str, ...] = (
@@ -277,8 +278,8 @@ def _run_summary(
     rows: list[dict[str, Any]],
     records: list[DiffusedRecord],
 ) -> ContextBudgetRunSummary:
-    compacted_ids = _list_values(rows, "compacted_diffusion_artifact_ids")
-    dropped_ids = _list_values(rows, "dropped_for_budget_artifact_ids")
+    compacted_ids = string_list_values(rows, "compacted_diffusion_artifact_ids")
+    dropped_ids = string_list_values(rows, "dropped_for_budget_artifact_ids")
     return ContextBudgetRunSummary(
         experiment_dir=str(run_dir),
         metric_rows=len(rows),
@@ -327,16 +328,6 @@ def _numeric_mean(values: list[float]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
-
-
-def _list_values(rows: list[dict[str, Any]], key: str) -> list[str]:
-    values: list[str] = []
-    for row in rows:
-        raw_values = row.get(key)
-        if not isinstance(raw_values, list):
-            continue
-        values.extend(value for value in raw_values if isinstance(value, str))
-    return values
 
 
 def _token_delta_percent(

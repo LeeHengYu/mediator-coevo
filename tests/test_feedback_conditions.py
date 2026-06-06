@@ -8,7 +8,7 @@ import pytest
 import typer
 from pydantic import ValidationError
 
-from mediated_coevo.core.config import Config, ModelsConfig
+from mediated_coevo.core.config import Config
 from mediated_coevo.diffusion import (
     DiffusionArtifact,
     DiffusionArtifactType,
@@ -25,7 +25,12 @@ from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
-from tests.config_helpers import budgets_config, diffusion_config, experiment_config
+from tests.config_helpers import (
+    budgets_config,
+    diffusion_config,
+    experiment_config,
+    models_config,
+)
 
 
 class _Task:
@@ -151,15 +156,6 @@ def _store_diffusion_artifact(
             risk_level=DiffusionRiskLevel.LOW,
             content=content or artifact_id,
         )
-    )
-
-
-def _models_config() -> ModelsConfig:
-    return ModelsConfig(
-        planner="test-planner",
-        executor="test-executor",
-        mediator="test-mediator",
-        judge="test-judge",
     )
 
 
@@ -381,12 +377,7 @@ def _orchestrator(
     orch.history_store = HistoryStore(history_dir=tmp_path / "history")
     orch.benchmark_repo = _TaskRepo()
     orch.config = Config(
-        models=ModelsConfig(
-            planner="test-planner",
-            executor="test-executor",
-            mediator="test-mediator",
-            judge="test-judge",
-        ),
+        models=models_config(),
         budgets=budgets_config(),
         experiment=experiment_config(),
         diffusion=diffusion_config(),
