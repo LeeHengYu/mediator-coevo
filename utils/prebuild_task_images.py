@@ -15,6 +15,10 @@ from pathlib import Path
 SECTION_RE = re.compile(r"^\s*\[[^\]]+\]\s*$")
 ENVIRONMENT_SECTION_RE = re.compile(r"^\s*\[\s*environment\s*\]\s*$", re.IGNORECASE)
 DOCKER_IMAGE_RE = re.compile(r"^\s*docker_image\s*=\s*['\"]([^'\"]+)['\"]\s*$")
+FROM_IMAGE_RE = re.compile(r"^\s*FROM\s+(?P<image>[^\s]+)", re.IGNORECASE)
+
+LEGACY_HARBOR_BASE_IMAGE = "skillevlove/harbor-cli-openhands:ubuntu24.04"
+SKILLFLOW_HARBOR_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
 
 
 @dataclass(frozen=True)
@@ -181,6 +185,63 @@ def delete_images(images: list[str], dry_run: bool) -> int:
     return deleted
 
 
+def dockerfile_base_images(dockerfile: Path) -> set[str]:
+    images: set[str] = set()
+    for line in dockerfile.read_text(encoding="utf-8").splitlines():
+        match = FROM_IMAGE_RE.match(line)
+        if match:
+            images.add(match.group("image"))
+    return images
+
+
+def ensure_legacy_base_image_alias(
+    dockerfile: Path,
+    local_images: set[str],
+    dry_run: bool,
+) -> bool:
+    """Alias the repo-built Harbor base image for older synced task Dockerfiles."""
+    if LEGACY_HARBOR_BASE_IMAGE not in dockerfile_base_images(dockerfile):
+        return True
+    if LEGACY_HARBOR_BASE_IMAGE in local_images:
+        return True
+    if SKILLFLOW_HARBOR_BASE_IMAGE not in local_images:
+        print(
+            "WARN: Dockerfile uses legacy Harbor base image "
+            f"{LEGACY_HARBOR_BASE_IMAGE}, but local base image "
+            f"{SKILLFLOW_HARBOR_BASE_IMAGE} is missing. "
+            "Run `uv run medcoevo build-base-image` first."
+        )
+        return True
+
+    cmd = [
+        "docker",
+        "tag",
+        SKILLFLOW_HARBOR_BASE_IMAGE,
+        LEGACY_HARBOR_BASE_IMAGE,
+    ]
+    if dry_run:
+        print("[DRY-RUN] TAG BASE IMAGE:", " ".join(cmd))
+        local_images.add(LEGACY_HARBOR_BASE_IMAGE)
+        return True
+
+    result = run_cmd(cmd, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "unknown error"
+        print(
+            "ERROR: failed to tag legacy Harbor base image "
+            f"{LEGACY_HARBOR_BASE_IMAGE}: {stderr}",
+            file=sys.stderr,
+        )
+        return False
+
+    print(
+        "TAG BASE IMAGE: "
+        f"{SKILLFLOW_HARBOR_BASE_IMAGE} -> {LEGACY_HARBOR_BASE_IMAGE}"
+    )
+    local_images.add(LEGACY_HARBOR_BASE_IMAGE)
+    return True
+
+
 def build_image(
     image_name: str,
     dockerfile: Path,
@@ -340,6 +401,16 @@ def main() -> int:
             stats.images_reused_local += 1
             print("SKIP BUILD: found matching local hash image.")
         else:
+            if not ensure_legacy_base_image_alias(
+                dockerfile=entry.dockerfile,
+                local_images=local_images,
+                dry_run=args.dry_run,
+            ):
+                stats.images_failed += 1
+                failed_docker_paths.append(str(entry.dockerfile))
+                print("SKIP building image because base image alias failed.")
+                continue
+
             build_ok = build_image(
                 image_name=image_name,
                 dockerfile=entry.dockerfile,
