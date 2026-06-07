@@ -145,6 +145,7 @@ def _store_diffusion_artifact(
     artifact_id: str,
     source_task_id: str,
     source_iteration: int = 0,
+    artifact_type: DiffusionArtifactType = DiffusionArtifactType.DEBUG_HINT,
     content: str | None = None,
 ) -> None:
     orch._diffusion_store.store_artifact(
@@ -152,7 +153,7 @@ def _store_diffusion_artifact(
             artifact_id=artifact_id,
             source_task_id=source_task_id,
             source_iteration=source_iteration,
-            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            artifact_type=artifact_type,
             risk_level=DiffusionRiskLevel.LOW,
             content=content or artifact_id,
         )
@@ -937,9 +938,31 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
     orch._ensure_diffusion_runtime_state()
     _store_diffusion_artifact(
         orch,
-        artifact_id="task-b-artifact",
+        artifact_id="task-b-duplicate-debug",
         source_task_id="task-B",
+        artifact_type=DiffusionArtifactType.DEBUG_HINT,
+        content="duplicate debug from task-B",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-debug",
+        source_task_id="task-B",
+        artifact_type=DiffusionArtifactType.DEBUG_HINT,
         content="hint from task-B",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-outcome",
+        source_task_id="task-B",
+        artifact_type=DiffusionArtifactType.RUN_OUTCOME,
+        content="outcome from task-B",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-b-warning",
+        source_task_id="task-B",
+        artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
+        content="warning from task-B",
     )
     _store_diffusion_artifact(
         orch,
@@ -962,15 +985,25 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
 
     assert context is not None
     assert "hint from task-B" in context
+    assert "outcome from task-B" in context
+    assert "warning from task-B" in context
+    assert "duplicate debug from task-B" not in context
     assert "hint from task-C" not in context
     assert "hint from task-D" not in context
     records = orch._diffusion_store.query_diffused_records(
         target_task_id="task-A",
         recent=None,
     )
-    assert sum(1 for record in records if record.eligible) == 3
-    assert sum(1 for record in records if record.selected) == 1
-    assert sum(1 for record in records if record.rendered) == 1
+    selected_records = [record for record in records if record.selected]
+    selected_artifact_ids = {record.artifact_id for record in selected_records}
+    assert sum(1 for record in records if record.eligible) == 6
+    assert len(selected_records) == 3
+    assert sum(1 for record in records if record.rendered) == 3
+    assert selected_artifact_ids == {
+        "task-b-debug",
+        "task-b-outcome",
+        "task-b-warning",
+    }
 
     record = IterationRecord(
         iteration=1,
@@ -980,9 +1013,9 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
     )
     orch._attach_diffusion_context_metrics(record)
 
-    assert record.diffusion_artifacts_eligible == 3
-    assert record.diffusion_artifacts_selected == 1
-    assert record.diffusion_artifacts_rendered == 1
+    assert record.diffusion_artifacts_eligible == 6
+    assert record.diffusion_artifacts_selected == 3
+    assert record.diffusion_artifacts_rendered == 3
     assert record.reward_after_diffusion_context == 0.0
     assert record.regression_after_diffusion_context is True
     assert record.source_task_ids == ["task-B"]

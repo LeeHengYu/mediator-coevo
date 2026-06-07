@@ -168,9 +168,15 @@ def select_top_k_similarity_subscriptions(
         return []
 
     subscriptions: list[DiffusionSubscription] = []
+    selected_source_artifact_types: set[tuple[str, str]] = set()
     for artifact in eligible_artifacts:
+        if len(subscriptions) >= max_artifacts:
+            break
         edge = edges_by_source_task.get(artifact.source_task_id)
         if edge is None:
+            continue
+        source_artifact_type = (artifact.source_task_id, artifact.artifact_type.value)
+        if source_artifact_type in selected_source_artifact_types:
             continue
         subscriptions.append(
             DiffusionSubscription(
@@ -185,8 +191,7 @@ def select_top_k_similarity_subscriptions(
                 },
             )
         )
-        if len(subscriptions) >= max_artifacts:
-            break
+        selected_source_artifact_types.add(source_artifact_type)
     return subscriptions
 
 
