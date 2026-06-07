@@ -24,9 +24,10 @@ from typing import TYPE_CHECKING, Any
 from mediated_coevo.experiment.conditions import MEDIATOR_CONDITIONS, ConditionName
 
 from .base import BaseAgent
+from .prompt_sections import select_markdown_section
 
 if TYPE_CHECKING:
-    from mediated_coevo.core.config import BudgetsConfig
+    from mediated_coevo.core.config import BudgetsConfig, SkillUpdateConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.history_signals import MediatorSignal
     from mediated_coevo.models.report import MediatorReport
@@ -62,6 +63,7 @@ class MediatorAgent(BaseAgent):
         self._protocol_skill: str = ""
         self._budgets: BudgetsConfig | None = None
         self._condition_name: str | None = None
+        self._skill_updates: SkillUpdateConfig | None = None
 
     def configure_token_budget(
         self,
@@ -71,6 +73,10 @@ class MediatorAgent(BaseAgent):
     ) -> None:
         self._budgets = budgets
         self._condition_name = condition_name
+
+    def configure_skill_updates(self, skill_updates: SkillUpdateConfig) -> None:
+        """Configure which update-specific protocol sections are relevant."""
+        self._skill_updates = skill_updates
 
     def load_protocol(self, skill_content: str) -> None:
         """Load coordination-protocol.md as the system prompt.
@@ -90,7 +96,7 @@ class MediatorAgent(BaseAgent):
         )
 
         model = self.llm_client.model
-        protocol_skill = self._protocol_skill
+        protocol_skill = self._runtime_protocol_skill()
         if self._budgets:
             protocol_skill = fit_text_to_tokens(
                 model,
@@ -129,6 +135,43 @@ class MediatorAgent(BaseAgent):
             user_content = "\n\n".join(section.content for section in sections)
         messages.append({"role": "user", "content": user_content})
         return messages
+
+    def _runtime_protocol_skill(self) -> str:
+        if self._executor_skill_updates_enabled():
+            return self._protocol_skill
+
+        sections = [
+            select_markdown_section(self._protocol_skill, "Abstraction Levels"),
+            self._runtime_withholding_section(),
+            select_markdown_section(self._protocol_skill, "Output Format"),
+        ]
+        runtime_sections = [section for section in sections if section]
+        if not runtime_sections:
+            return self._protocol_skill
+        return "\n\n".join(runtime_sections)
+
+    def _runtime_withholding_section(self) -> str | None:
+        section = select_markdown_section(self._protocol_skill, "When to Withhold")
+        if section is None:
+            return None
+
+        runtime_paragraphs: list[str] = []
+        for paragraph in section.split("\n\n"):
+            if self._is_runtime_withholding_paragraph(paragraph):
+                runtime_paragraphs.append(paragraph)
+        if not runtime_paragraphs:
+            return None
+        return "\n\n".join(runtime_paragraphs)
+
+    @staticmethod
+    def _is_runtime_withholding_paragraph(paragraph: str) -> bool:
+        return (
+            "skill-evolution hazard" not in paragraph
+            and "validation evidence" not in paragraph
+        )
+
+    def _executor_skill_updates_enabled(self) -> bool:
+        return self._skill_updates is None or self._skill_updates.executor
 
     def _history_system_message(
         self,

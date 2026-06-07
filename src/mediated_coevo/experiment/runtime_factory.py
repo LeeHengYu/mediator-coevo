@@ -176,6 +176,7 @@ def build_experiment_runtime(
         config.budgets,
         condition_name=config.experiment.condition_name,
     )
+    planner.configure_skill_updates(config.experiment.skill_updates)
     executor = ExecutorAgent(
         model=config.models.executor,
         benchmark_repo=benchmark_repo,
@@ -191,6 +192,7 @@ def build_experiment_runtime(
         config.budgets,
         condition_name=config.experiment.condition_name,
     )
+    mediator.configure_skill_updates(config.experiment.skill_updates)
     protocol = skill_store.read_skill("mediator")
     if protocol:
         mediator.load_protocol(protocol)

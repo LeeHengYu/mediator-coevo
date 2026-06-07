@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING, Any
 from mediated_coevo.evolution.candidates import candidate_from_mapping
 
 from .base import BaseAgent
+from .prompt_sections import select_markdown_sections
 
 if TYPE_CHECKING:
-    from mediated_coevo.core.config import BudgetsConfig
+    from mediated_coevo.core.config import BudgetsConfig, SkillUpdateConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.skill import SkillProposal, SkillUpdateCandidate
     from mediated_coevo.models.task import TaskSpec
@@ -71,6 +72,7 @@ class PlannerAgent(BaseAgent):
         self._skill_refiner: str | None = None
         self._budgets: BudgetsConfig | None = None
         self._condition_name: str | None = None
+        self._skill_updates: SkillUpdateConfig | None = None
 
     def configure_token_budget(
         self,
@@ -89,8 +91,11 @@ class PlannerAgent(BaseAgent):
         Called by the orchestrator before process().
         """
         self._skill_context = executor_skills or None
-        if skill_refiner is not None:
-            self._skill_refiner = skill_refiner
+        self._skill_refiner = skill_refiner or None
+
+    def configure_skill_updates(self, skill_updates: SkillUpdateConfig) -> None:
+        """Configure which update-specific prompt sections are relevant."""
+        self._skill_updates = skill_updates
 
     def _append_budgeted_system_context(
         self,
@@ -122,28 +127,23 @@ class PlannerAgent(BaseAgent):
         ]
 
         model = self.llm_client.model
+        action = str(context.get("action", "plan_task"))
 
         # Skill injection — separate system messages like OpenSpace
-        if self._skill_refiner:
+        skill_refiner_prompt = self._skill_refiner_prompt(action)
+        if skill_refiner_prompt:
             self._append_budgeted_system_context(
                 messages,
-                heading="Your Skill-Refinement Guidelines",
-                description=(
-                    "The following skill provides **procedures for updating the "
-                    "Executor's skills**. Follow these when deciding skill edits."
-                ),
-                content=self._skill_refiner,
+                heading=skill_refiner_prompt["heading"],
+                description=skill_refiner_prompt["description"],
+                content=skill_refiner_prompt["content"],
             )
 
         if self._skill_context:
             self._append_budgeted_system_context(
                 messages,
                 heading="Executor's Active Skills",
-                description=(
-                    "The following skills are currently loaded into the Executor. "
-                    "When planning tasks, reference these capabilities. When "
-                    "updating skills, edit this content."
-                ),
+                description=self._executor_skill_context_description(),
                 content=self._skill_context,
             )
 
@@ -151,6 +151,85 @@ class PlannerAgent(BaseAgent):
         user_content = self._build_user_prompt(context, model=model, budget=user_budget)
         messages.append({"role": "user", "content": user_content})
         return messages
+
+    def _skill_refiner_prompt(self, action: str) -> dict[str, str] | None:
+        if not self._skill_refiner:
+            return None
+
+        content = self._skill_refiner_content_for_action(action)
+        if not content:
+            return None
+
+        if action in {"update_skill", "update_skill_batch"}:
+            return {
+                "heading": "Your Skill-Refinement Guidelines",
+                "description": (
+                    "The following skill provides procedures for updating the "
+                    "Executor's skills. Follow these when deciding skill edits."
+                ),
+                "content": content,
+            }
+
+        if self._executor_skill_updates_enabled():
+            description = (
+                "The following skill sections provide planning guidance and "
+                "enabled Executor skill-update criteria."
+            )
+        else:
+            description = (
+                "The following skill sections provide planning guidance for the "
+                "current task. Executor skill-update sections are omitted because "
+                "that workflow is disabled for this run."
+            )
+        return {
+            "heading": "Your Planning Guidelines",
+            "description": description,
+            "content": content,
+        }
+
+    def _skill_refiner_content_for_action(self, action: str) -> str | None:
+        if not self._skill_refiner:
+            return None
+        if action in {"update_skill", "update_skill_batch"}:
+            if not self._executor_skill_updates_enabled():
+                return None
+            return select_markdown_sections(
+                self._skill_refiner,
+                [
+                    "Guidelines for Updating Executor Skills",
+                    "Executor Skill Update Criteria",
+                    "Artifact-Contract Thinking",
+                ],
+            )
+
+        plan_sections = [
+            "Task Planning Guidelines",
+            "Artifact-Contract Thinking",
+        ]
+        if self._executor_skill_updates_enabled():
+            plan_sections.extend(
+                [
+                    "Guidelines for Updating Executor Skills",
+                    "Executor Skill Update Criteria",
+                ]
+            )
+        return select_markdown_sections(self._skill_refiner, plan_sections)
+
+    def _executor_skill_context_description(self) -> str:
+        if self._executor_skill_updates_enabled():
+            return (
+                "The following skills are currently loaded into the Executor. "
+                "When planning tasks, reference these capabilities. When "
+                "updating skills, edit this content."
+            )
+        return (
+            "The following skills are currently loaded into the Executor. "
+            "When planning tasks, reference these capabilities. Skill updates "
+            "are disabled for this run, so treat this content as read-only."
+        )
+
+    def _executor_skill_updates_enabled(self) -> bool:
+        return self._skill_updates is None or self._skill_updates.executor
 
     def _user_prompt_budget(
         self,
