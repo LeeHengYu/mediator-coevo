@@ -1,0 +1,250 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/sla_inspect.py → b/sla_inspect.py
+@@ -0,0 +1,38 @@
++import pandas as pd
++from pathlib import Path
++
++src = Path('/root/Ticket_Queue.xlsx')
++print(f'Source workbook: {src}')
++print(f'Exists: {src.exists()} Size: {src.stat().st_size if src.exists() else "N/A"}')
++
++xls = pd.ExcelFile(src, engine='openpyxl')
++print('Workbook sheets:', xls.sheet_names)
++
++tickets = pd.read_excel(src, sheet_name='Tickets', engine='openpyxl')
++sla_rules = pd.read_excel(src, sheet_name='SLA_Rules', engine='openpyxl')
++
++for name, df in [('Tickets', tickets), ('SLA_Rules', sla_rules)]:
++    print('\n===', name, '===')
++    print('Columns:', list(df.columns))
++    print('First few rows:')
++    print(df.head().to_string(index=False))
++
++print('\n=== Full SLA_Rules table ===')
++print(sla_rules.to_string(index=False))
++
++required_sla = ['Priority Tier', 'Max Open Hours', 'Escalation Required']
++required_tickets = ['Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner', 'Escalation Code', 'Region', 'Analyst']
++
++print('\n=== Required column checks ===')
++print('SLA_Rules required exact columns present:')
++for col in required_sla:
++    print(f'  {col}:', col in sla_rules.columns)
++print('Tickets required exact columns present:')
++for col in required_tickets:
++    print(f'  {col}:', col in tickets.columns)
++
++missing_sla = [c for c in required_sla if c not in sla_rules.columns]
++missing_tickets = [c for c in required_tickets if c not in tickets.columns]
++if missing_sla or missing_tickets:
++    raise SystemExit(f'Missing columns: SLA_Rules={missing_sla}, Tickets={missing_tickets}')
++print('All required columns confirmed.')
+  ┊ review diff
+a/build_sla_audit.py → b/build_sla_audit.py
+@@ -0,0 +1,182 @@
++from pathlib import Path
++import math
++import pandas as pd
++from openpyxl import Workbook, load_workbook
++from openpyxl.styles import Font, PatternFill, Alignment
++from openpyxl.utils import get_column_letter
++from docx import Document
++
++SRC = Path('/root/Ticket_Queue.xlsx')
++OUT_XLSX = Path('/root/Service_Queue_SLA_Audit.xlsx')
++OUT_DOCX = Path('/root/Service_Queue_SLA_Brief.docx')
++
++TICKET_COLS = ['Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner', 'Escalation Code', 'Region', 'Analyst']
++SLA_COLS = ['Priority Tier', 'Max Open Hours', 'Escalation Required']
++FMT_HEADERS = TICKET_COLS + ['SLA Breach', 'Missing Escalation', 'Total Errors', 'Error Summary']
++SUMMARY_HEADERS = ['Queue', 'Region', 'SLA Breaches', 'Missing Escalations', 'Total Errors']
++ALLOWED_SUMMARIES = {'None', 'SLA Breach', 'Missing Escalation', 'SLA Breach, Missing Escalation'}
++
++
++def is_blank(value):
++    if value is None:
++        return True
++    try:
++        if pd.isna(value):
++            return True
++    except Exception:
++        pass
++    return isinstance(value, str) and value.strip() == ''
++
++
++def clean_excel_value(value):
++    if is_blank(value):
++        return None
++    return value
++
++
++def autosize(ws):
++    for col_idx in range(1, ws.max_column + 1):
++        letter = get_column_letter(col_idx)
++        max_len = 0
++        for cell in ws[letter]:
++            val = '' if cell.value is None else str(cell.value)
++            max_len = max(max_len, len(val))
++        ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 45)
++
++
++def write_table(ws, headers, rows):
++    ws.append(headers)
++    for row in rows:
++        ws.append([clean_excel_value(v) for v in row])
++    header_fill = PatternFill('solid', fgColor='D9EAF7')
++    for cell in ws[1]:
++        cell.font = Font(bold=True)
++        cell.fill = header_fill
++        cell.alignment = Alignment(horizontal='center')
++    ws.freeze_panes = 'A2'
++    autosize(ws)
++
++
++def main():
++    tickets = pd.read_excel(SRC, sheet_name='Tickets', engine='openpyxl')
++    sla_rules = pd.read_excel(SRC, sheet_name='SLA_Rules', engine='openpyxl')
++
++    missing_tickets = [c for c in TICKET_COLS if c not in tickets.columns]
++    missing_sla = [c for c in SLA_COLS if c not in sla_rules.columns]
++    if missing_tickets or missing_sla:
++        raise ValueError(f'Missing required columns: Tickets={missing_tickets}, SLA_Rules={missing_sla}')
++
++    sla_lookup = {}
++    for _, rule in sla_rules.iterrows():
++        tier = str(rule['Priority Tier']).strip()
++        if tier == '' or tier.lower() == 'nan':
++            continue
++        max_open = float(rule['Max Open Hours'])
++        required = str(rule['Escalation Required']).strip().upper()
++        sla_lookup[tier] = (max_open, required)
++    if not sla_lookup:
++        raise ValueError('No SLA rules were loaded')
+… omitted 104 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_sla_audit.py → b/validate_sla_audit.py
+@@ -0,0 +1,92 @@
++from pathlib import Path
++import re
++import openpyxl
++from docx import Document
++
++XLSX = Path('/root/Service_Queue_SLA_Audit.xlsx')
++DOCX = Path('/root/Service_Queue_SLA_Brief.docx')
++EXPECTED_SHEETS = ['RawData', 'Formatted Data', 'Summary']
++FMT_HEADERS = ['Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner', 'Escalation Code', 'Region', 'Analyst', 'SLA Breach', 'Missing Escalation', 'Total Errors', 'Error Summary']
++SUMMARY_HEADERS = ['Queue', 'Region', 'SLA Breaches', 'Missing Escalations', 'Total Errors']
++ALLOWED = {'None', 'SLA Breach', 'Missing Escalation', 'SLA Breach, Missing Escalation'}
++
++errors = []
++
++def check(condition, message):
++    if condition:
++        print('PASS:', message)
++    else:
++        print('FAIL:', message)
++        errors.append(message)
++
++wb = openpyxl.load_workbook(XLSX, data_only=False)
++check(wb.sheetnames == EXPECTED_SHEETS, f'sheet names/order exactly {EXPECTED_SHEETS}; got {wb.sheetnames}')
++
++ws_fmt = wb['Formatted Data']
++fmt_headers = [ws_fmt.cell(row=1, column=c).value for c in range(1, ws_fmt.max_column + 1)]
++check(ws_fmt.max_column == 12, f'Formatted Data has 12 columns; got {ws_fmt.max_column}')
++check(fmt_headers == FMT_HEADERS, f'Formatted Data headers exact/order; got {fmt_headers}')
++
++err_summary_idx = FMT_HEADERS.index('Error Summary') + 1
++sla_idx = FMT_HEADERS.index('SLA Breach') + 1
++missing_idx = FMT_HEADERS.index('Missing Escalation') + 1
++total_idx = FMT_HEADERS.index('Total Errors') + 1
++summary_values = []
++rowwise_ok = True
++formula_cells = []
++for r in range(2, ws_fmt.max_row + 1):
++    sv = ws_fmt.cell(r, err_summary_idx).value
++    summary_values.append(sv)
++    if sv not in ALLOWED:
++        rowwise_ok = False
++    sla = ws_fmt.cell(r, sla_idx).value
++    missing = ws_fmt.cell(r, missing_idx).value
++    total = ws_fmt.cell(r, total_idx).value
++    if total != sla + missing:
++        rowwise_ok = False
++    for c in (sla_idx, missing_idx, total_idx, err_summary_idx):
++        v = ws_fmt.cell(r, c).value
++        if isinstance(v, str) and v.startswith('='):
++            formula_cells.append((r, c, v))
++check(set(summary_values).issubset(ALLOWED), f'Error Summary values only allowed set; got {sorted(set(summary_values))}')
++check(all(ws_fmt.cell(r,total_idx).value == ws_fmt.cell(r,sla_idx).value + ws_fmt.cell(r,missing_idx).value for r in range(2, ws_fmt.max_row + 1)), 'Total Errors equals SLA Breach + Missing Escalation row-wise')
++check(not formula_cells, f'Computed cells contain concrete values, no formulas; formula cells={formula_cells[:5]}')
++
++ws_sum = wb['Summary']
++sum_headers = [ws_sum.cell(row=1, column=c).value for c in range(1, ws_sum.max_column + 1)]
++check(sum_headers == SUMMARY_HEADERS, f'Summary headers exact/order; got {sum_headers}')
++summary_data = [[ws_sum.cell(r, c).value for c in range(1, ws_sum.max_column + 1)] for r in range(2, ws_sum.max_row + 1)]
++non_grand = summary_data[:-1]
++grand = summary_data[-1] if summary_data else None
++check(all(row[4] > 0 for row in non_grand), 'Summary non-grand rows all have Total Errors > 0')
++check(non_grand == sorted(non_grand, key=lambda row: (row[0], row[1])), 'Summary rows sorted by Queue ascending then Region ascending')
++check(grand is not None and grand[0] == 'Grand Total' and grand[1] == '-', f'Summary ends with Grand Total / - row; got {grand}')
++col_sums = [sum(row[i] for row in non_grand) for i in (2,3,4)]
++check(grand is not None and grand[2:5] == col_sums, f'Grand Total numbers equal column sums above; got {grand[2:5] if grand else None}, expected {col_sums}')
++
++# RawData preservation check vs source table dimensions/headers.
++ws_raw = wb['RawData']
++raw_headers = [ws_raw.cell(row=1, column=c).value for c in range(1, ws_raw.max_column + 1)]
++check(raw_headers == FMT_HEADERS[:8], f'RawData source headers preserved; got {raw_headers}')
++
++# DOCX checks.
++doc = Document(DOCX)
++text = '\n'.join(p.text for p in doc.paragraphs)
++print('DOCX text:', text)
++terms = {
++    'SLA Breach definition': ('open longer' in text and 'maximum hours' in text),
++    'Missing Escalation definition': ('requires escalation' in text and ('blank' in text or 'Escalation Code is blank' in text)),
+… omitted 14 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260607_030734_08bbb0
+Done.
+
+Created:
+- /root/Service_Queue_SLA_Audit.xlsx
+- /root/Service_Queue_SLA_Brief.docx
+
+Source inspection confirmed:
+- Workbook sheets included Tickets and SLA_Rules.
+- SLA_Rules exact columns present:
+  - Priority Tier
+  - Max Open Hours
+  - Escalation Required
+- Tickets exact required columns present:
+  - Ticket ID
+  - Queue
+  - Priority Tier
+  - Open Age Hours
+  - Owner
+  - Escalation Code
+  - Region
+  - Analyst
+
+Computed grand totals:
+- SLA Breaches: 10
+- Missing Escalations: 6
+- Total Errors: 16
+
+Summary groups written:
+- Billing / East: 3 SLA Breaches, 1 Missing Escalation, 4 Total Errors
+- Claims / West: 3 SLA Breaches, 2 Missing Escalations, 5 Total Errors
+- Ops / East: 1 SLA Breach, 1 Missing Escalation, 2 Total Errors
+- Support / Central: 3 SLA Breaches, 2 Missing Escalations, 5 Total Errors
+- Grand Total / -: 10, 6, 16
+
+Validation passed after reopening the generated files:
+- Sheet names/order exactly: RawData, Formatted Data, Summary
+- Formatted Data has exactly 12 columns with the required headers in order
+- Error Summary values are only from the allowed set
+- Total Errors equals SLA Breach + Missing Escalation for every row
+- Computed columns contain concrete values, not formulas
+- Summary rows are filtered to Total Errors > 0, sorted by Queue then Region, and end with a correct Grand Total row
+- DOCX contains both definitions, all three totals, a recommendation, and mentions Claims and Support as frequent-exception queues.

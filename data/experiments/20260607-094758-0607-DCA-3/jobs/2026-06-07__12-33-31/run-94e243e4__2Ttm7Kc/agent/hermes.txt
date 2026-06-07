@@ -1,0 +1,284 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_outbound_inputs.py → b/inspect_outbound_inputs.py
+@@ -0,0 +1,77 @@
++from openpyxl import load_workbook
++from collections import Counter, defaultdict
++from datetime import datetime
++
++paths = {
++    'manifest': '/root/Manifest_Plan.xlsx',
++    'scan': '/root/Dock_Scan_Log.xlsx',
++    'template': '/root/Outbound_Audit_Template.xlsx',
++}
++LITERALS = {'N/A','NA','-',''}
++
++def inspect_table(path, label):
++    print(f"\n=== {label}: {path} ===")
++    wb = load_workbook(path, data_only=False)
++    print('worksheets:', wb.sheetnames)
++    ws = wb[wb.sheetnames[0]]
++    print('active sheet:', ws.title, 'max_row:', ws.max_row, 'max_col:', ws.max_column)
++    headers = [ws.cell(1,c).value for c in range(1, ws.max_column+1)]
++    print('headers:', headers)
++    type_counts = {h: Counter() for h in headers}
++    literal_hits = defaultdict(list)
++    samples = []
++    for r in range(2, ws.max_row+1):
++        row = []
++        for c,h in enumerate(headers, start=1):
++            v = ws.cell(r,c).value
++            row.append(v)
++            type_counts[h][type(v).__name__] += 1
++            if v in LITERALS:
++                literal_hits[h].append((r, v))
++        if len(samples) < 5:
++            samples.append(row)
++    print('type counts by column:')
++    for h in headers:
++        print(f"  {h!r}: {dict(type_counts[h])}")
++    print('literal hits among N/A, NA, -, blank:')
++    for h in headers:
++        hits = literal_hits.get(h, [])
++        if hits:
++            print(f"  {h!r}: count={len(hits)} first={hits[:8]}")
++    if not literal_hits:
++        print('  none')
++    print('first data rows:')
++    for row in samples:
++        print(' ', row)
++    wb.close()
++
++inspect_table(paths['manifest'], 'Manifest_Plan')
++inspect_table(paths['scan'], 'Dock_Scan_Log')
++
++print(f"\n=== template: {paths['template']} ===")
++wb = load_workbook(paths['template'], data_only=False)
++print('worksheets:', wb.sheetnames)
++for ws in wb.worksheets:
++    print(f"sheet {ws.title!r}: max_row={ws.max_row} max_col={ws.max_column}")
++
++ws = wb['Overview']
++print('\nOverview exact cell contents and visible style IDs:')
++for r in range(1, ws.max_row+1):
++    vals = []
++    for c in range(1, ws.max_column+1):
++        cell = ws.cell(r,c)
++        vals.append({
++            'coord': cell.coordinate,
++            'value': cell.value,
++            'data_type': cell.data_type,
++            'style_id': cell.style_id,
++            'number_format': cell.number_format,
++            'fill': cell.fill.fgColor.rgb or cell.fill.fgColor.indexed or cell.fill.fgColor.theme,
++            'font_bold': cell.font.bold,
++            'alignment': cell.alignment.horizontal,
++        })
++    print(vals)
++print('merged_ranges:', list(map(str, ws.merged_cells.ranges)))
++print('freeze_panes:', ws.freeze_panes)
++print('dimensions:', {k:v.width for k,v in ws.column_dimensions.items()}, {k:v.height for k,v in ws.row_dimensions.items()})
++wb.close()
+  ┊ review diff
+a/build_outbound_audit.py → b/build_outbound_audit.py
+@@ -0,0 +1,259 @@
++import os
++import shutil
++import zipfile
++from copy import copy
++from datetime import datetime
++from collections import defaultdict
++
++from openpyxl import load_workbook
++from openpyxl.styles import Font, PatternFill, Alignment
++from openpyxl.utils import get_column_letter
++from docx import Document
++
++MANIFEST = '/root/Manifest_Plan.xlsx'
++SCANS = '/root/Dock_Scan_Log.xlsx'
++TEMPLATE = '/root/Outbound_Audit_Template.xlsx'
++OUT_XLSX = '/root/Outbound_Load_Audit.xlsx'
++OUT_DOCX = '/root/Outbound_Load_Brief.docx'
++
++RAW_HEADERS = ['Shipment ID', 'Carton ID', 'Planned Zone', 'Route', 'Expected Weight', 'Hazmat Flag', 'Carrier', 'Wave']
++FORMATTED_HEADERS = RAW_HEADERS + ['Missing Load Scan', 'Zone Mismatch', 'Total Errors', 'Error Summary']
++SUMMARY_HEADERS = ['Route', 'Shipment ID', 'Missing Load Scans', 'Zone Mismatches', 'Total Errors']
++ALLOWED_SUMMARIES = {'None', 'Missing Load Scan', 'Zone Mismatch', 'Missing Load Scan, Zone Mismatch'}
++
++
++def value_preserved(v):
++    """Return values exactly as openpyxl reads them, preserving strings and blanks.
++
++    This is the openpyxl equivalent of pandas read_excel(dtype=str,
++    keep_default_na=False, na_values=[]): no NA token conversion is performed.
++    Empty Excel cells remain None; literal strings such as 'N/A', 'NA', and '-'
++    remain strings.
++    """
++    return v
++
++
++def read_sheet_rows(path):
++    wb = load_workbook(path, data_only=False)
++    ws = wb[wb.sheetnames[0]]
++    headers = [value_preserved(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
++    rows = []
++    for r in range(2, ws.max_row + 1):
++        row = {headers[c - 1]: value_preserved(ws.cell(r, c).value) for c in range(1, ws.max_column + 1)}
++        rows.append(row)
++    wb.close()
++    return headers, rows
++
++
++def parse_datetime_candidate(v):
++    if isinstance(v, datetime):
++        return v
++    if v is None:
++        return None
++    s = str(v).strip()
++    if not s:
++        return None
++    # ISO forms first; handles values like 2026-03-21T08:15:00.
++    try:
++        return datetime.fromisoformat(s.replace('Z', '+00:00'))
++    except Exception:
++        pass
++    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y/%m/%d %H:%M:%S', '%m/%d/%Y %H:%M:%S', '%m/%d/%Y %H:%M'):
++        try:
++            return datetime.strptime(s, fmt)
++        except Exception:
++            pass
++    return None
++
++
++def choose_timestamp_column(headers, scan_rows):
++    candidates = []
++    for h in headers:
++        parsed_count = sum(parse_datetime_candidate(row.get(h)) is not None for row in scan_rows)
++        name_score = int('time' in str(h).lower() or 'date' in str(h).lower() or 'timestamp' in str(h).lower())
++        if parsed_count:
++            candidates.append((name_score, parsed_count, h))
++    if not candidates:
++        raise ValueError('No datetime-like timestamp column found in scan log')
++    candidates.sort(reverse=True)
+… omitted 181 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_outbound_outputs.py → b/validate_outbound_outputs.py
+@@ -0,0 +1,112 @@
++import os
++import zipfile
++from collections import Counter
++from openpyxl import load_workbook
++from docx import Document
++
++MANIFEST = '/root/Manifest_Plan.xlsx'
++TEMPLATE = '/root/Outbound_Audit_Template.xlsx'
++OUT_XLSX = '/root/Outbound_Load_Audit.xlsx'
++OUT_DOCX = '/root/Outbound_Load_Brief.docx'
++EXPECTED_SHEETS = ['Overview', 'RawData', 'Formatted Data', 'Summary']
++RAW_HEADERS = ['Shipment ID', 'Carton ID', 'Planned Zone', 'Route', 'Expected Weight', 'Hazmat Flag', 'Carrier', 'Wave']
++FORMATTED_HEADERS = RAW_HEADERS + ['Missing Load Scan', 'Zone Mismatch', 'Total Errors', 'Error Summary']
++SUMMARY_HEADERS = ['Route', 'Shipment ID', 'Missing Load Scans', 'Zone Mismatches', 'Total Errors']
++ALLOWED_SUMMARIES = {'None', 'Missing Load Scan', 'Zone Mismatch', 'Missing Load Scan, Zone Mismatch'}
++
++errors=[]
++
++def check(cond, msg):
++    if cond:
++        print('PASS:', msg)
++    else:
++        print('FAIL:', msg)
++        errors.append(msg)
++
++check(os.path.exists(OUT_XLSX), 'audit workbook exists')
++check(os.path.exists(OUT_DOCX), 'brief docx exists')
++
++# Overview cell values/styles and worksheet XML bytes
++src = load_workbook(TEMPLATE, data_only=False)
++out = load_workbook(OUT_XLSX, data_only=False)
++check(out.sheetnames == EXPECTED_SHEETS, f'sheet names exactly {EXPECTED_SHEETS}: {out.sheetnames}')
++
++src_ov = src['Overview']; out_ov = out['Overview']
++ov_same = src_ov.max_row == out_ov.max_row and src_ov.max_column == out_ov.max_column
++if ov_same:
++    for r in range(1, src_ov.max_row+1):
++        for c in range(1, src_ov.max_column+1):
++            a, b = src_ov.cell(r,c), out_ov.cell(r,c)
++            if (a.value, a.data_type, a.style_id, a.number_format) != (b.value, b.data_type, b.style_id, b.number_format):
++                ov_same = False
++check(ov_same, 'Overview cell values/data types/styles match template')
++with zipfile.ZipFile(TEMPLATE) as zt, zipfile.ZipFile(OUT_XLSX) as zo:
++    check(zt.read('xl/worksheets/sheet1.xml') == zo.read('xl/worksheets/sheet1.xml'), 'Overview worksheet XML bytes match template sheet1.xml')
++
++# RawData exact match against source first sheet
++man = load_workbook(MANIFEST, data_only=False)
++man_ws = man[man.sheetnames[0]]
++raw = out['RawData']
++raw_same = raw.max_row == man_ws.max_row and raw.max_column == man_ws.max_column
++mismatch_examples=[]
++if raw_same:
++    for r in range(1, man_ws.max_row+1):
++        for c in range(1, man_ws.max_column+1):
++            if raw.cell(r,c).value != man_ws.cell(r,c).value:
++                raw_same = False
++                mismatch_examples.append((r,c,man_ws.cell(r,c).value,raw.cell(r,c).value))
++else:
++    mismatch_examples.append(('shape', (man_ws.max_row, man_ws.max_column), (raw.max_row, raw.max_column)))
++check(raw_same, f'RawData exact cell values match manifest source; mismatches={mismatch_examples[:3]}')
++source_na = [(r,c) for r in range(1, man_ws.max_row+1) for c in range(1, man_ws.max_column+1) if man_ws.cell(r,c).value == 'N/A']
++raw_na_ok = all(raw.cell(r,c).value == 'N/A' and isinstance(raw.cell(r,c).value, str) for r,c in source_na)
++check(raw_na_ok, f"source 'N/A' cells remain literal string 'N/A' (source count={len(source_na)})")
++
++fmt = out['Formatted Data']
++fmt_headers = [fmt.cell(1,c).value for c in range(1, fmt.max_column+1)]
++check(fmt.max_column == 12, f'Formatted Data has exactly 12 columns ({fmt.max_column})')
++check(fmt_headers == FORMATTED_HEADERS, f'Formatted Data exact headers: {fmt_headers}')
++err_summaries = [fmt.cell(r,12).value for r in range(2, fmt.max_row+1)]
++check(set(err_summaries).issubset(ALLOWED_SUMMARIES), f'Error Summary values are allowed: {Counter(err_summaries)}')
++# flag arithmetic and missing=>mismatch zero
++arith_ok = True
++for r in range(2, fmt.max_row+1):
++    missing = fmt.cell(r,9).value; mismatch = fmt.cell(r,10).value; total = fmt.cell(r,11).value
++    if missing not in (0,1) or mismatch not in (0,1) or total != missing + mismatch or (missing == 1 and mismatch != 0):
++        arith_ok = False
++        print('Bad formatted arithmetic row', r, missing, mismatch, total)
++check(arith_ok, 'Formatted Data flags are numeric, totalled, and missing rows have mismatch 0')
+… omitted 34 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260607_043553_28bc6c
+Completed the outbound load audit task.
+
+Created files:
+- /root/Outbound_Load_Audit.xlsx
+- /root/Outbound_Load_Brief.docx
+
+Key inspection notes:
+- Manifest_Plan.xlsx sheet: PlanLines
+  - Columns: Shipment ID, Carton ID, Planned Zone, Route, Expected Weight, Hazmat Flag, Carrier, Wave
+  - Rows: 12
+  - No source cells containing literal 'N/A' were present, but RawData was copied using openpyxl without NA normalization, so any literals would be preserved.
+- Dock_Scan_Log.xlsx sheet: Scans
+  - Columns: Shipment ID, Carton ID, Scanned Zone, Scan Timestamp, Status
+  - Timestamp column used for latest LOADED row: Scan Timestamp
+- Outbound_Audit_Template.xlsx sheets:
+  - Overview, RawData, Formatted Data, Summary
+  - Overview contained the three template instruction lines and was preserved.
+
+Computed totals:
+- Missing Load Scans: 2
+- Zone Mismatches: 4
+- Total Errors: 6
+- Top shipment IDs referenced in the brief: SHP-006 and SHP-001
+
+Validation completed successfully:
+- Workbook sheet names are exactly: Overview, RawData, Formatted Data, Summary
+- Overview cell values/styles matched the template, and its worksheet XML bytes matched the template sheet XML
+- RawData cell values exactly matched the manifest source
+- Formatted Data has exactly 12 required columns and allowed Error Summary values only
+- Summary is filtered, sorted, and ends with a correct Grand Total row
+- DOCX exists and includes definitions, totals, recommendations, and at least two Shipment IDs
+
+Validation command run:
+- python3 /root/validate_outbound_outputs.py
+
+Result:
+- ALL VALIDATION CHECKS PASSED

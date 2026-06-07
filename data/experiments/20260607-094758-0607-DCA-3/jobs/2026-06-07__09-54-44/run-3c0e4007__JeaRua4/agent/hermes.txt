@@ -1,0 +1,179 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build_outbound_audit.py → b/build_outbound_audit.py
+@@ -0,0 +1,159 @@
++import shutil
++from copy import copy
++from pathlib import Path
++
++import pandas as pd
++import openpyxl
++from openpyxl.utils.dataframe import dataframe_to_rows
++from docx import Document
++
++ROOT = Path('/root')
++manifest_path = ROOT / 'Manifest_Plan.xlsx'
++dock_path = ROOT / 'Dock_Scan_Log.xlsx'
++template_path = ROOT / 'Outbound_Audit_Template.xlsx'
++out_xlsx = ROOT / 'Outbound_Load_Audit.xlsx'
++out_docx = ROOT / 'Outbound_Load_Brief.docx'
++
++TARGET_SHEETS = ['RawData', 'Formatted Data', 'Summary']
++REQUIRED_FORMATTED_HEADERS = [
++    'Shipment ID', 'Carton ID', 'Planned Zone', 'Route', 'Expected Weight',
++    'Hazmat Flag', 'Carrier', 'Wave', 'Missing Load Scan', 'Zone Mismatch',
++    'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = ['Route', 'Shipment ID', 'Missing Load Scans', 'Zone Mismatches', 'Total Errors']
++
++
++def clear_sheet(ws):
++    if ws.max_row:
++        ws.delete_rows(1, ws.max_row)
++    if ws.max_column:
++        ws.delete_cols(1, ws.max_column)
++
++
++def write_df(ws, df):
++    clear_sheet(ws)
++    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), start=1):
++        ws.append(row)
++
++
++def overview_values(wb):
++    ws = wb['Overview']
++    return [[cell.value for cell in row] for row in ws.iter_rows()]
++
++
++def build():
++    manifest = pd.read_excel(manifest_path, sheet_name=0, engine='openpyxl')
++    dock = pd.read_excel(dock_path, sheet_name=0, engine='openpyxl')
++
++    # Contract checks.
++    expected_manifest_cols = REQUIRED_FORMATTED_HEADERS[:8]
++    if list(manifest.columns) != expected_manifest_cols:
++        raise ValueError(f'Manifest columns differ from required first 8 formatted headers: {list(manifest.columns)}')
++    required_dock_cols = {'Shipment ID', 'Carton ID', 'Status', 'Scanned Zone', 'Scan Timestamp'}
++    missing = required_dock_cols - set(dock.columns)
++    if missing:
++        raise ValueError(f'Dock_Scan_Log missing required columns: {sorted(missing)}')
++
++    # Preserve template by copying first, then modifying only target sheets.
++    shutil.copyfile(template_path, out_xlsx)
++    wb = openpyxl.load_workbook(out_xlsx)
++
++    for sheet in TARGET_SHEETS:
++        if sheet not in wb.sheetnames:
++            wb.create_sheet(sheet)
++
++    # RawData: manifest verbatim.
++    write_df(wb['RawData'], manifest)
++
++    # Latest LOADED scan by Shipment ID + Carton ID using parsed timestamp.
++    loaded = dock[dock['Status'] == 'LOADED'].copy()
++    loaded['_ScanTimestampParsed'] = pd.to_datetime(loaded['Scan Timestamp'], errors='coerce')
++    if loaded['_ScanTimestampParsed'].isna().any():
++        bad = loaded[loaded['_ScanTimestampParsed'].isna()][['Shipment ID', 'Carton ID', 'Scan Timestamp']]
++        raise ValueError(f'Unparseable Scan Timestamp values in LOADED rows: {bad.to_dict(orient="records")}')
++    loaded = loaded.sort_values(['Shipment ID', 'Carton ID', '_ScanTimestampParsed'], kind='mergesort')
++    latest_loaded = loaded.drop_duplicates(['Shipment ID', 'Carton ID'], keep='last')
++    latest_loaded = latest_loaded[['Shipment ID', 'Carton ID', 'Scanned Zone']].rename(columns={'Scanned Zone': '_Kept Scanned Zone'})
++
++    formatted = manifest[expected_manifest_cols].copy()
+… omitted 81 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_outbound_audit.py → b/validate_outbound_audit.py
+@@ -0,0 +1,132 @@
++from pathlib import Path
++import pandas as pd
++import openpyxl
++from docx import Document
++
++ROOT = Path('/root')
++manifest_path = ROOT / 'Manifest_Plan.xlsx'
++template_path = ROOT / 'Outbound_Audit_Template.xlsx'
++out_xlsx = ROOT / 'Outbound_Load_Audit.xlsx'
++out_docx = ROOT / 'Outbound_Load_Brief.docx'
++formatted_headers = [
++    'Shipment ID', 'Carton ID', 'Planned Zone', 'Route', 'Expected Weight',
++    'Hazmat Flag', 'Carrier', 'Wave', 'Missing Load Scan', 'Zone Mismatch',
++    'Total Errors', 'Error Summary'
++]
++summary_headers = ['Route', 'Shipment ID', 'Missing Load Scans', 'Zone Mismatches', 'Total Errors']
++
++errors=[]
++
++def fail(msg):
++    errors.append(msg)
++
++# Workbook/sheet validation
++wb_out = openpyxl.load_workbook(out_xlsx, data_only=True)
++wb_tmpl = openpyxl.load_workbook(template_path, data_only=True)
++expected_sheets = ['Overview','RawData','Formatted Data','Summary']
++for s in expected_sheets:
++    if s not in wb_out.sheetnames:
++        fail(f'missing sheet {s}')
++
++# Overview unchanged: compare dimensions and all cell values over union dimensions.
++ws_o = wb_out['Overview']; ws_t = wb_tmpl['Overview']
++max_row=max(ws_o.max_row, ws_t.max_row); max_col=max(ws_o.max_column, ws_t.max_column)
++for r in range(1,max_row+1):
++    for c in range(1,max_col+1):
++        if ws_o.cell(r,c).value != ws_t.cell(r,c).value:
++            fail(f'Overview changed at {r},{c}: {ws_o.cell(r,c).value!r} != {ws_t.cell(r,c).value!r}')
++            break
++
++manifest = pd.read_excel(manifest_path, engine='openpyxl')
++raw = pd.read_excel(out_xlsx, sheet_name='RawData', engine='openpyxl')
++formatted = pd.read_excel(out_xlsx, sheet_name='Formatted Data', engine='openpyxl')
++summary = pd.read_excel(out_xlsx, sheet_name='Summary', engine='openpyxl')
++
++if list(raw.columns) != list(manifest.columns):
++    fail(f'RawData columns differ: {list(raw.columns)} vs {list(manifest.columns)}')
++if len(raw) != len(manifest):
++    fail(f'RawData row count {len(raw)} != manifest {len(manifest)}')
++if not raw.equals(manifest):
++    fail('RawData values/order differ from manifest')
++
++if list(formatted.columns) != formatted_headers:
++    fail(f'Formatted headers invalid: {list(formatted.columns)}')
++if len(formatted.columns) != 12:
++    fail(f'Formatted column count {len(formatted.columns)} != 12')
++if len(formatted) != len(manifest):
++    fail(f'Formatted row count {len(formatted)} != manifest {len(manifest)}')
++if not formatted[formatted_headers[:8]].equals(raw[formatted_headers[:8]]):
++    fail('Formatted first 8 columns/order do not match RawData')
++
++# Sample/internal consistency checks for all rows, stronger than a few samples.
++valid_summaries = {'None','Missing Load Scan','Zone Mismatch','Missing Load Scan, Zone Mismatch'}
++for idx,row in formatted.iterrows():
++    m=int(row['Missing Load Scan']); z=int(row['Zone Mismatch']); t=int(row['Total Errors'])
++    parts=[]
++    if m: parts.append('Missing Load Scan')
++    if z: parts.append('Zone Mismatch')
++    expected=', '.join(parts) if parts else 'None'
++    if m not in (0,1) or z not in (0,1):
++        fail(f'row {idx} non-binary flags')
++    if t != m+z:
++        fail(f'row {idx} Total Errors inconsistent')
++    if row['Error Summary'] not in valid_summaries or row['Error Summary'] != expected:
++        fail(f'row {idx} Error Summary inconsistent: {row["Error Summary"]!r}, expected {expected!r}')
++
++if list(summary.columns) != summary_headers:
++    fail(f'Summary headers invalid: {list(summary.columns)}')
++if len(summary) == 0 or summary.iloc[-1]['Route'] != 'Grand Total' or str(summary.iloc[-1]['Shipment ID']) != '-':
+… omitted 54 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/validate_outbound_audit.py → b//root/validate_outbound_audit.py
+@@ -39,7 +39,8 @@
+ 
+ manifest = pd.read_excel(manifest_path, engine='openpyxl')
+ raw = pd.read_excel(out_xlsx, sheet_name='RawData', engine='openpyxl')
+-formatted = pd.read_excel(out_xlsx, sheet_name='Formatted Data', engine='openpyxl')
++# keep_default_na=False preserves the literal Error Summary value 'None' as text.
++formatted = pd.read_excel(out_xlsx, sheet_name='Formatted Data', engine='openpyxl', keep_default_na=False)
+ summary = pd.read_excel(out_xlsx, sheet_name='Summary', engine='openpyxl')
+ 
+ if list(raw.columns) != list(manifest.columns):
+
+session_id: 20260607_015657_94ff1c

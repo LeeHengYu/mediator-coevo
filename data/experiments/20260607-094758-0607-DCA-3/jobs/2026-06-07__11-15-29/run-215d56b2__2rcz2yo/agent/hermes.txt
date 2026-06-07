@@ -1,0 +1,247 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build_trailer_audit.py → b/build_trailer_audit.py
+@@ -0,0 +1,155 @@
++from pathlib import Path
++import math
++import pandas as pd
++from docx import Document
++from openpyxl import load_workbook
++
++SRC = Path('/root/Trailer_Detention_Log.xlsx')
++OUT_XLSX = Path('/root/Trailer_Detention_Audit.xlsx')
++OUT_DOCX = Path('/root/Trailer_Detention_Brief.docx')
++
++EXPECTED_HEADERS = [
++    'Load ID',
++    'Carrier',
++    'Allowed Hold Hours',
++    'Actual Hold Hours',
++    'Seal Required',
++    'Seal Status',
++    'Yard',
++    'Dispatcher',
++]
++FORMATTED_HEADERS = EXPECTED_HEADERS + [
++    'Detention Overrun',
++    'Seal Error',
++    'Total Errors',
++    'Error Summary',
++]
++SUMMARY_HEADERS = [
++    'Carrier',
++    'Yard',
++    'Detention Overrun Errors',
++    'Seal Errors',
++    'Total Errors',
++]
++ALLOWED_SUMMARIES = {
++    'None',
++    'Detention Overrun',
++    'Seal Error',
++    'Detention Overrun, Seal Error',
++}
++
++
++def norm(value):
++    return str(value).strip().upper()
++
++
++def error_summary(detention, seal):
++    labels = []
++    if detention:
++        labels.append('Detention Overrun')
++    if seal:
++        labels.append('Seal Error')
++    return ', '.join(labels) if labels else 'None'
++
++
++def main():
++    xl = pd.ExcelFile(SRC, engine='openpyxl')
++    raw = pd.read_excel(SRC, sheet_name=xl.sheet_names[0], engine='openpyxl')
++    if list(raw.columns) != EXPECTED_HEADERS:
++        raise AssertionError(f'Unexpected source headers: {list(raw.columns)!r}')
++
++    formatted = raw.copy(deep=True)
++    formatted['Detention Overrun'] = (
++        formatted['Actual Hold Hours'] > formatted['Allowed Hold Hours']
++    ).astype(int)
++    formatted['Seal Error'] = formatted.apply(
++        lambda r: int(norm(r['Seal Required']) == 'YES' and norm(r['Seal Status']) != 'VERIFIED'),
++        axis=1,
++    )
++    formatted['Total Errors'] = (
++        formatted['Detention Overrun'] + formatted['Seal Error']
++    ).astype(int)
++    formatted['Error Summary'] = formatted.apply(
++        lambda r: error_summary(int(r['Detention Overrun']), int(r['Seal Error'])),
++        axis=1,
++    )
++    formatted = formatted[FORMATTED_HEADERS]
++
++    summary = (
+… omitted 77 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_trailer_audit.py → b/validate_trailer_audit.py
+@@ -0,0 +1,130 @@
++from pathlib import Path
++import zipfile
++import pandas as pd
++from openpyxl import load_workbook
++from docx import Document
++
++SRC = Path('/root/Trailer_Detention_Log.xlsx')
++OUT_XLSX = Path('/root/Trailer_Detention_Audit.xlsx')
++OUT_DOCX = Path('/root/Trailer_Detention_Brief.docx')
++EXPECTED_HEADERS = [
++    'Load ID', 'Carrier', 'Allowed Hold Hours', 'Actual Hold Hours',
++    'Seal Required', 'Seal Status', 'Yard', 'Dispatcher'
++]
++FORMATTED_HEADERS = EXPECTED_HEADERS + [
++    'Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = [
++    'Carrier', 'Yard', 'Detention Overrun Errors', 'Seal Errors', 'Total Errors'
++]
++ALLOWED_SUMMARIES = {
++    'None', 'Detention Overrun', 'Seal Error', 'Detention Overrun, Seal Error'
++}
++
++def norm(v):
++    return str(v).strip().upper()
++
++def expected_row_values(row):
++    detention = int(row['Actual Hold Hours'] > row['Allowed Hold Hours'])
++    seal = int(norm(row['Seal Required']) == 'YES' and norm(row['Seal Status']) != 'VERIFIED')
++    total = detention + seal
++    if detention and seal:
++        summary = 'Detention Overrun, Seal Error'
++    elif detention:
++        summary = 'Detention Overrun'
++    elif seal:
++        summary = 'Seal Error'
++    else:
++        summary = 'None'
++    return detention, seal, total, summary
++
++def cell_values_no_formulas(path):
++    wb = load_workbook(path, data_only=False)
++    formulas=[]
++    for ws in wb.worksheets:
++        for row in ws.iter_rows():
++            for cell in row:
++                if isinstance(cell.value, str) and cell.value.startswith('='):
++                    formulas.append((ws.title, cell.coordinate, cell.value))
++    return formulas
++
++def main():
++    wb = load_workbook(OUT_XLSX, read_only=False, data_only=False)
++    sheet_names = wb.sheetnames
++    assert sheet_names == ['RawData', 'Formatted Data', 'Summary'], sheet_names
++
++    raw = pd.read_excel(OUT_XLSX, sheet_name='RawData', engine='openpyxl')
++    formatted = pd.read_excel(OUT_XLSX, sheet_name='Formatted Data', engine='openpyxl')
++    summary = pd.read_excel(OUT_XLSX, sheet_name='Summary', engine='openpyxl')
++    source = pd.read_excel(SRC, sheet_name=0, engine='openpyxl')
++
++    assert list(raw.columns) == EXPECTED_HEADERS, list(raw.columns)
++    assert list(formatted.columns) == FORMATTED_HEADERS, list(formatted.columns)
++    assert list(summary.columns) == SUMMARY_HEADERS, list(summary.columns)
++    assert len(raw) == len(formatted) == len(source), (len(raw), len(formatted), len(source))
++    pd.testing.assert_frame_equal(raw, source, check_dtype=False, check_like=False)
++    pd.testing.assert_frame_equal(formatted[EXPECTED_HEADERS], raw, check_dtype=False, check_like=False)
++
++    sample_indices = sorted(set([0, 1, 2, len(formatted)//2, len(formatted)-1]))
++    for idx in sample_indices:
++        exp = expected_row_values(formatted.loc[idx, EXPECTED_HEADERS])
++        got = tuple(formatted.loc[idx, ['Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary']].tolist())
++        assert got == exp, (idx, got, exp)
++
++    # Full-row recomputation, beyond a few-row sanity check.
++    recomputed = formatted.apply(lambda r: expected_row_values(r), axis=1, result_type='expand')
++    recomputed.columns = ['Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary']
++    pd.testing.assert_frame_equal(
++        formatted[['Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary']].reset_index(drop=True),
+… omitted 52 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/validate_trailer_audit.py → b//root/validate_trailer_audit.py
+@@ -54,7 +54,8 @@
+     assert sheet_names == ['RawData', 'Formatted Data', 'Summary'], sheet_names
+ 
+     raw = pd.read_excel(OUT_XLSX, sheet_name='RawData', engine='openpyxl')
+-    formatted = pd.read_excel(OUT_XLSX, sheet_name='Formatted Data', engine='openpyxl')
++    # keep_default_na=False is needed so the literal Error Summary value "None" stays a string.
++    formatted = pd.read_excel(OUT_XLSX, sheet_name='Formatted Data', engine='openpyxl', keep_default_na=False)
+     summary = pd.read_excel(OUT_XLSX, sheet_name='Summary', engine='openpyxl')
+     source = pd.read_excel(SRC, sheet_name=0, engine='openpyxl')
+ 
+  ┊ review diff
+a//root/validate_trailer_audit.py → b//root/validate_trailer_audit.py
+@@ -53,11 +53,11 @@
+     sheet_names = wb.sheetnames
+     assert sheet_names == ['RawData', 'Formatted Data', 'Summary'], sheet_names
+ 
+-    raw = pd.read_excel(OUT_XLSX, sheet_name='RawData', engine='openpyxl')
++    raw = pd.read_excel(OUT_XLSX, sheet_name='RawData', engine='openpyxl', keep_default_na=False)
+     # keep_default_na=False is needed so the literal Error Summary value "None" stays a string.
+     formatted = pd.read_excel(OUT_XLSX, sheet_name='Formatted Data', engine='openpyxl', keep_default_na=False)
+     summary = pd.read_excel(OUT_XLSX, sheet_name='Summary', engine='openpyxl')
+-    source = pd.read_excel(SRC, sheet_name=0, engine='openpyxl')
++    source = pd.read_excel(SRC, sheet_name=0, engine='openpyxl', keep_default_na=False)
+ 
+     assert list(raw.columns) == EXPECTED_HEADERS, list(raw.columns)
+     assert list(formatted.columns) == FORMATTED_HEADERS, list(formatted.columns)
+  ┊ review diff
+a//root/build_trailer_audit.py → b//root/build_trailer_audit.py
+@@ -54,7 +54,7 @@
+ 
+ def main():
+     xl = pd.ExcelFile(SRC, engine='openpyxl')
+-    raw = pd.read_excel(SRC, sheet_name=xl.sheet_names[0], engine='openpyxl')
++    raw = pd.read_excel(SRC, sheet_name=xl.sheet_names[0], engine='openpyxl', keep_default_na=False)
+     if list(raw.columns) != EXPECTED_HEADERS:
+         raise AssertionError(f'Unexpected source headers: {list(raw.columns)!r}')
+ 
+
+session_id: 20260607_033421_1a9580
+Done.
+
+Created:
+- /root/Trailer_Detention_Audit.xlsx
+- /root/Trailer_Detention_Brief.docx
+
+Source inspection:
+- Source workbook exists: /root/Trailer_Detention_Log.xlsx
+- Sheets: ['Detention']
+- Row count: 16
+- Headers confirmed exactly:
+  Load ID, Carrier, Allowed Hold Hours, Actual Hold Hours, Seal Required, Seal Status, Yard, Dispatcher
+- Dtypes observed:
+  Load ID: str
+  Carrier: str
+  Allowed Hold Hours: int64
+  Actual Hold Hours: int64
+  Seal Required: str
+  Seal Status: str
+  Yard: str
+  Dispatcher: str
+
+Validation completed successfully.
+
+Validation evidence:
+- Workbook sheet order:
+  ['RawData', 'Formatted Data', 'Summary']
+- RawData rows: 16
+- Formatted Data rows: 16
+- Formatted Data columns:
+  ['Load ID', 'Carrier', 'Allowed Hold Hours', 'Actual Hold Hours', 'Seal Required', 'Seal Status', 'Yard', 'Dispatcher', 'Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary']
+- Summary rows including Grand Total: 6
+- Grand Total:
+  Detention Overrun Errors: 7
+  Seal Errors: 4
+  Total Errors: 11
+- Top carriers included in the brief:
+  CarrierE
+  CarrierA
+- Confirmed no formulas were written in the derived/summary cells.
+- Confirmed .docx exists, opens with python-docx, includes the totals, and includes at least two top carrier names.

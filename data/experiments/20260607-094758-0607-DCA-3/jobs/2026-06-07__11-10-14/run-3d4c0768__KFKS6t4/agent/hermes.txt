@@ -1,0 +1,185 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build_timesheet_audit.py → b/build_timesheet_audit.py
+@@ -0,0 +1,162 @@
++from pathlib import Path
++import re
++import pandas as pd
++from docx import Document
++
++SRC = Path('/root/Timesheet_Submissions.xlsx')
++AUDIT = Path('/root/Timesheet_Compliance_Audit.xlsx')
++BRIEF = Path('/root/Timesheet_Compliance_Brief.docx')
++
++ENTRIES_SHEET = 'Entries'
++RULES_SHEET = 'BreakRules'
++FIRST_COLS = [
++    'Week Ending',
++    'Employee ID',
++    'Role',
++    'Hours Worked',
++    'Break Minutes',
++    'Approval Code',
++    'Project Code',
++    'Manager',
++]
++SUMMARY_COLS = ['Employee ID', 'Week Ending', 'Break Deficits', 'Approval Gaps', 'Total Errors']
++ALLOWED_SUMMARIES = {'None', 'Break Deficit', 'Approval Missing', 'Break Deficit, Approval Missing'}
++
++
++def is_blank_approval(value):
++    if pd.isna(value):
++        return True
++    if isinstance(value, str) and value.strip() == '':
++        return True
++    return False
++
++
++def detect_column(columns, required_words):
++    def tokens(name):
++        return set(re.findall(r'[a-z0-9]+', str(name).lower()))
++    for col in columns:
++        toks = tokens(col)
++        if all(word.lower() in toks for word in required_words):
++            return col
++    raise ValueError(f'Could not find column with words {required_words!r}; available columns: {list(columns)!r}')
++
++
++def main():
++    entries = pd.read_excel(SRC, sheet_name=ENTRIES_SHEET, engine='openpyxl')
++    rules = pd.read_excel(SRC, sheet_name=RULES_SHEET, engine='openpyxl')
++
++    print('Inspection results')
++    for name, df in [(ENTRIES_SHEET, entries), (RULES_SHEET, rules)]:
++        print(f'\n=== {name} ===')
++        print('Columns:', list(df.columns))
++        print('Dtypes:')
++        print(df.dtypes.to_string())
++        print('Sample rows:')
++        print(df.head(8).to_string(index=False))
++
++    role_col = detect_column(rules.columns, ['role'])
++    min_break_col = detect_column(rules.columns, ['min', 'break', 'minutes'])
++    overtime_col = detect_column(rules.columns, ['overtime', 'threshold'])
++    print('\nDetected BreakRules headers:')
++    print('Role:', role_col)
++    print('Min Break Minutes:', min_break_col)
++    print('Overtime Threshold:', overtime_col)
++
++    missing_entry_cols = [c for c in FIRST_COLS if c not in entries.columns]
++    if missing_entry_cols:
++        raise ValueError(f'Entries is missing required columns: {missing_entry_cols}')
++
++    rule_lookup = {}
++    for _, row in rules.iterrows():
++        role = row[role_col]
++        if pd.isna(role):
++            continue
++        rule_lookup[str(role)] = (row[min_break_col], row[overtime_col])
++    if not rule_lookup:
++        raise ValueError('No usable BreakRules rows found')
++
++    formatted = entries[FIRST_COLS].copy()
+… omitted 84 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_timesheet_audit.py → b/validate_timesheet_audit.py
+@@ -0,0 +1,89 @@
++from pathlib import Path
++import pandas as pd
++from openpyxl import load_workbook
++from docx import Document
++
++SRC = Path('/root/Timesheet_Submissions.xlsx')
++AUDIT = Path('/root/Timesheet_Compliance_Audit.xlsx')
++BRIEF = Path('/root/Timesheet_Compliance_Brief.docx')
++EXPECTED_FORMATTED = [
++    'Week Ending', 'Employee ID', 'Role', 'Hours Worked', 'Break Minutes', 'Approval Code',
++    'Project Code', 'Manager', 'Break Deficit', 'Approval Missing', 'Total Errors', 'Error Summary'
++]
++EXPECTED_SUMMARY = ['Employee ID', 'Week Ending', 'Break Deficits', 'Approval Gaps', 'Total Errors']
++ALLOWED = {'None', 'Break Deficit', 'Approval Missing', 'Break Deficit, Approval Missing'}
++
++errors = []
++
++def check(condition, message):
++    if condition:
++        print('PASS:', message)
++    else:
++        print('FAIL:', message)
++        errors.append(message)
++
++# Workbook validations with pandas/openpyxl
++wb = load_workbook(AUDIT, data_only=False)
++check(wb.sheetnames == ['RawData', 'Formatted Data', 'Summary'], f'sheet names/order are {wb.sheetnames}')
++
++formatted_header = [cell.value for cell in next(wb['Formatted Data'].iter_rows(min_row=1, max_row=1))]
++summary_header = [cell.value for cell in next(wb['Summary'].iter_rows(min_row=1, max_row=1))]
++check(formatted_header == EXPECTED_FORMATTED, f'Formatted Data headers are exact: {formatted_header}')
++check(len(formatted_header) == 12, 'Formatted Data has exactly 12 columns')
++check(summary_header == EXPECTED_SUMMARY, f'Summary headers are exact: {summary_header}')
++
++formula_cells = []
++for ws_name in ['RawData', 'Formatted Data', 'Summary']:
++    ws = wb[ws_name]
++    for row in ws.iter_rows():
++        for cell in row:
++            if isinstance(cell.value, str) and cell.value.startswith('='):
++                formula_cells.append(f'{ws_name}!{cell.coordinate}')
++check(not formula_cells, f'no formulas found in output workbook ({formula_cells})')
++
++raw = pd.read_excel(AUDIT, sheet_name='RawData', engine='openpyxl')
++entries = pd.read_excel(SRC, sheet_name='Entries', engine='openpyxl')
++check(list(raw.columns) == list(entries.columns), 'RawData columns match Entries exactly')
++check(raw.equals(entries), 'RawData values and row order match Entries exactly under pandas readback')
++
++formatted = pd.read_excel(AUDIT, sheet_name='Formatted Data', engine='openpyxl')
++summary = pd.read_excel(AUDIT, sheet_name='Summary', engine='openpyxl')
++check(list(formatted.columns) == EXPECTED_FORMATTED, 'Formatted Data dataframe columns exact')
++check(set(formatted['Error Summary'].dropna().unique()).issubset(ALLOWED), f'Error Summary values allowed: {sorted(formatted["Error Summary"].dropna().unique())}')
++check(list(summary.columns) == EXPECTED_SUMMARY, 'Summary dataframe columns exact')
++
++non_total = summary[summary['Employee ID'] != 'Grand Total'].copy()
++check((non_total['Total Errors'] > 0).all(), 'Summary excludes non-total rows with Total Errors <= 0')
++expected_sorted = non_total.sort_values(['Employee ID', 'Week Ending'], ascending=[True, True], kind='mergesort').reset_index(drop=True)
++check(non_total.reset_index(drop=True).equals(expected_sorted), 'Summary rows sorted by Employee ID then Week Ending ascending')
++last = summary.iloc[-1].to_dict()
++check(last['Employee ID'] == 'Grand Total' and last['Week Ending'] == '-', f'Summary ends with Grand Total row: {last}')
++check(
++    int(last['Break Deficits']) == int(non_total['Break Deficits'].sum()) and
++    int(last['Approval Gaps']) == int(non_total['Approval Gaps'].sum()) and
++    int(last['Total Errors']) == int(non_total['Total Errors'].sum()),
++    'Grand Total row totals match included Summary rows'
++)
++
++# Recompute from source dynamically to confirm values
++rules = pd.read_excel(SRC, sheet_name='BreakRules', engine='openpyxl')
++lookup = {str(r['Role']): (r['Min Break Minutes'], r['Overtime Threshold']) for _, r in rules.iterrows()}
++recalc = entries[EXPECTED_FORMATTED[:8]].copy()
++recalc['Break Deficit'] = recalc.apply(lambda r: int(r['Break Minutes'] < lookup[str(r['Role'])][0]), axis=1)
++recalc['Approval Missing'] = recalc.apply(lambda r: int(r['Hours Worked'] > lookup[str(r['Role'])][1] and (pd.isna(r['Approval Code']) or (isinstance(r['Approval Code'], str) and r['Approval Code'].strip() == ''))), axis=1)
++recalc['Total Errors'] = recalc['Break Deficit'] + recalc['Approval Missing']
++recalc['Error Summary'] = recalc.apply(lambda r: ', '.join([x for x, flag in [('Break Deficit', r['Break Deficit']), ('Approval Missing', r['Approval Missing'])] if flag]) or 'None', axis=1)
++check(formatted[EXPECTED_FORMATTED].equals(recalc[EXPECTED_FORMATTED]), 'Formatted Data computed values match dynamic BreakRules recomputation')
++
++# Docx validations
+… omitted 11 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+❌ Error during OpenAI-compatible API call #14: Could not determine home directory.
+a//root/validate_timesheet_audit.py → b//root/validate_timesheet_audit.py
+@@ -73,7 +73,13 @@
+ recalc['Approval Missing'] = recalc.apply(lambda r: int(r['Hours Worked'] > lookup[str(r['Role'])][1] and (pd.isna(r['Approval Code']) or (isinstance(r['Approval Code'], str) and r['Approval Code'].strip() == ''))), axis=1)
+ recalc['Total Errors'] = recalc['Break Deficit'] + recalc['Approval Missing']
+ recalc['Error Summary'] = recalc.apply(lambda r: ', '.join([x for x, flag in [('Break Deficit', r['Break Deficit']), ('Approval Missing', r['Approval Missing'])] if flag]) or 'None', axis=1)
+-check(formatted[EXPECTED_FORMATTED].equals(recalc[EXPECTED_FORMATTED]), 'Formatted Data computed values match dynamic BreakRules recomputation')
++# pandas read_excel interprets literal Excel cells containing "None" as missing by default, so
++# normalize that display-only value before comparing the computed contract values.
++formatted_compare = formatted[EXPECTED_FORMATTED].copy()
++recalc_compare = recalc[EXPECTED_FORMATTED].copy()
++formatted_compare['Error Summary'] = formatted_compare['Error Summary'].fillna('None')
++recalc_compare['Error Summary'] = recalc_compare['Error Summary'].fillna('None')
++check(formatted_compare.equals(recalc_compare), 'Formatted Data computed values match dynamic BreakRules recomputation')
+ 
+ # Docx validations
+ text = '\n'.join(p.text for p in Document(BRIEF).paragraphs)
+
+session_id: 20260607_031227_7656f6

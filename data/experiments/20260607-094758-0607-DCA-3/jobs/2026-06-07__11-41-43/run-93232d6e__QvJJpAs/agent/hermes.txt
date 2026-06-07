@@ -1,0 +1,176 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build_cycle_audit.py → b/build_cycle_audit.py
+@@ -0,0 +1,292 @@
++from copy import copy
++from decimal import Decimal, InvalidOperation
++from datetime import datetime
++import re
++from openpyxl import load_workbook, Workbook
++from openpyxl.utils import get_column_letter
++from docx import Document
++
++PLAN = '/root/Cycle_Plan.xlsx'
++EVENTS = '/root/Count_Event_Log.xlsx'
++TEMPLATE = '/root/Cycle_Template.xlsx'
++OUT_XLSX = '/root/Cycle_Count_Variance_Audit.xlsx'
++OUT_DOCX = '/root/Cycle_Count_Variance_Brief.docx'
++
++BASE_HEADERS = [
++    'Facility', 'Session ID', 'Bin ID', 'Product ID',
++    'Expected Qty', 'Allowed Variance', 'Approval Needed'
++]
++FORMATTED_HEADERS = BASE_HEADERS + [
++    'Missing Final Count', 'Approval Gap', 'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = [
++    'Facility', 'Session ID', 'Missing Final Counts', 'Approval Gaps', 'Total Errors'
++]
++KEY_HEADERS = ['Facility', 'Session ID', 'Bin ID']
++
++def norm_blank(v):
++    if v is None:
++        return None
++    if isinstance(v, str) and v.strip() == '':
++        return None
++    return v
++
++def to_decimal(v):
++    if v is None or (isinstance(v, str) and v.strip() == ''):
++        return None
++    try:
++        return Decimal(str(v).strip())
++    except (InvalidOperation, ValueError):
++        return None
++
++def parse_time(v):
++    if v is None:
++        return None
++    if isinstance(v, datetime):
++        return v
++    if isinstance(v, str):
++        s = v.strip()
++        if not s:
++            return None
++        # Handle common ISO-ish strings, including trailing Z.
++        try:
++            return datetime.fromisoformat(s.replace('Z', '+00:00'))
++        except ValueError:
++            pass
++        for fmt in ('%Y-%m-%d %H:%M:%S', '%m/%d/%Y %H:%M:%S', '%m/%d/%Y %H:%M'):
++            try:
++                return datetime.strptime(s, fmt)
++            except ValueError:
++                pass
++    return None
++
++def copy_sheet_exact(src_ws, dst_ws):
++    # Values and cell-level formatting
++    for row in src_ws.iter_rows():
++        for src_cell in row:
++            dst_cell = dst_ws[src_cell.coordinate]
++            dst_cell.value = src_cell.value
++            if src_cell.has_style:
++                dst_cell._style = copy(src_cell._style)
++            if src_cell.number_format:
++                dst_cell.number_format = src_cell.number_format
++            if src_cell.font:
++                dst_cell.font = copy(src_cell.font)
++            if src_cell.fill:
++                dst_cell.fill = copy(src_cell.fill)
++            if src_cell.border:
++                dst_cell.border = copy(src_cell.border)
+… omitted 214 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/build_cycle_audit.py → b//root/build_cycle_audit.py
+@@ -97,7 +97,10 @@
+     dst_ws.page_margins = copy(src_ws.page_margins)
+     dst_ws.page_setup = copy(src_ws.page_setup)
+     dst_ws.print_options = copy(src_ws.print_options)
+-    dst_ws.sheet_view = copy(src_ws.sheet_view)
++    # sheet_view is read-only as a property in openpyxl; copy supported attributes.
++    dst_ws.sheet_view.showGridLines = src_ws.sheet_view.showGridLines
++    dst_ws.sheet_view.zoomScale = src_ws.sheet_view.zoomScale
++    dst_ws.sheet_view.zoomScaleNormal = src_ws.sheet_view.zoomScaleNormal
+     dst_ws.freeze_panes = src_ws.freeze_panes
+     if src_ws.auto_filter.ref:
+         dst_ws.auto_filter.ref = src_ws.auto_filter.ref
+  ┊ review diff
+a/validate_cycle_audit.py → b/validate_cycle_audit.py
+@@ -0,0 +1,74 @@
++from openpyxl import load_workbook
++from docx import Document
++
++XLSX = '/root/Cycle_Count_Variance_Audit.xlsx'
++DOCX = '/root/Cycle_Count_Variance_Brief.docx'
++EXPECTED_SHEETS = ['Overview', 'RawData', 'Formatted Data', 'Summary']
++EXPECTED_FORMATTED_HEADERS = [
++    'Facility', 'Session ID', 'Bin ID', 'Product ID', 'Expected Qty', 'Allowed Variance', 'Approval Needed',
++    'Missing Final Count', 'Approval Gap', 'Total Errors', 'Error Summary'
++]
++EXPECTED_SUMMARY_HEADERS = ['Facility', 'Session ID', 'Missing Final Counts', 'Approval Gaps', 'Total Errors']
++
++wb = load_workbook(XLSX, data_only=True)
++assert wb.sheetnames == EXPECTED_SHEETS, wb.sheetnames
++
++fmt = wb['Formatted Data']
++fmt_headers = [fmt.cell(1, c).value for c in range(1, fmt.max_column + 1)]
++assert fmt.max_column == 11, fmt.max_column
++assert fmt_headers == EXPECTED_FORMATTED_HEADERS, fmt_headers
++
++summary = wb['Summary']
++summary_headers = [summary.cell(1, c).value for c in range(1, summary.max_column + 1)]
++assert summary_headers == EXPECTED_SUMMARY_HEADERS, summary_headers
++last = [summary.cell(summary.max_row, c).value for c in range(1, 6)]
++assert last[0] == 'Grand Total' and last[1] == '-', last
++body = []
++for r in range(2, summary.max_row):
++    body.append([summary.cell(r, c).value for c in range(1, 6)])
++calc_missing = sum(int(row[2] or 0) for row in body)
++calc_gaps = sum(int(row[3] or 0) for row in body)
++calc_total = sum(int(row[4] or 0) for row in body)
++assert [calc_missing, calc_gaps, calc_total] == [int(last[2]), int(last[3]), int(last[4])], ([calc_missing, calc_gaps, calc_total], last)
++assert calc_total == calc_missing + calc_gaps, (calc_missing, calc_gaps, calc_total)
++
++# Verify Formatted Data row totals and summary consistency from written values.
++allowed_summaries = {'None', 'Missing Final Count', 'Approval Gap', 'Missing Final Count, Approval Gap'}
++agg = {}
++for r in range(2, fmt.max_row + 1):
++    row = {EXPECTED_FORMATTED_HEADERS[c-1]: fmt.cell(r, c).value for c in range(1, 12)}
++    assert row['Error Summary'] in allowed_summaries, row
++    assert int(row['Total Errors']) == int(row['Missing Final Count']) + int(row['Approval Gap']), row
++    key = (str(row['Facility']), str(row['Session ID']))
++    agg.setdefault(key, [0,0,0])
++    agg[key][0] += int(row['Missing Final Count'])
++    agg[key][1] += int(row['Approval Gap'])
++    agg[key][2] += int(row['Total Errors'])
++summary_rows = {(str(row[0]), str(row[1])): [int(row[2]), int(row[3]), int(row[4])] for row in body}
++expected_summary_rows = {k:v for k,v in agg.items() if v[2] > 0}
++assert summary_rows == expected_summary_rows, (summary_rows, expected_summary_rows)
++
++# Required top-2 sort.
++top2 = sorted(body, key=lambda x: (-int(x[4]), -int(x[2]), str(x[0]), str(x[1])))[:2]
++top_pairs = [f'{str(row[0])}-{str(row[1])}' for row in top2]
++
++doc = Document(DOCX)
++text = '\n'.join(p.text for p in doc.paragraphs)
++for pair in top_pairs:
++    assert pair in text, (pair, text)
++for row in top2:
++    facility = str(row[0]); session = str(row[1])
++    literal = f'Facility {facility} Session {session}'
++    assert literal in text, (literal, text)
++for total in [last[2], last[3], last[4]]:
++    assert str(int(total)) in text, (total, text)
++assert 'Missing Final Count means no FINAL count event was recorded for a planned bin' in text, text
++assert 'Approval Gap means a final count exists, approval was required, and the absolute variance from expected exceeded the allowed tolerance' in text, text
++
++print('VALIDATION PASSED')
++print('sheets=', wb.sheetnames)
++print('formatted_rows=', fmt.max_row - 1)
++print('summary_body_rows=', len(body))
++print('grand_total=', last)
++print('top_pairs=', top_pairs)
++print('doc_text=', text)
+
+session_id: 20260607_034449_ed649f

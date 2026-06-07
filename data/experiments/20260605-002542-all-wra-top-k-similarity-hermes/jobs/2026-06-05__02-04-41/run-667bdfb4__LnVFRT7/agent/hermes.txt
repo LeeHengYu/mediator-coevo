@@ -1,0 +1,188 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_workbook.py → b/inspect_workbook.py
+@@ -0,0 +1,49 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/output/result.xlsx'
++wb = load_workbook(path, data_only=False)
++print('Workbook:', path)
++print('Sheets:', wb.sheetnames)
++
++for ws_name, max_row, min_col, max_col in [('Task', 55, 1, 12), ('Data', 40, 1, None)]:
++    ws = wb[ws_name]
++    if max_col is None:
++        max_col = ws.max_column
++    print('\n=== Sheet', ws_name, 'rows 1-%s cols %s-%s ===' % (max_row, get_column_letter(min_col), get_column_letter(max_col)))
++    for r in range(1, max_row + 1):
++        vals = []
++        for c in range(min_col, max_col + 1):
++            v = ws.cell(r, c).value
++            if v is None:
++                s = ''
++            else:
++                s = str(v)
++            vals.append(s)
++        print(f'{r:02d}: ' + ' | '.join(vals))
++
++ws = wb['Task']
++print('\nTask exact series codes in D:')
++for rows in [(12,17),(19,24),(26,31),(35,40)]:
++    print(f'Rows {rows[0]}-{rows[1]}:', [ws.cell(r,4).value for r in range(rows[0], rows[1]+1)])
++print('Years H10:L10:', [ws.cell(10,c).value for c in range(8,13)])
++
++print('\nExisting formulas/values in target ranges:')
++for coord_range in ['H12:L17','H19:L24','H26:L31','H35:L40','H42:L47','H50:L50']:
++    print(coord_range)
++    for row in ws[coord_range]:
++        print('  ' + ', '.join(f'{cell.coordinate}={cell.value!r}' for cell in row))
++
++wsd = wb['Data']
++print('\nData dimensions:', wsd.max_row, wsd.max_column)
++print('Data rows 21:38 with column letters:')
++for r in range(21,39):
++    print(f'Row {r}:')
++    for c in range(1, wsd.max_column + 1):
++        v = wsd.cell(r,c).value
++        if v is not None:
++            print(f'  {get_column_letter(c)}{r}: {v!r}')
++
++print('\nData candidate year header rows around 18-22:')
++for r in range(18,23):
++    print(f'Row {r}:', [(get_column_letter(c), wsd.cell(r,c).value) for c in range(1, wsd.max_column+1) if wsd.cell(r,c).value is not None])
+  ┊ review diff
+a/populate_formulas.py → b/populate_formulas.py
+@@ -0,0 +1,45 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/output/result.xlsx'
++wb = load_workbook(path, data_only=False)
++ws = wb['Task']
++
++# Step 1: lookup formulas. Data sheet has series codes in D21:D38,
++# year headers in H4:L4, values in H21:L38.
++lookup_rows = list(range(12, 18)) + list(range(19, 25)) + list(range(26, 32))
++for r in lookup_rows:
++    for c in range(8, 13):  # H:L
++        col = get_column_letter(c)
++        ws.cell(r, c).value = f'=INDEX(Data!$H$21:$L$38,MATCH($D{r},Data!$D$21:$D$38,0),MATCH({col}$10,Data!$H$4:$L$4,0))'
++
++# Step 2: Net Patient Flow = (Admissions - Discharges) / Bed Capacity * 100
++for idx, r in enumerate(range(35, 41)):  # maps to rows 12-17, 19-24, 26-31
++    admit_row = 12 + idx
++    discharge_row = 19 + idx
++    capacity_row = 26 + idx
++    for c in range(8, 13):
++        col = get_column_letter(c)
++        ws.cell(r, c).value = f'=({col}{admit_row}-{col}{discharge_row})/{col}{capacity_row}*100'
++
++# Step 2 statistics: labels in E42:E47 are Minimum, Maximum, Median, Simple mean, 25th percentile, 75th percentile.
++stat_formulas = {
++    42: 'MIN',
++    43: 'MAX',
++    44: 'MEDIAN',
++    45: 'AVERAGE',
++}
++for c in range(8, 13):
++    col = get_column_letter(c)
++    for r, func in stat_formulas.items():
++        ws.cell(r, c).value = f'={func}({col}$35:{col}$40)'
++    ws.cell(46, c).value = f'=PERCENTILE({col}$35:{col}$40,0.25)'
++    ws.cell(47, c).value = f'=PERCENTILE({col}$35:{col}$40,0.75)'
++
++# Step 3 weighted mean: Net Patient Flow weighted by Effective Bed Capacity.
++for c in range(8, 13):
++    col = get_column_letter(c)
++    ws.cell(50, c).value = f'=SUMPRODUCT({col}$35:{col}$40,{col}$26:{col}$31)/SUM({col}$26:{col}$31)'
++
++wb.save(path)
++print(f'Saved formulas to {path}')
+  ┊ review diff
+a/verify_formulas.py → b/verify_formulas.py
+@@ -0,0 +1,54 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++from pathlib import Path
++
++path = Path('/root/output/result.xlsx')
++assert path.exists(), f'Missing {path}'
++wb = load_workbook(path, data_only=False)
++assert wb.sheetnames == ['Task', 'Data'], f'Unexpected sheets: {wb.sheetnames}'
++ws = wb['Task']
++
++errors = []
++
++def check_range(range_name, predicate, desc):
++    count = 0
++    samples = []
++    for row in ws[range_name]:
++        for cell in row:
++            count += 1
++            v = cell.value
++            if len(samples) < 5:
++                samples.append(f'{cell.coordinate}={v}')
++            if not (isinstance(v, str) and v.startswith('=') and predicate(v, cell)):
++                errors.append(f'{cell.coordinate} failed {desc}: {v!r}')
++    print(f'{range_name}: {count} formulas verified for {desc}; samples: ' + '; '.join(samples))
++
++# Exact examples/spot checks for formula pattern correctness.
++print('Sheets:', wb.sheetnames)
++print('File:', path)
++print('Years H10:L10:', [ws.cell(10,c).value for c in range(8,13)])
++print('Series D12:D17:', [ws.cell(r,4).value for r in range(12,18)])
++print('Series D19:D24:', [ws.cell(r,4).value for r in range(19,25)])
++print('Series D26:D31:', [ws.cell(r,4).value for r in range(26,32)])
++print('Labels E42:E47:', [ws.cell(r,5).value for r in range(42,48)])
++
++check_range('H12:L17', lambda v, cell: 'INDEX(Data!$H$21:$L$38' in v and f'MATCH($D{cell.row},Data!$D$21:$D$38,0)' in v and f'MATCH({get_column_letter(cell.column)}$10,Data!$H$4:$L$4,0)' in v, 'admissions lookup INDEX/MATCH')
++check_range('H19:L24', lambda v, cell: 'INDEX(Data!$H$21:$L$38' in v and f'MATCH($D{cell.row},Data!$D$21:$D$38,0)' in v and f'MATCH({get_column_letter(cell.column)}$10,Data!$H$4:$L$4,0)' in v, 'discharges lookup INDEX/MATCH')
++check_range('H26:L31', lambda v, cell: 'INDEX(Data!$H$21:$L$38' in v and f'MATCH($D{cell.row},Data!$D$21:$D$38,0)' in v and f'MATCH({get_column_letter(cell.column)}$10,Data!$H$4:$L$4,0)' in v, 'bed capacity lookup INDEX/MATCH')
++check_range('H35:L40', lambda v, cell: f'/{get_column_letter(cell.column)}{26 + (cell.row-35)}*100' in v and f'{get_column_letter(cell.column)}{12 + (cell.row-35)}' in v and f'{get_column_letter(cell.column)}{19 + (cell.row-35)}' in v, 'net patient flow')
++expected_stats = {42:'MIN',43:'MAX',44:'MEDIAN',45:'AVERAGE',46:'PERCENTILE',47:'PERCENTILE'}
++check_range('H42:L47', lambda v, cell: v.startswith('=' + expected_stats[cell.row] + '(') and f'{get_column_letter(cell.column)}$35:{get_column_letter(cell.column)}$40' in v, 'statistics')
++check_range('H50:L50', lambda v, cell: v == f'=SUMPRODUCT({get_column_letter(cell.column)}$35:{get_column_letter(cell.column)}$40,{get_column_letter(cell.column)}$26:{get_column_letter(cell.column)}$31)/SUM({get_column_letter(cell.column)}$26:{get_column_letter(cell.column)}$31)', 'weighted mean SUMPRODUCT')
++
++# Print all final target formulas for audit.
++for coord_range in ['H12:L17','H19:L24','H26:L31','H35:L40','H42:L47','H50:L50']:
++    print('\n' + coord_range)
++    for row in ws[coord_range]:
++        print('  ' + ', '.join(f'{cell.coordinate}={cell.value}' for cell in row))
++
++if errors:
++    print('\nERRORS:')
++    for e in errors:
++        print(e)
++    raise SystemExit(1)
++print('\nVerification passed: all required cells contain formulas; no new sheets; file saved at /root/output/result.xlsx')
+
+session_id: 20260604_183846_ce16ec
+Completed. The workbook copy has been populated and saved at:
+
+/root/output/result.xlsx
+
+Verification performed with openpyxl confirmed:
+- Workbook sheets remain exactly: Task, Data
+- Lookup formulas were written to H12:L17, H19:L24, and H26:L31
+- Net patient flow formulas were written to H35:L40
+- Statistics formulas matching labels were written to H42:L47:
+  - Minimum
+  - Maximum
+  - Median
+  - Simple mean
+  - 25th percentile
+  - 75th percentile
+- Weighted mean SUMPRODUCT formulas were written to H50:L50
+- All required cells contain formula strings beginning with =
+- No new sheets were added
+
+Key layout used:
+- Data series codes: Data!D21:D38
+- Data year headers: Data!H4:L4
+- Data values: Data!H21:L38
+- Task years: H10:L10, 2020 through 2024
+
+The verification script reported:
+
+Verification passed: all required cells contain formulas; no new sheets; file saved at /root/output/result.xlsx
