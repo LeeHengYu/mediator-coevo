@@ -484,8 +484,8 @@ def test_inspect_command_prints_diffusion_context_summary(tmp_path):
 
 def test_matrix_inspection_payload_reports_row_summaries(tmp_path):
     matrix_dir = tmp_path / "20260502-000000-42-baseline-matrix"
-    row_a = matrix_dir / "no_feedback"
-    row_b = matrix_dir / "full_coevolution"
+    row_a = matrix_dir / "skill_none_diffusion_none"
+    row_b = matrix_dir / "skill_all_top_k_similarity"
     for row_dir, reward in ((row_a, 0.0), (row_b, 1.0)):
         row_dir.mkdir(parents=True)
         write_score_summary(
@@ -498,9 +498,16 @@ def test_matrix_inspection_payload_reports_row_summaries(tmp_path):
 
     assert payload["kind"] == "matrix"
     rows = {row["row"]: row for row in payload["rows"]}
-    assert set(rows) == {"full_coevolution", "no_feedback"}
-    assert rows["full_coevolution"]["summary"]["mean_reward"] == pytest.approx(1.0)
-    assert rows["no_feedback"]["summary"]["mean_reward"] == pytest.approx(0.0)
+    assert set(rows) == {
+        "skill_all_top_k_similarity",
+        "skill_none_diffusion_none",
+    }
+    assert rows["skill_all_top_k_similarity"]["summary"]["mean_reward"] == (
+        pytest.approx(1.0)
+    )
+    assert rows["skill_none_diffusion_none"]["summary"]["mean_reward"] == pytest.approx(
+        0.0
+    )
 
 
 def test_inspect_command_emits_json_for_single_run(tmp_path):

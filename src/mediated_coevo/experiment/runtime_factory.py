@@ -44,7 +44,7 @@ class ExperimentRuntime:
 
 @dataclass(frozen=True)
 class MatrixRuntime:
-    """Runtime plus preset metadata for one baseline-matrix row."""
+    """Runtime plus preset metadata for one matrix row."""
 
     preset_name: str
     runtime: ExperimentRuntime
@@ -229,7 +229,7 @@ def build_matrix_runtimes(
     benchmark_repo: SkillFlowRepository,
     harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
 ) -> list[MatrixRuntime]:
-    """Build all baseline-matrix rows with isolated skill stores."""
+    """Build all matrix rows with isolated skill stores."""
     rows: list[MatrixRuntime] = []
     for preset_name in BASELINE_PRESET_NAMES:
         preset = get_baseline_preset(preset_name)

@@ -6,6 +6,7 @@ import tomllib
 import pytest
 import typer
 
+import mediated_coevo.cli.matrix as matrix_module
 import mediated_coevo.cli.run as run_module
 from mediated_coevo.core.config import (
     Config,
@@ -167,42 +168,83 @@ def test_materialize_task_graph_for_similarity_diffusion(tmp_path):
 
 def test_baseline_preset_mapping_matches_matrix_plan():
     expected = {
-        "no_feedback": (
-            "no_feedback",
-            {"executor": False, "planner": False, "mediator": False},
-        ),
-        "full_trace_same_task": (
-            "full_traces",
-            {"executor": False, "planner": False, "mediator": False},
-        ),
-        "static_mediator_same_task": (
-            "static_mediator",
-            {"executor": False, "planner": False, "mediator": False},
-        ),
-        "planner_only_skill_evolution": (
+        "skill_none_diffusion_none": (
             "learned_mediator",
-            {"executor": False, "planner": True, "mediator": False},
+            {"executor": False, "planner": False, "mediator": False},
+            False,
+            "none",
+            "none",
         ),
-        "mediator_only_protocol_evolution": (
+        "skill_none_capped_broadcast": (
             "learned_mediator",
-            {"executor": False, "planner": False, "mediator": True},
+            {"executor": False, "planner": False, "mediator": False},
+            True,
+            "capped_broadcast",
+            "none",
         ),
-        "full_coevolution": (
+        "skill_none_random_k": (
+            "learned_mediator",
+            {"executor": False, "planner": False, "mediator": False},
+            True,
+            "random_k",
+            "none",
+        ),
+        "skill_none_top_k_similarity": (
+            "learned_mediator",
+            {"executor": False, "planner": False, "mediator": False},
+            True,
+            "top_k_similarity",
+            "task_similarity",
+        ),
+        "skill_all_diffusion_none": (
             "learned_mediator",
             {"executor": True, "planner": True, "mediator": True},
+            False,
+            "none",
+            "none",
+        ),
+        "skill_all_capped_broadcast": (
+            "learned_mediator",
+            {"executor": True, "planner": True, "mediator": True},
+            True,
+            "capped_broadcast",
+            "none",
+        ),
+        "skill_all_random_k": (
+            "learned_mediator",
+            {"executor": True, "planner": True, "mediator": True},
+            True,
+            "random_k",
+            "none",
+        ),
+        "skill_all_top_k_similarity": (
+            "learned_mediator",
+            {"executor": True, "planner": True, "mediator": True},
+            True,
+            "top_k_similarity",
+            "task_similarity",
         ),
     }
 
     assert list(BASELINE_PRESETS_BY_NAME) == BASELINE_PRESET_NAMES
-    assert len(BASELINE_PRESET_NAMES) == 6
-    assert "learned_mediator_same_task" not in BASELINE_PRESETS_BY_NAME
-    for preset_name, (condition, skill_updates) in expected.items():
+    assert len(BASELINE_PRESET_NAMES) == 8
+    assert "full_coevolution" not in BASELINE_PRESETS_BY_NAME
+    for preset_name, (
+        condition,
+        skill_updates,
+        diffusion_enabled,
+        diffusion_policy,
+        diffusion_graph,
+    ) in expected.items():
         preset = BASELINE_PRESETS_BY_NAME[preset_name]
         assert preset.condition_name == condition
         assert preset.skill_updates.model_dump() == skill_updates
+        assert preset.diffusion_enabled is diffusion_enabled
+        assert preset.diffusion_policy == diffusion_policy
+        assert preset.diffusion_graph == diffusion_graph
 
 
-def test_baseline_presets_have_unique_condition_and_update_semantics():
+def test_baseline_presets_have_unique_row_semantics():
     semantics = [
         (
             preset.condition_name,
@@ -211,6 +253,9 @@ def test_baseline_presets_have_unique_condition_and_update_semantics():
                 for role, enabled in preset.skill_updates.model_dump().items()
                 if enabled
             ),
+            preset.diffusion_enabled,
+            preset.diffusion_policy,
+            preset.diffusion_graph,
         )
         for preset in BASELINE_PRESETS_BY_NAME.values()
     ]
@@ -224,6 +269,14 @@ def test_all_baseline_presets_validate():
             condition=preset.condition_name,
             skill_updates=preset.skill_updates,
             baseline_preset=preset.name,
+        )
+
+
+def test_matrix_command_rejects_row_local_diffusion_overrides(tmp_path):
+    with pytest.raises(typer.BadParameter, match="matrix rows set diffusion"):
+        matrix_module.matrix(
+            diffusion_policy="random_k",
+            config_dir=tmp_path / "config",
         )
 
 
@@ -741,6 +794,7 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
     assert [row.preset_name for row in rows] == BASELINE_PRESET_NAMES
     row_skill_dirs = []
     for row in rows:
+        preset = BASELINE_PRESETS_BY_NAME[row.preset_name]
         row_config = row.runtime.orchestrator.config
         skill_dir = row.runtime.orchestrator.skill_store._skills_dir
         benchmark_repo = row.runtime.orchestrator.benchmark_repo
@@ -757,14 +811,19 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
         assert row_config.experiment.baseline_preset == row.preset_name
         assert row_config.models.model_dump() == config.models.model_dump()
         assert row_config.budgets.model_dump() == config.budgets.model_dump()
+        assert row_config.diffusion.enabled == preset.diffusion_enabled
+        assert row_config.diffusion.policy == preset.diffusion_policy
+        assert row_config.diffusion.graph == preset.diffusion_graph
 
         saved = tomllib.loads((row.runtime.experiment_dir / "config.toml").read_text())
-        preset = BASELINE_PRESETS_BY_NAME[row.preset_name]
         assert saved["experiment"]["baseline_preset"] == row.preset_name
         assert saved["experiment"]["condition_name"] == preset.condition_name
         assert saved["experiment"]["seed"] == 123
         assert saved["experiment"]["num_iterations"] == 8
         assert saved["experiment"]["skill_updates"] == preset.skill_updates.model_dump()
+        assert saved["diffusion"]["enabled"] == preset.diffusion_enabled
+        assert saved["diffusion"]["policy"] == preset.diffusion_policy
+        assert saved["diffusion"]["graph"] == preset.diffusion_graph
 
     assert len(set(row_skill_dirs)) == len(row_skill_dirs)
     (row_skill_dirs[0] / "executor" / "SKILL.md").write_text("# Changed\n")
@@ -930,7 +989,7 @@ def test_reflection_defers_until_same_task_history_is_pairable(caplog):
 def test_metrics_rows_include_baseline_and_skill_update_policy():
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = _config()
-    orch.config.experiment.baseline_preset = "full_coevolution"
+    orch.config.experiment.baseline_preset = "skill_all_diffusion_none"
     orch.config.experiment.skill_updates = SkillUpdateConfig(
         executor=False,
         planner=True,
@@ -949,7 +1008,7 @@ def test_metrics_rows_include_baseline_and_skill_update_policy():
     )
     dumped = json.loads(record.model_dump_json())
 
-    assert dumped["baseline_preset"] == "full_coevolution"
+    assert dumped["baseline_preset"] == "skill_all_diffusion_none"
     assert dumped["skill_update_policy"] == {
         "executor": False,
         "planner": True,

@@ -366,8 +366,21 @@ uv run medcoevo run \
 
 ## `matrix`
 
-`matrix` runs the six baseline rows against the same SkillFlow task selection,
-seed, model config, and budget config.
+`matrix` runs the eight-row learned-mediator diffusion matrix against the same
+SkillFlow task selection, seed, model config, and budget config. Use it when you
+want the fixed `skill_updates x diffusion_policy` design rather than one manual
+`run` condition.
+
+```bash
+uv run medcoevo matrix \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --seed 42 \
+  --diffusion-max-artifacts 3 \
+  --diffusion-top-k-neighbors 3
+```
+
+For a cheap smoke check, use a single local task and one iteration:
 
 ```bash
 uv run medcoevo matrix \
@@ -376,24 +389,31 @@ uv run medcoevo matrix \
   --seed 42
 ```
 
-Baseline rows:
+Matrix rows:
 
-| Preset                             | Condition          | Skill updates               |
-| ---------------------------------- | ------------------ | --------------------------- |
-| `no_feedback`                      | `no_feedback`      | `none`                      |
-| `full_trace_same_task`             | `full_traces`      | `none`                      |
-| `static_mediator_same_task`        | `static_mediator`  | `none`                      |
-| `planner_only_skill_evolution`     | `learned_mediator` | `planner`                   |
-| `mediator_only_protocol_evolution` | `learned_mediator` | `mediator`                  |
-| `full_coevolution`                 | `learned_mediator` | `executor,planner,mediator` |
+| Preset                         | Condition          | Skill updates               | Diffusion policy    | Diffusion graph    |
+| ------------------------------ | ------------------ | --------------------------- | ------------------- | ------------------ |
+| `skill_none_diffusion_none`    | `learned_mediator` | `none`                      | `none`              | `none`             |
+| `skill_none_capped_broadcast`  | `learned_mediator` | `none`                      | `capped_broadcast`  | `none`             |
+| `skill_none_random_k`          | `learned_mediator` | `none`                      | `random_k`          | `none`             |
+| `skill_none_top_k_similarity`  | `learned_mediator` | `none`                      | `top_k_similarity`  | `task_similarity`  |
+| `skill_all_diffusion_none`     | `learned_mediator` | `executor,planner,mediator` | `none`              | `none`             |
+| `skill_all_capped_broadcast`   | `learned_mediator` | `executor,planner,mediator` | `capped_broadcast`  | `none`             |
+| `skill_all_random_k`           | `learned_mediator` | `executor,planner,mediator` | `random_k`          | `none`             |
+| `skill_all_top_k_similarity`   | `learned_mediator` | `executor,planner,mediator` | `top_k_similarity`  | `task_similarity`  |
 
 Each row gets an isolated copy of the skill tree under its experiment
-directory.
+directory and writes its own `config.toml`, metrics, summaries, diffusion
+artifacts, and graph snapshots.
 
-`matrix` accepts the same task selectors as `run`, plus `--iterations`,
-`--seed`, `--coevo-interval`, `--advisor-buffer-max`, the diffusion override
-options, `--config-dir`, and `--verbose`. Condition and skill-update settings
-come from the fixed baseline presets and are not CLI options on `matrix`.
+`matrix` accepts the same task selectors as `run`, plus shared controls:
+`--iterations`, `--seed`, `--coevo-interval`, `--advisor-buffer-max`,
+`--diffusion-max-artifacts`, `--diffusion-top-k-neighbors`, `--config-dir`, and
+`--verbose`.
+
+Do not pass `--condition`, `--skill-updates`, `--diffusion-enabled`,
+`--diffusion-policy`, or `--diffusion-graph` to `matrix`. Those settings are
+owned by the fixed row presets.
 
 ## `inspect`
 

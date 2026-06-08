@@ -1,4 +1,4 @@
-"""Baseline matrix command registration."""
+"""Matrix command registration."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from mediated_coevo.cli.output import (
     print_experiment_controls,
     print_task_selection,
 )
+from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     get_baseline_preset,
@@ -84,7 +85,7 @@ def matrix(
         bool | None,
         typer.Option(
             "--diffusion-enabled/--no-diffusion-enabled",
-            help="Override diffusion.enabled for every matrix row.",
+            help="Rejected for matrix runs; diffusion.enabled is row-local.",
         ),
     ] = None,
     diffusion_policy: Annotated[
@@ -92,14 +93,16 @@ def matrix(
         typer.Option(
             "--diffusion-policy",
             help=(
-                "Override diffusion.policy for every matrix row. Allowed: none | "
-                "capped_broadcast | random_k | top_k_similarity."
+                "Rejected for matrix runs; diffusion.policy is row-local."
             ),
         ),
     ] = None,
     diffusion_graph: Annotated[
         str | None,
-        typer.Option("--diffusion-graph", help="Override diffusion.graph."),
+        typer.Option(
+            "--diffusion-graph",
+            help="Rejected for matrix runs; diffusion.graph is row-local.",
+        ),
     ] = None,
     diffusion_max_artifacts: Annotated[
         int | None,
@@ -120,8 +123,18 @@ def matrix(
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run the six-row baseline matrix with isolated per-row skills."""
+    """Run the eight-row learned-mediator diffusion matrix."""
     setup_logging(verbose)
+    if (
+        diffusion_enabled is not None
+        or diffusion_policy is not None
+        or diffusion_graph is not None
+    ):
+        raise typer.BadParameter(
+            "matrix rows set diffusion.enabled, diffusion.policy, and "
+            "diffusion.graph; use --diffusion-max-artifacts or "
+            "--diffusion-top-k-neighbors for shared matrix knobs"
+        )
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides=_run_config_overrides(
@@ -131,9 +144,9 @@ def matrix(
             skill_updates=None,
             coevo_interval=coevo_interval,
             advisor_buffer_max=advisor_buffer_max,
-            diffusion_enabled=diffusion_enabled,
-            diffusion_policy=diffusion_policy,
-            diffusion_graph=diffusion_graph,
+            diffusion_enabled=None,
+            diffusion_policy=None,
+            diffusion_graph=None,
             diffusion_max_artifacts=diffusion_max_artifacts,
             diffusion_top_k_neighbors=diffusion_top_k_neighbors,
             harbor_agent_setup_timeout_multiplier=None,
@@ -173,15 +186,31 @@ def matrix(
     print_experiment_controls(config)
     console.print(f"[bold]Matrix:[/] {matrix_dir}")
     console.print(f"[bold]Rows:[/] {', '.join(BASELINE_PRESET_NAMES)}")
+    console.print("[bold]Row-local diffusion:[/] enabled, policy, graph")
 
     for row in rows:
         row_config = row.runtime.orchestrator.config
         random.seed(seed)
+        try:
+            materialize_task_graph_for_diffusion(
+                config=row_config,
+                experiment_dir=row.runtime.experiment_dir,
+                benchmark_repo=repository,
+            )
+        except (OSError, ValueError) as exc:
+            console.print(
+                "[bold red]ERROR:[/] failed to create diffusion task graph: "
+                f"{exc}"
+            )
+            raise typer.Exit(code=1) from exc
         console.print(
             "\n[bold green]Starting matrix row:[/] "
             f"{row.preset_name} "
             f"(condition={row_config.experiment.condition_name}, "
-            f"skill_updates={row_config.experiment.skill_updates.model_dump()})"
+            f"skill_updates={row_config.experiment.skill_updates.model_dump()}, "
+            f"diffusion_enabled={row_config.diffusion.enabled}, "
+            f"diffusion_policy={row_config.diffusion.policy}, "
+            f"diffusion_graph={row_config.diffusion.graph})"
         )
         records = run_experiment_or_exit(
             row.runtime,

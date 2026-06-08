@@ -1,10 +1,10 @@
-"""Baseline matrix presets and skill-update policy parsing."""
+"""Matrix presets and skill-update policy parsing."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mediated_coevo.core.config import Config, SkillUpdateConfig
+from mediated_coevo.core.config import Config, DiffusionPolicyName, SkillUpdateConfig
 from mediated_coevo.experiment.conditions import ConditionName
 
 SKILL_UPDATE_TOKENS = frozenset({"none", "executor", "planner", "mediator", "all"})
@@ -16,11 +16,14 @@ class SkillUpdateParseError(ValueError):
 
 @dataclass(frozen=True)
 class BaselinePreset:
-    """One row in the baseline matrix."""
+    """One row in the learned-mediator diffusion matrix."""
 
     name: str
     condition_name: ConditionName
     skill_updates: SkillUpdateConfig
+    diffusion_enabled: bool
+    diffusion_policy: DiffusionPolicyName
+    diffusion_graph: str = "none"
 
     def build_config(self, base_config: Config, *, seed: int) -> Config:
         """Return a row-local config copy with this preset applied."""
@@ -29,6 +32,9 @@ class BaselinePreset:
         row_config.experiment.condition_name = self.condition_name
         row_config.experiment.skill_updates = self.skill_updates.model_copy(deep=True)
         row_config.experiment.baseline_preset = self.name
+        row_config.diffusion.enabled = self.diffusion_enabled
+        row_config.diffusion.policy = self.diffusion_policy
+        row_config.diffusion.graph = self.diffusion_graph
         return row_config
 
 
@@ -42,28 +48,64 @@ def skill_updates_config(*enabled: str) -> SkillUpdateConfig:
     )
 
 
+def _learned_mediator_diffusion_preset(
+    name: str,
+    *,
+    skill_updates: SkillUpdateConfig,
+    diffusion_policy: DiffusionPolicyName,
+) -> BaselinePreset:
+    return BaselinePreset(
+        name=name,
+        condition_name="learned_mediator",
+        skill_updates=skill_updates,
+        diffusion_enabled=diffusion_policy != "none",
+        diffusion_policy=diffusion_policy,
+        diffusion_graph=(
+            "task_similarity" if diffusion_policy == "top_k_similarity" else "none"
+        ),
+    )
+
+
 BASELINE_PRESETS: tuple[BaselinePreset, ...] = (
-    BaselinePreset("no_feedback", "no_feedback", skill_updates_config()),
-    BaselinePreset("full_trace_same_task", "full_traces", skill_updates_config()),
-    BaselinePreset(
-        "static_mediator_same_task",
-        "static_mediator",
-        skill_updates_config(),
+    _learned_mediator_diffusion_preset(
+        "skill_none_diffusion_none",
+        skill_updates=skill_updates_config(),
+        diffusion_policy="none",
     ),
-    BaselinePreset(
-        "planner_only_skill_evolution",
-        "learned_mediator",
-        skill_updates_config("planner"),
+    _learned_mediator_diffusion_preset(
+        "skill_none_capped_broadcast",
+        skill_updates=skill_updates_config(),
+        diffusion_policy="capped_broadcast",
     ),
-    BaselinePreset(
-        "mediator_only_protocol_evolution",
-        "learned_mediator",
-        skill_updates_config("mediator"),
+    _learned_mediator_diffusion_preset(
+        "skill_none_random_k",
+        skill_updates=skill_updates_config(),
+        diffusion_policy="random_k",
     ),
-    BaselinePreset(
-        "full_coevolution",
-        "learned_mediator",
-        skill_updates_config("executor", "planner", "mediator"),
+    _learned_mediator_diffusion_preset(
+        "skill_none_top_k_similarity",
+        skill_updates=skill_updates_config(),
+        diffusion_policy="top_k_similarity",
+    ),
+    _learned_mediator_diffusion_preset(
+        "skill_all_diffusion_none",
+        skill_updates=skill_updates_config("executor", "planner", "mediator"),
+        diffusion_policy="none",
+    ),
+    _learned_mediator_diffusion_preset(
+        "skill_all_capped_broadcast",
+        skill_updates=skill_updates_config("executor", "planner", "mediator"),
+        diffusion_policy="capped_broadcast",
+    ),
+    _learned_mediator_diffusion_preset(
+        "skill_all_random_k",
+        skill_updates=skill_updates_config("executor", "planner", "mediator"),
+        diffusion_policy="random_k",
+    ),
+    _learned_mediator_diffusion_preset(
+        "skill_all_top_k_similarity",
+        skill_updates=skill_updates_config("executor", "planner", "mediator"),
+        diffusion_policy="top_k_similarity",
     ),
 )
 
