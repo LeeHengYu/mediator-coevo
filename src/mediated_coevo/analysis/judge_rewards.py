@@ -26,6 +26,7 @@ from mediated_coevo.models.judge import (
     JudgeRewardRecord,
 )
 from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.prompt_text import PromptText
 from mediated_coevo.stores.history_store import HistoryStore
 
 logger = logging.getLogger(__name__)
@@ -40,41 +41,7 @@ JUDGE_AXIS_SCORE_KEYS = frozenset(
         "reflection_depth",
     }
 )
-JUDGE_SYSTEM_PROMPT = """\
-You are an LLM-as-judge reward annotator.
-
-Return ONLY a JSON object matching this exact schema shape:
-{
-  "axis_scores": {
-    "task_outcome": 0.0,
-    "evidence_quality": 0.0,
-    "skill_update_usefulness": 0.0,
-    "token_efficiency": 0.0,
-    "reflection_depth": 0.0
-  },
-  "flags": {
-    "benchmark_gaming_or_obscured_failure": false,
-    "no_meaningful_progress": false,
-    "brittle_or_one_off_patch": false,
-    "unverifiable_outcome": false
-  },
-  "confidence": 0.0,
-  "rationale": "concise evidence-grounded explanation",
-  "flag_evidence": {}
-}
-
-Allowed top-level keys are exactly: axis_scores, flags, confidence, rationale,
-flag_evidence. Do not add any other top-level keys.
-
-Rubric axis names must appear only inside axis_scores and must not appear at
-top level. A response with top-level task_outcome, evidence_quality,
-skill_update_usefulness, token_efficiency, or reflection_depth is invalid.
-
-Each axis score and confidence must be a number in [0, 1]. Each flag must be a
-boolean. flag_evidence must map every true flag name to concrete evidence text.
-
-Do not compute the final scalar reward. Code will apply weights and caps.
-"""
+JUDGE_SYSTEM_PROMPT = PromptText.JUDGE_SYSTEM
 
 JUDGE_WEIGHTS = {
     "task_outcome": 0.50,
@@ -447,7 +414,7 @@ async def _judge_candidate(
     try:
         result = await llm_client.complete(
             [
-                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                {"role": "system", "content": PromptText.JUDGE_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=config.budgets.judge_completion_tokens,

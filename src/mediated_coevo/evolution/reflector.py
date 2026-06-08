@@ -35,6 +35,7 @@ from mediated_coevo.models.skill import (
     SkillUpdateCandidateBatch,
     SkillValidationResult,
 )
+from mediated_coevo.prompt_text import PromptText
 from mediated_coevo.stores.skill_store import SkillStore
 
 if TYPE_CHECKING:
@@ -486,22 +487,24 @@ class Reflector:
                 pair.better_relative_reward,
             )
             contrastive_parts.append(
-                f"### Pair {i} — task `{task_id}`\n"
-                f"**Worse outcome** ({worse_context}):\n"
-                f"{formatter(pair.worse)}\n\n"
-                f"**Better outcome** ({better_context}):\n"
-                f"{formatter(pair.better)}"
+                PromptText.reflection_pair(
+                    index=i,
+                    task_id=task_id,
+                    worse_context=worse_context,
+                    worse_entry=formatter(pair.worse),
+                    better_context=better_context,
+                    better_entry=formatter(pair.better),
+                )
             )
         rejected_section = _format_rejected_reflection_history(rejected_history or [])
 
-        user_content = (
-            f"## {current_skill_heading}\n\n"
-            f"{current_skill}\n\n"
-            "## Contrastive Evidence\n\n"
-            f"{evidence_intro}\n\n"
-            + "\n\n".join(contrastive_parts)
-            + rejected_section
-            + f"\n\n## Instructions\n\n{instructions}"
+        user_content = PromptText.reflection_user_content(
+            current_skill_heading=current_skill_heading,
+            current_skill=current_skill,
+            evidence_intro=evidence_intro,
+            contrastive_parts=contrastive_parts,
+            rejected_section=rejected_section,
+            instructions=instructions,
         )
         if budgets:
             from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
@@ -509,14 +512,19 @@ class Reflector:
             sections = [
                 BudgetSection(
                     current_skill_heading,
-                    f"## {current_skill_heading}\n\n{current_skill}",
+                    PromptText.reflection_current_skill_section(
+                        current_skill_heading=current_skill_heading,
+                        current_skill=current_skill,
+                    ),
                     required=True,
                     max_tokens=budgets.max_skill_tokens,
                 ),
                 BudgetSection(
                     "contrastive_evidence",
-                    "## Contrastive Evidence\n\n"
-                    f"{evidence_intro}\n\n" + "\n\n".join(contrastive_parts),
+                    PromptText.reflection_evidence_section(
+                        evidence_intro=evidence_intro,
+                        contrastive_parts=contrastive_parts,
+                    ),
                     required=True,
                     max_tokens=budgets.historical_summary_tokens,
                 ),
@@ -533,7 +541,7 @@ class Reflector:
             sections.append(
                 BudgetSection(
                     "instructions",
-                    f"## Instructions\n\n{instructions}",
+                    PromptText.reflection_instructions_section(instructions),
                     required=True,
                 )
             )
@@ -558,41 +566,11 @@ class Reflector:
         budgets: BudgetsConfig | None = None,
     ) -> list[dict[str, str]]:
         return Reflector._build_contrastive_prompt(
-            system_text=(
-                "You are reflecting on your performance as a Mediator agent. "
-                "Your coordination-protocol skill defines HOW you curate "
-                "execution feedback for the Planner. You will see contrastive "
-                "pairs: reports associated with better vs. worse same-iteration "
-                "same-task outcome rewards. Use these to revise your protocol.\n\n"
-                "If you believe the current protocol already captures the "
-                "lessons from the evidence, include a no_update candidate. "
-                "Otherwise, return JSON with 2-3 candidate protocol updates. "
-                "Each candidate must include candidate_id, update_kind, "
-                "hypothesis, risk, audit_score, new_content, and reasoning. "
-                "new_content must be the complete updated Markdown protocol: "
-                "integrate changes into existing sections, resolve duplicate "
-                "or conflicting rules, and avoid appended addenda unless a new "
-                "section is clearly needed."
-            ),
-            current_skill_heading="Current Coordination Protocol",
+            system_text=PromptText.MEDIATOR_REFLECTION_SYSTEM,
+            current_skill_heading=PromptText.CURRENT_COORDINATION_PROTOCOL_HEADING,
             current_skill=current_skill,
-            evidence_intro=(
-                "Below are pairs of your past reports. In each pair, one report "
-                "is associated with a WORSE same-iteration same-task outcome "
-                "reward and the other with a BETTER one relative to the same "
-                "task's average outcome. "
-                "Each entry shows the mediator's headline, decision, abstraction "
-                "level, evolution reward, task-relative delta, and a diagnostic excerpt "
-                "of the report."
-            ),
-            instructions=(
-                "Revise your coordination protocol based on the patterns above. "
-                "Keep the same JSON output format. Focus on:\n"
-                "1. What reporting patterns appear in better-outcome entries?\n"
-                "2. When should you withhold vs. expose?\n"
-                "3. What abstraction level works best?\n"
-                "Make minimal, targeted changes. Do not rewrite from scratch."
-            ),
+            evidence_intro=PromptText.MEDIATOR_REFLECTION_EVIDENCE_INTRO,
+            instructions=PromptText.MEDIATOR_REFLECTION_INSTRUCTIONS,
             pairs=pairs,
             formatter=_format_mediator_entry,
             rejected_history=rejected_history,
@@ -610,47 +588,14 @@ class Reflector:
         budgets: BudgetsConfig | None = None,
         candidate_count: int | None = None,
     ) -> list[dict[str, str]]:
-        candidate_instruction = (
-            f"return JSON with exactly {candidate_count} candidate "
-            "skill-refiner updates"
-            if candidate_count is not None
-            else "return JSON with 2-3 candidate skill-refiner updates"
-        )
         return Reflector._build_contrastive_prompt(
-            system_text=(
-                "You are reflecting on your performance as a Planner agent. "
-                "Your skill-refiner skill defines HOW you decide to edit the "
-                "Executor's skills. You will see contrastive pairs: skill-edit "
-                "records associated with better vs. worse same-iteration same-task "
-                "outcome rewards. Use these to revise your editing strategy.\n\n"
-                "If you believe the current guidelines already capture the "
-                "lessons from the evidence, include a no_update candidate. "
-                f"Otherwise, {candidate_instruction}. Each candidate must include "
-                "candidate_id, update_kind, "
-                "hypothesis, risk, audit_score, new_content, and reasoning. "
-                "new_content must be the complete updated Markdown skill: "
-                "integrate changes into existing sections, resolve duplicate "
-                "or conflicting rules, and avoid appended addenda unless a new "
-                "section is clearly needed."
+            system_text=PromptText.reflection_planner_system(
+                PromptText.reflection_candidate_instruction(candidate_count)
             ),
-            current_skill_heading="Current Skill-Refiner Guidelines",
+            current_skill_heading=PromptText.CURRENT_SKILL_REFINER_GUIDELINES_HEADING,
             current_skill=current_skill,
-            evidence_intro=(
-                "Below are pairs of your past skill edits. In each pair, one "
-                "edit record is associated with a WORSE same-iteration same-task "
-                "outcome reward and the other with a BETTER one relative to the "
-                "same task's average outcome. Each "
-                "entry shows your full reasoning, evolution reward, task-relative "
-                "delta, the diff size, and a head+tail excerpt of the diff itself."
-            ),
-            instructions=(
-                "Revise your skill-refiner guidelines based on the patterns "
-                "above. Focus on:\n"
-                "1. What edit patterns appear in better-outcome entries?\n"
-                "2. What edit patterns should you avoid?\n"
-                "3. How should you interpret the Mediator's feedback?\n"
-                "Make minimal, targeted changes. Do not rewrite from scratch."
-            ),
+            evidence_intro=PromptText.PLANNER_REFLECTION_EVIDENCE_INTRO,
+            instructions=PromptText.PLANNER_REFLECTION_INSTRUCTIONS,
             pairs=pairs,
             formatter=_format_planner_entry,
             rejected_history=rejected_history,
@@ -766,21 +711,22 @@ def _format_rejected_reflection_history(
     if not rejected_history:
         return ""
 
-    lines = [
-        "\n\n## Recently Rejected Reflection Updates",
-        "Treat these as negative evidence. Do not repeat the same update "
-        "direction unless the new contrastive evidence directly resolves the "
-        "recorded failure.",
-    ]
+    lines = PromptText.rejected_reflection_intro()
     for item in rejected_history:
         task_ids = ",".join(item.task_ids) if item.task_ids else "n/a"
         lines.append(
-            f"- iteration={item.iteration} skill={item.skill_id} "
-            f"candidate={item.selected_candidate_id or 'n/a'} "
-            f"kind={item.selected_update_kind or 'n/a'} tasks={task_ids} "
-            f"reason={item.reason or 'n/a'} "
-            f"validation_reason={item.validation_reason or 'n/a'} "
-            f"mean_delta={_format_optional_delta(item.validation_mean_delta)}"
+            PromptText.rejected_reflection_item(
+                iteration=item.iteration,
+                skill_id=item.skill_id,
+                selected_candidate_id=item.selected_candidate_id,
+                selected_update_kind=item.selected_update_kind,
+                task_ids=task_ids,
+                reason=item.reason,
+                validation_reason=item.validation_reason,
+                validation_mean_delta=_format_optional_delta(
+                    item.validation_mean_delta
+                ),
+            )
         )
     return "\n".join(lines)
 

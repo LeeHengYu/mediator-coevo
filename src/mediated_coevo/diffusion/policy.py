@@ -12,11 +12,6 @@ from mediated_coevo.diffusion.models import (
     TaskGraphEdgeRecord,
     TaskGraphSnapshot,
 )
-from mediated_coevo.diffusion.renderer import (
-    DiffusionContextBundle,
-    render_diffusion_subscriptions,
-)
-from mediated_coevo.diffusion.store import DiffusionStore
 
 
 @dataclass(frozen=True)
@@ -28,76 +23,6 @@ class DiffusionSubscription:
     relation: str
     reason: str
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-async def build_capped_broadcast_context(
-    *,
-    store: DiffusionStore,
-    snapshot: TaskGraphSnapshot,
-    model: str,
-    target_task_id: str,
-    target_iteration: int,
-    target_run_id: str | None,
-    max_artifacts: int,
-) -> DiffusionContextBundle:
-    """Select a flat capped set of prior cross-task artifacts and render them."""
-    eligible_artifacts = _eligible_artifacts(
-        store=store,
-        target_task_id=target_task_id,
-        target_iteration=target_iteration,
-    )
-    subscriptions = select_capped_broadcast_subscriptions(
-        eligible_artifacts=eligible_artifacts,
-        max_artifacts=max_artifacts,
-    )
-    store.store_graph_snapshot(snapshot, overwrite=True)
-    return await render_diffusion_subscriptions(
-        store=store,
-        snapshot=snapshot,
-        model=model,
-        target_task_id=target_task_id,
-        target_iteration=target_iteration,
-        target_run_id=target_run_id,
-        subscriptions=subscriptions,
-        eligible_count=len(eligible_artifacts),
-    )
-
-
-async def build_random_k_context(
-    *,
-    store: DiffusionStore,
-    snapshot: TaskGraphSnapshot,
-    model: str,
-    target_task_id: str,
-    target_iteration: int,
-    target_run_id: str | None,
-    max_artifacts: int,
-    seed: int | None,
-) -> DiffusionContextBundle:
-    """Select up to k prior cross-task artifacts with a reproducible RNG."""
-    eligible_artifacts = _eligible_artifacts(
-        store=store,
-        target_task_id=target_task_id,
-        target_iteration=target_iteration,
-    )
-    subscriptions = select_random_k_subscriptions(
-        eligible_artifacts=eligible_artifacts,
-        target_task_id=target_task_id,
-        target_iteration=target_iteration,
-        max_artifacts=max_artifacts,
-        seed=seed,
-    )
-    store.store_graph_snapshot(snapshot, overwrite=True)
-    return await render_diffusion_subscriptions(
-        store=store,
-        snapshot=snapshot,
-        model=model,
-        target_task_id=target_task_id,
-        target_iteration=target_iteration,
-        target_run_id=target_run_id,
-        subscriptions=subscriptions,
-        eligible_count=len(eligible_artifacts),
-    )
 
 
 def select_capped_broadcast_subscriptions(
@@ -230,19 +155,3 @@ def _top_similarity_edges_by_source_task(
             break
     return selected_edges
 
-
-def _eligible_artifacts(
-    *,
-    store: DiffusionStore,
-    target_task_id: str,
-    target_iteration: int,
-) -> list[DiffusionArtifact]:
-    visible_artifacts = store.query_artifacts(
-        recent=None,
-        before_source_iteration=target_iteration,
-    )
-    return [
-        artifact
-        for artifact in visible_artifacts
-        if artifact.source_task_id != target_task_id
-    ]

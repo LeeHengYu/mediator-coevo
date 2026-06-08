@@ -17,6 +17,7 @@ from typing import Any
 from mediated_coevo.agents.executor import ExecutorAgent
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.agents.prompt_context import PlannerPriorContextBundle
 from mediated_coevo.analysis.judge_rewards import (
     append_judge_reward_record,
     judge_reward_for_trace,
@@ -106,14 +107,6 @@ class _MediatorValidationContext:
     trace: ExecutionTrace
     trace_path: str
     task_metadata: TaskMetadataFields
-
-
-@dataclass(frozen=True)
-class _PlannerPriorContextBundle:
-    same_task_prior: str | None = None
-    cross_task_prior: str | None = None
-    diffusion_context: str | None = None
-    context_budget_violation: bool = False
 
 
 class Orchestrator:
@@ -554,7 +547,7 @@ class Orchestrator:
             current_iteration=current_iteration,
         )
         fitted_bundle = self._fit_prior_context_bundle(condition, bundle)
-        flattened = self._flatten_prior_context_bundle(fitted_bundle)
+        flattened = fitted_bundle.flatten()
         if current_iteration is not None:
             self._record_prior_context_metrics(
                 condition=condition,
@@ -571,7 +564,7 @@ class Orchestrator:
         task_id: str,
         *,
         current_iteration: int | None = None,
-    ) -> _PlannerPriorContextBundle:
+    ) -> PlannerPriorContextBundle:
         """Build structured prior-context sections before planner flattening."""
         self._ensure_diffusion_runtime_state()
         llm_client = self.mediator.llm_client if condition == "full_traces" else None
@@ -598,7 +591,7 @@ class Orchestrator:
                 self.config.diffusion.policy,
                 task_id,
             )
-            return _PlannerPriorContextBundle(
+            return PlannerPriorContextBundle(
                 same_task_prior=same_task_prior,
                 diffusion_context=diffusion_context,
             )
@@ -615,7 +608,7 @@ class Orchestrator:
             current_iteration=current_iteration,
         )
         if not cross_context:
-            return _PlannerPriorContextBundle(same_task_prior=same_task_prior)
+            return PlannerPriorContextBundle(same_task_prior=same_task_prior)
 
         header = (
             "# Explicit Cross-Task Feedback\n\n"
@@ -628,7 +621,7 @@ class Orchestrator:
             condition,
             task_id,
         )
-        return _PlannerPriorContextBundle(
+        return PlannerPriorContextBundle(
             same_task_prior=same_task_prior,
             cross_task_prior=f"{header}\n\n{cross_context}",
         )
@@ -636,8 +629,8 @@ class Orchestrator:
     def _fit_prior_context_bundle(
         self,
         condition: ConditionName,
-        bundle: _PlannerPriorContextBundle,
-    ) -> _PlannerPriorContextBundle:
+        bundle: PlannerPriorContextBundle,
+    ) -> PlannerPriorContextBundle:
         """Fit structured prior-context sections before planner flattening."""
         from mediated_coevo.runtime.token_budget import count_text_tokens, fit_text_to_tokens
 
@@ -670,18 +663,16 @@ class Orchestrator:
             same_task_prior = None
             cross_task_prior = None
 
+        fitted_bundle = PlannerPriorContextBundle(
+            same_task_prior=same_task_prior,
+            cross_task_prior=cross_task_prior,
+            diffusion_context=diffusion_context,
+        )
         fitted_same_tokens = count_text_tokens(model, same_task_prior or "")
         fitted_cross_tokens = count_text_tokens(model, cross_task_prior or "")
         fitted_total_tokens = count_text_tokens(
             model,
-            self._flatten_prior_context_bundle(
-                _PlannerPriorContextBundle(
-                    same_task_prior=same_task_prior,
-                    cross_task_prior=cross_task_prior,
-                    diffusion_context=diffusion_context,
-                )
-            )
-            or "",
+            fitted_bundle.flatten() or "",
         )
         budget_violation = (
             bundle.context_budget_violation
@@ -689,30 +680,12 @@ class Orchestrator:
             or original_cross_tokens > fitted_cross_tokens
             or fitted_total_tokens > total_cap
         )
-        return _PlannerPriorContextBundle(
-            same_task_prior=same_task_prior,
-            cross_task_prior=cross_task_prior,
-            diffusion_context=diffusion_context,
+        return PlannerPriorContextBundle(
+            same_task_prior=fitted_bundle.same_task_prior,
+            cross_task_prior=fitted_bundle.cross_task_prior,
+            diffusion_context=fitted_bundle.diffusion_context,
             context_budget_violation=budget_violation,
         )
-
-    def _flatten_prior_context_bundle(
-        self,
-        bundle: _PlannerPriorContextBundle,
-    ) -> str | None:
-        """Flatten structured prior context while preserving the LiteLLM call path."""
-        sections = [
-            section
-            for section in (
-                bundle.same_task_prior,
-                bundle.diffusion_context,
-                bundle.cross_task_prior,
-            )
-            if section
-        ]
-        if not sections:
-            return None
-        return "\n\n".join(sections)
 
     def _record_prior_context_metrics(
         self,
@@ -720,7 +693,7 @@ class Orchestrator:
         condition: ConditionName,
         task_id: str,
         current_iteration: int,
-        bundle: _PlannerPriorContextBundle,
+        bundle: PlannerPriorContextBundle,
         flattened: str | None,
     ) -> None:
         from mediated_coevo.runtime.token_budget import count_text_tokens

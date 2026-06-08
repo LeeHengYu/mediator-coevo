@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
+from mediated_coevo.agents.prompt_context import PromptSection
 from mediated_coevo.core.config import SkillUpdateConfig
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.prompt_text import PromptText
+from tests.prompt_helpers import assert_contains_all, assert_omits_all, message_text
 
 
 PLANNER_SKILL = """\
@@ -63,69 +68,84 @@ Respond with JSON.
 """
 
 
-def _all_message_content(messages: list[dict]) -> str:
-    return "\n\n".join(str(message["content"]) for message in messages)
-
-
 def _skill_updates(
     *,
     executor: bool,
-    planner: bool = False,
-    mediator: bool = False,
 ) -> SkillUpdateConfig:
     return SkillUpdateConfig(
         executor=executor,
-        planner=planner,
-        mediator=mediator,
+        planner=False,
+        mediator=False,
     )
 
 
-def _plan_messages(planner: PlannerAgent) -> list[dict]:
-    return planner.construct_messages(
-        {
-            "action": "plan_task",
-            "task_id": "task-A",
-            "base_instruction": "Fix the build.",
-        }
-    )
-
-
-def test_planner_omits_executor_update_sections_when_updates_disabled():
+def _planner_content(*, executor_updates_enabled: bool) -> str:
     planner = PlannerAgent(LLMClient(model="test-model"))
-    planner.configure_skill_updates(_skill_updates(executor=False))
+    planner.configure_skill_updates(_skill_updates(executor=executor_updates_enabled))
     planner.set_skill_context(
         executor_skills="# Executor Skill",
         skill_refiner=PLANNER_SKILL,
     )
-
-    content = _all_message_content(_plan_messages(planner))
-
-    assert "Your Planning Guidelines" in content
-    assert "Task Planning Guidelines" in content
-    assert "Artifact-Contract Thinking" in content
-    assert "Your Skill-Refinement Guidelines" not in content
-    assert "Guidelines for Updating Executor Skills" not in content
-    assert "Executor Skill Update Criteria" not in content
-    assert "Planner Self-Evolution Guidelines" not in content
-    assert "Skill updates are disabled for this run" in content
-    assert "When updating skills, edit this content." not in content
+    return _plan_content(planner)
 
 
-def test_planner_includes_executor_update_sections_when_updates_enabled():
-    planner = PlannerAgent(LLMClient(model="test-model"))
-    planner.configure_skill_updates(_skill_updates(executor=True))
-    planner.set_skill_context(
-        executor_skills="# Executor Skill",
-        skill_refiner=PLANNER_SKILL,
+def _plan_content(planner: PlannerAgent) -> str:
+    return message_text(
+        planner.construct_messages(
+            {
+                "action": "plan_task",
+                "task_id": "task-A",
+                "base_instruction": "Fix the build.",
+            }
+        )
     )
 
-    content = _all_message_content(_plan_messages(planner))
 
-    assert "Your Planning Guidelines" in content
-    assert "Guidelines for Updating Executor Skills" in content
-    assert "Executor Skill Update Criteria" in content
-    assert "Planner Self-Evolution Guidelines" not in content
-    assert "When updating skills, edit this content." in content
+@pytest.mark.parametrize(
+    ("executor_updates_enabled", "expected", "unexpected"),
+    [
+        pytest.param(
+            False,
+            [
+                PromptText.SKILL_REFINER_PLANNING_HEADING,
+                "Task Planning Guidelines",
+                "Artifact-Contract Thinking",
+                "Skill updates are disabled for this run",
+            ],
+            [
+                PromptText.SKILL_REFINER_UPDATE_HEADING,
+                "Guidelines for Updating Executor Skills",
+                "Executor Skill Update Criteria",
+                "Planner Self-Evolution Guidelines",
+                "When updating skills, edit this content.",
+            ],
+            id="disabled",
+        ),
+        pytest.param(
+            True,
+            [
+                PromptText.SKILL_REFINER_PLANNING_HEADING,
+                "Guidelines for Updating Executor Skills",
+                "Executor Skill Update Criteria",
+                "When updating skills, edit this content.",
+            ],
+            [
+                PromptText.SKILL_REFINER_UPDATE_HEADING,
+                "Planner Self-Evolution Guidelines",
+            ],
+            id="enabled",
+        ),
+    ],
+)
+def test_planner_executor_update_sections_follow_runtime_gate(
+    executor_updates_enabled,
+    expected,
+    unexpected,
+):
+    content = _planner_content(executor_updates_enabled=executor_updates_enabled)
+
+    assert_contains_all(content, expected)
+    assert_omits_all(content, unexpected)
 
 
 def test_planner_set_skill_context_clears_stale_refiner():
@@ -135,13 +155,53 @@ def test_planner_set_skill_context_clears_stale_refiner():
         executor_skills="# Executor Skill",
         skill_refiner=PLANNER_SKILL,
     )
-    assert "Task Planning Guidelines" in _all_message_content(_plan_messages(planner))
+    assert_contains_all(_plan_content(planner), ["Task Planning Guidelines"])
 
     planner.set_skill_context(executor_skills="# Executor Skill", skill_refiner=None)
 
-    content = _all_message_content(_plan_messages(planner))
-    assert "Task Planning Guidelines" not in content
-    assert "Your Planning Guidelines" not in content
+    content = _plan_content(planner)
+    assert_omits_all(
+        content,
+        ["Task Planning Guidelines", PromptText.SKILL_REFINER_PLANNING_HEADING],
+    )
+
+
+def test_planner_plan_prompt_accepts_explicit_prior_context_sections():
+    planner = PlannerAgent(LLMClient(model="test-model"))
+
+    messages = planner.construct_messages(
+        {
+            "action": "plan_task",
+            "task_id": "task-A",
+            "base_instruction": "Fix the build.",
+            "prior_context_sections": [
+                PromptSection(
+                    "same_task_prior",
+                    "same_task_prior",
+                    "## Same-Task Prior\nsame task report",
+                ),
+                PromptSection(
+                    "diffusion_context",
+                    "diffusion_context",
+                    "## Diffused Cross-Task Context\ndiffusion hint",
+                ),
+            ],
+            "prior_context": "flat prior should not appear",
+        }
+    )
+
+    content = message_text(messages)
+
+    assert_contains_all(
+        content,
+        [
+            "## Same-Task Prior",
+            "same task report",
+            "## Diffused Cross-Task Context",
+            "diffusion hint",
+        ],
+    )
+    assert_omits_all(content, ["flat prior should not appear"])
 
 
 def _mediator_messages(mediator: MediatorAgent) -> list[dict]:
@@ -162,31 +222,48 @@ def _mediator_messages(mediator: MediatorAgent) -> list[dict]:
     )
 
 
-def test_mediator_omits_skill_evolution_sections_when_executor_updates_disabled():
+@pytest.mark.parametrize(
+    ("executor_updates_enabled", "expected", "unexpected"),
+    [
+        pytest.param(
+            False,
+            [
+                "Abstraction Levels",
+                "When to Withhold",
+                "Withhold when the trace is duplicate or noisy.",
+                "Output Format",
+            ],
+            [
+                "skill-update decisions",
+                "skill-evolution hazard",
+                "regresses a held-out validation task",
+                "Reporting Skill-Evolution Direction",
+                "validation evidence",
+            ],
+            id="disabled",
+        ),
+        pytest.param(
+            True,
+            [
+                "skill-update decisions",
+                "skill-evolution hazard",
+                "Reporting Skill-Evolution Direction",
+            ],
+            [],
+            id="enabled",
+        ),
+    ],
+)
+def test_mediator_protocol_sections_follow_executor_update_gate(
+    executor_updates_enabled,
+    expected,
+    unexpected,
+):
     mediator = MediatorAgent(LLMClient(model="test-model"))
-    mediator.configure_skill_updates(_skill_updates(executor=False))
+    mediator.configure_skill_updates(_skill_updates(executor=executor_updates_enabled))
     mediator.load_protocol(MEDIATOR_PROTOCOL)
 
     system_prompt = str(_mediator_messages(mediator)[0]["content"])
 
-    assert "Abstraction Levels" in system_prompt
-    assert "When to Withhold" in system_prompt
-    assert "Withhold when the trace is duplicate or noisy." in system_prompt
-    assert "Output Format" in system_prompt
-    assert "skill-update decisions" not in system_prompt
-    assert "skill-evolution hazard" not in system_prompt
-    assert "regresses a held-out validation task" not in system_prompt
-    assert "Reporting Skill-Evolution Direction" not in system_prompt
-    assert "validation evidence" not in system_prompt
-
-
-def test_mediator_keeps_skill_evolution_sections_when_executor_updates_enabled():
-    mediator = MediatorAgent(LLMClient(model="test-model"))
-    mediator.configure_skill_updates(_skill_updates(executor=True))
-    mediator.load_protocol(MEDIATOR_PROTOCOL)
-
-    system_prompt = str(_mediator_messages(mediator)[0]["content"])
-
-    assert "skill-update decisions" in system_prompt
-    assert "skill-evolution hazard" in system_prompt
-    assert "Reporting Skill-Evolution Direction" in system_prompt
+    assert_contains_all(system_prompt, expected)
+    assert_omits_all(system_prompt, unexpected)

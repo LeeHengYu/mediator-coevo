@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from mediated_coevo.analysis.judge_rewards import (
-    JUDGE_SYSTEM_PROMPT,
     annotate_judge_rewards,
     append_judge_reward_record,
     compute_judge_reward,
@@ -234,24 +233,6 @@ def test_true_flag_requires_evidence():
             confidence=0.5,
             rationale="Claim lacks verifier support.",
         )
-
-
-def test_judge_prompt_requires_nested_axis_schema():
-    assert '"axis_scores": {' in JUDGE_SYSTEM_PROMPT
-    assert '"flags": {' in JUDGE_SYSTEM_PROMPT
-    assert '"confidence": 0.0' in JUDGE_SYSTEM_PROMPT
-    assert '"rationale": "concise evidence-grounded explanation"' in JUDGE_SYSTEM_PROMPT
-    assert '"flag_evidence": {}' in JUDGE_SYSTEM_PROMPT
-    assert (
-        "Allowed top-level keys are exactly: axis_scores, flags, confidence, "
-        "rationale,"
-    ) in JUDGE_SYSTEM_PROMPT
-    assert "flag_evidence. Do not add any other top-level keys." in JUDGE_SYSTEM_PROMPT
-    assert "Rubric axis names must appear only inside axis_scores" in JUDGE_SYSTEM_PROMPT
-    assert (
-        "top-level task_outcome, evidence_quality,\n"
-        "skill_update_usefulness, token_efficiency, or reflection_depth is invalid"
-    ) in JUDGE_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

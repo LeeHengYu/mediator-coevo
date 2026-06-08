@@ -22,8 +22,10 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from mediated_coevo.experiment.conditions import MEDIATOR_CONDITIONS, ConditionName
+from mediated_coevo.prompt_text import PromptText
 
 from .base import BaseAgent
+from .prompt_context import PromptSection
 from .prompt_sections import select_markdown_section
 
 if TYPE_CHECKING:
@@ -33,7 +35,6 @@ if TYPE_CHECKING:
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.task import TaskSpec
     from mediated_coevo.models.trace import ExecutionTrace
-    from mediated_coevo.runtime.token_budget import BudgetSection
     from mediated_coevo.stores.artifact_store import ArtifactStore
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,6 @@ class MediatorAgent(BaseAgent):
 
     def construct_messages(self, context: dict[str, Any]) -> list[dict[str, Any]]:
         from mediated_coevo.runtime.token_budget import (
-            BudgetSection,
             count_message_tokens,
             fit_text_to_tokens,
             pack_sections,
@@ -116,21 +116,26 @@ class MediatorAgent(BaseAgent):
             system_tokens = count_message_tokens(model, messages)
             user_budget = max(1, self._budgets.mediator_prompt_tokens - system_tokens)
 
-        sections: list[BudgetSection] = []
+        sections: list[PromptSection] = []
         if trace := context.get("trace"):
             sections.append(self._trace_section(trace))
 
         if task_context := context.get("task_context"):
             sections.append(
-                BudgetSection(
+                PromptSection(
                     "task_context",
-                    f"## Task Context\n{task_context.instruction}",
+                    "scaffold",
+                    PromptText.mediator_task_context(task_context.instruction),
                     required=True,
                 )
             )
 
         if self._budgets and user_budget:
-            user_content = pack_sections(model, sections, user_budget)
+            user_content = pack_sections(
+                model,
+                [section.to_budget_section() for section in sections],
+                user_budget,
+            )
         else:
             user_content = "\n\n".join(section.content for section in sections)
         messages.append({"role": "user", "content": user_content})
@@ -189,27 +194,23 @@ class MediatorAgent(BaseAgent):
             )
         return {
             "role": "system",
-            "content": (
-                "# Relevant History\n\n"
-                "Previous execution trace summaries for this task:\n\n"
-                f"{history_lines}"
-            ),
+            "content": PromptSection(
+                "relevant_history",
+                "same_task_prior",
+                PromptText.mediator_history(history_lines),
+            ).content,
         }
 
-    def _trace_section(self, trace: ExecutionTrace) -> BudgetSection:
-        from mediated_coevo.runtime.token_budget import BudgetSection
-
-        trace_parts = ["## Execution Trace"]
-        if trace.stdout:
-            trace_parts.append(f"### stdout\n{trace.stdout}")
-        if trace.stderr:
-            trace_parts.append(f"### stderr\n{trace.stderr}")
-        if trace.test_results:
-            trace_parts.append(f"### test_results\n{trace.test_results}")
-        trace_parts.append(f"### reward: {trace.reward}")
-        return BudgetSection(
+    def _trace_section(self, trace: ExecutionTrace) -> PromptSection:
+        return PromptSection(
             "execution_trace",
-            "\n\n".join(trace_parts),
+            "execution_feedback",
+            PromptText.mediator_execution_trace(
+                stdout=trace.stdout,
+                stderr=trace.stderr,
+                test_results=trace.test_results,
+                reward=trace.reward,
+            ),
             max_tokens=self._budgets.trace_excerpt_tokens if self._budgets else None,
         )
 
@@ -332,7 +333,6 @@ class MediatorAgent(BaseAgent):
         """
         from mediated_coevo.core.utils import parse_json_object
         from mediated_coevo.evolution.compactor import (
-            COMPACTOR_SYSTEM_PROMPT,
             RAW_PASSTHROUGH_CHARS,
             TARGET_EVIDENCE_CHARS,
             TARGET_HEADLINE_CHARS,
@@ -374,15 +374,14 @@ class MediatorAgent(BaseAgent):
                 )
             response = await self._llm_client.complete(
                 messages=[
-                    {"role": "system", "content": COMPACTOR_SYSTEM_PROMPT},
+                    {"role": "system", "content": PromptText.COMPACTOR_SYSTEM},
                     {
                         "role": "user",
-                        "content": (
-                            f"## Mediator report ({raw_length} chars)\n\n"
-                            f"{prompt_feedback}\n\n"
-                            f"Return JSON with `headline` "
-                            f"(≤{TARGET_HEADLINE_CHARS} chars) and `evidence` "
-                            f"(≤{TARGET_EVIDENCE_CHARS} chars)."
+                        "content": PromptText.mediator_compact_feedback_user(
+                            raw_length=raw_length,
+                            prompt_feedback=prompt_feedback,
+                            target_headline_chars=TARGET_HEADLINE_CHARS,
+                            target_evidence_chars=TARGET_EVIDENCE_CHARS,
                         ),
                     },
                 ],

@@ -10,8 +10,10 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from mediated_coevo.evolution.candidates import candidate_from_mapping
+from mediated_coevo.prompt_text import PromptText
 
 from .base import BaseAgent
+from .prompt_context import PromptSection
 from .prompt_sections import select_markdown_sections
 
 if TYPE_CHECKING:
@@ -23,37 +25,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PLANNER_SYSTEM_PROMPT = """\
-You are the Planner in a multi-agent skill co-evolution system.
-
-Your responsibilities:
-1. Plan tasks for the Executor agent to carry out.
-2. Read feedback reports (from the Mediator or raw traces) about past executions.
-3. Decide whether and how to update the Executor's skills based on that feedback.
-
-You do NOT execute tasks yourself. You plan and refine skills."""
-
-PLAN_RESPONSE_SCHEMA = 'Respond with JSON: {"instruction": "...", "reasoning": "..."}'
-UPDATE_RESPONSE_SCHEMA = (
-    "Decide whether to update the skill. Respond with JSON:\n"
-    '{"no_update": true} if no change needed, or\n'
-    '{"new_content": "...", "reasoning": "..."}'
-)
-UPDATE_BATCH_RESPONSE_SCHEMA = (
-    "Draft 3 to 5 candidate skill updates. Respond with JSON only:\n"
-    '{"candidates": ['
-    '{"candidate_id": "short-stable-id", '
-    '"update_kind": "narrow_clarification | add_procedure | add_failure_guard | '
-    'remove_or_simplify_rule | task_specific_warning | no_update", '
-    '"hypothesis": "...", "risk": "...", "audit_score": 0.0, '
-    '"new_content": "...", "reasoning": "..."}'
-    "]}\n"
-    "Use update_kind=no_update with current content when no edit is warranted. "
-    "For every non-no_update candidate, new_content must be a complete, "
-    "semantically integrated rewrite of the current Markdown skill: merge the "
-    "new guidance into the existing structure, resolve duplicate or conflicting "
-    "rules, and do not append an addendum unless a new section is clearly needed."
-)
+PLANNER_SYSTEM_PROMPT = PromptText.PLANNER_SYSTEM
+PLAN_RESPONSE_SCHEMA = PromptText.PLAN_RESPONSE_SCHEMA
+UPDATE_RESPONSE_SCHEMA = PromptText.UPDATE_RESPONSE_SCHEMA
+UPDATE_BATCH_RESPONSE_SCHEMA = PromptText.UPDATE_BATCH_RESPONSE_SCHEMA
 
 
 class PlannerAgent(BaseAgent):
@@ -114,16 +89,21 @@ class PlannerAgent(BaseAgent):
                 content,
                 self._budgets.max_skill_tokens,
             )
+        section = PromptSection(
+            name=heading.lower().replace(" ", "_"),
+            kind="scaffold",
+            content=PromptText.system_context(heading, description, content),
+        )
         messages.append(
             {
                 "role": "system",
-                "content": f"# {heading}\n\n{description}\n\n{content}",
+                "content": section.content,
             }
         )
 
     def construct_messages(self, context: dict[str, Any]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "system", "content": PromptText.PLANNER_SYSTEM},
         ]
 
         model = self.llm_client.model
@@ -142,7 +122,7 @@ class PlannerAgent(BaseAgent):
         if self._skill_context:
             self._append_budgeted_system_context(
                 messages,
-                heading="Executor's Active Skills",
+                heading=PromptText.EXECUTOR_ACTIVE_SKILLS_HEADING,
                 description=self._executor_skill_context_description(),
                 content=self._skill_context,
             )
@@ -162,27 +142,17 @@ class PlannerAgent(BaseAgent):
 
         if action in {"update_skill", "update_skill_batch"}:
             return {
-                "heading": "Your Skill-Refinement Guidelines",
-                "description": (
-                    "The following skill provides procedures for updating the "
-                    "Executor's skills. Follow these when deciding skill edits."
-                ),
+                "heading": PromptText.SKILL_REFINER_UPDATE_HEADING,
+                "description": PromptText.SKILL_REFINER_UPDATE_DESCRIPTION,
                 "content": content,
             }
 
         if self._executor_skill_updates_enabled():
-            description = (
-                "The following skill sections provide planning guidance and "
-                "enabled Executor skill-update criteria."
-            )
+            description = PromptText.SKILL_REFINER_PLANNING_WITH_UPDATES_DESCRIPTION
         else:
-            description = (
-                "The following skill sections provide planning guidance for the "
-                "current task. Executor skill-update sections are omitted because "
-                "that workflow is disabled for this run."
-            )
+            description = PromptText.SKILL_REFINER_PLANNING_READ_ONLY_DESCRIPTION
         return {
-            "heading": "Your Planning Guidelines",
+            "heading": PromptText.SKILL_REFINER_PLANNING_HEADING,
             "description": description,
             "content": content,
         }
@@ -217,16 +187,8 @@ class PlannerAgent(BaseAgent):
 
     def _executor_skill_context_description(self) -> str:
         if self._executor_skill_updates_enabled():
-            return (
-                "The following skills are currently loaded into the Executor. "
-                "When planning tasks, reference these capabilities. When "
-                "updating skills, edit this content."
-            )
-        return (
-            "The following skills are currently loaded into the Executor. "
-            "When planning tasks, reference these capabilities. Skill updates "
-            "are disabled for this run, so treat this content as read-only."
-        )
+            return PromptText.EXECUTOR_SKILL_EDITABLE_DESCRIPTION
+        return PromptText.EXECUTOR_SKILL_READ_ONLY_DESCRIPTION
 
     def _executor_skill_updates_enabled(self) -> bool:
         return self._skill_updates is None or self._skill_updates.executor
@@ -272,7 +234,7 @@ class PlannerAgent(BaseAgent):
         if action == "update_skill":
             return self._build_update_prompt(
                 context,
-                response_schema=UPDATE_RESPONSE_SCHEMA,
+                response_schema=PromptText.UPDATE_RESPONSE_SCHEMA,
                 batch_mode=False,
                 model=model,
                 budgets=self._budgets,
@@ -281,7 +243,7 @@ class PlannerAgent(BaseAgent):
         if action == "update_skill_batch":
             return self._build_update_prompt(
                 context,
-                response_schema=UPDATE_BATCH_RESPONSE_SCHEMA,
+                response_schema=PromptText.UPDATE_BATCH_RESPONSE_SCHEMA,
                 batch_mode=True,
                 model=model,
                 budgets=self._budgets,
@@ -333,7 +295,7 @@ class PlannerAgent(BaseAgent):
             "current_skills": current_skills,
         }
         if prior_context:
-            context["mediator_report"] = prior_context
+            context["prior_context"] = prior_context
 
         result = await self.process(context)
         parsed = result["parsed"]
@@ -375,12 +337,7 @@ class PlannerAgent(BaseAgent):
             completion_tokens=min(1024, self._budgets.planner_completion_tokens),
             condition_name=self._condition_name,
         )
-        return (
-            "## Compacted Benchmark Instruction\n"
-            "The original benchmark instruction exceeded the planner prompt budget. "
-            "This compacted version preserves the task goal and concrete issue signals.\n\n"
-            f"{compacted}"
-        )
+        return PromptText.compacted_benchmark_instruction(compacted)
 
     async def suggest_skill_revision(
         self,
@@ -496,15 +453,12 @@ class PlannerAgent(BaseAgent):
     ) -> str:
         if budgets and budget:
             from mediated_coevo.runtime.token_budget import (
-                BudgetSection,
                 count_text_tokens,
                 pack_sections,
             )
 
-            task_header = (
-                f"Plan a task for task_id: {context.get('task_id', 'unknown')}"
-            )
-            response_schema = PLAN_RESPONSE_SCHEMA
+            task_header = PromptText.task_header(context.get("task_id", "unknown"))
+            response_schema = PromptText.PLAN_RESPONSE_SCHEMA
             fixed_required_tokens = count_text_tokens(
                 model,
                 f"{task_header}\n\n{response_schema}",
@@ -512,55 +466,86 @@ class PlannerAgent(BaseAgent):
             instruction_budget = max(1, budget - fixed_required_tokens)
 
             sections = [
-                BudgetSection(
+                PromptSection(
                     "task_header",
+                    "scaffold",
                     task_header,
                     required=True,
-                )
+                ).to_budget_section()
             ]
             if instruction := context.get("base_instruction"):
                 sections.append(
-                    BudgetSection(
+                    PromptSection(
                         "benchmark_instruction",
-                        (
-                            "## Benchmark Instruction\n"
-                            "Use the following as the base task instruction. You may clarify or "
-                            "restructure it for the Executor, but do not change the task goal.\n\n"
-                            f"{instruction}"
-                        ),
+                        "scaffold",
+                        PromptText.benchmark_instruction(instruction),
                         required=True,
                         max_tokens=instruction_budget,
-                    )
+                    ).to_budget_section()
                 )
-            if report := context.get("mediator_report"):
-                sections.append(
-                    BudgetSection(
-                        "prior_context",
-                        f"## Feedback from previous execution\n{report}",
-                        max_tokens=budgets.mediator_report_tokens,
-                    )
+            sections.extend(
+                section.to_budget_section()
+                for section in PlannerAgent._prior_context_sections(
+                    context,
+                    max_tokens=budgets.mediator_report_tokens,
                 )
+            )
             sections.append(
-                BudgetSection(
+                PromptSection(
+                    "response_schema",
                     "response_schema",
                     response_schema,
                     required=True,
-                )
+                ).to_budget_section()
             )
             return pack_sections(model, sections, budget)
 
-        parts = [f"Plan a task for task_id: {context.get('task_id', 'unknown')}"]
+        parts = [PromptText.task_header(context.get("task_id", "unknown"))]
         if instruction := context.get("base_instruction"):
-            parts.append(
-                "\n## Benchmark Instruction\n"
-                "Use the following as the base task instruction. You may clarify or "
-                "restructure it for the Executor, but do not change the task goal.\n\n"
-                f"{instruction}"
-            )
-        if report := context.get("mediator_report"):
-            parts.append(f"\n## Feedback from previous execution\n{report}")
-        parts.append(f"\n{PLAN_RESPONSE_SCHEMA}")
+            parts.append(f"\n{PromptText.benchmark_instruction(instruction)}")
+        parts.extend(
+            f"\n{section.content}"
+            for section in PlannerAgent._prior_context_sections(context)
+        )
+        parts.append(f"\n{PromptText.PLAN_RESPONSE_SCHEMA}")
         return "\n".join(parts)
+
+    @staticmethod
+    def _prior_context_sections(
+        context: dict[str, Any],
+        *,
+        max_tokens: int | None = None,
+    ) -> tuple[PromptSection, ...]:
+        explicit_sections = context.get("prior_context_sections")
+        if explicit_sections:
+            return tuple(
+                section
+                if max_tokens is None
+                else PromptSection(
+                    section.name,
+                    section.kind,
+                    section.content,
+                    required=section.required,
+                    max_tokens=(
+                        section.max_tokens
+                        if section.max_tokens is not None
+                        else max_tokens
+                    ),
+                )
+                for section in explicit_sections
+            )
+
+        prior_context = context.get("prior_context")
+        if not prior_context:
+            return ()
+        return (
+            PromptSection(
+                "prior_context",
+                "same_task_prior",
+                PromptText.prior_context(prior_context),
+                max_tokens=max_tokens,
+            ),
+        )
 
     @staticmethod
     def _build_update_prompt(
@@ -578,8 +563,7 @@ class PlannerAgent(BaseAgent):
             sections = [
                 BudgetSection(
                     "current_skill",
-                    "## Current Skill Content\n"
-                    f"{context.get('current_skill', '(none)')}",
+                    PromptText.current_skill(context.get("current_skill", "(none)")),
                     required=True,
                     max_tokens=budgets.max_skill_tokens,
                 )
@@ -588,7 +572,7 @@ class PlannerAgent(BaseAgent):
                 sections.append(
                     BudgetSection(
                         "execution_feedback",
-                        f"## Execution Feedback\n{feedback}",
+                        PromptText.execution_feedback(feedback),
                         max_tokens=budgets.mediator_report_tokens,
                     )
                 )
@@ -596,14 +580,14 @@ class PlannerAgent(BaseAgent):
                 sections.append(
                     BudgetSection(
                         "candidate_scope",
-                        f"## Candidate Scope\nskill_id=executor task_ids={task_ids}",
+                        PromptText.candidate_scope(task_ids),
                     )
                 )
             if history := context.get("edit_history"):
                 sections.append(
                     BudgetSection(
                         "recent_edit_history",
-                        f"## Recent Edit History\n{history}",
+                        PromptText.recent_edit_history(history),
                         max_tokens=budgets.historical_summary_tokens,
                     )
                 )
@@ -611,15 +595,7 @@ class PlannerAgent(BaseAgent):
                 sections.append(
                     BudgetSection(
                         "rejected_update_history",
-                        (
-                            "## Recently Rejected Skill Updates\n"
-                            "Treat these as negative evidence. Do not repeat "
-                            "edits that failed empirical validation, regressed "
-                            "a validation task, or produced unusable validation "
-                            "traces unless the new candidate directly fixes "
-                            "that rejection cause.\n"
-                            f"{rejected_history}"
-                        ),
+                        PromptText.rejected_skill_updates(rejected_history),
                         max_tokens=budgets.historical_summary_tokens,
                     )
                 )
@@ -633,23 +609,15 @@ class PlannerAgent(BaseAgent):
             return pack_sections(model, sections, budget)
 
         parts = [
-            "## Current Skill Content",
-            context.get("current_skill", "(none)"),
+            PromptText.current_skill(context.get("current_skill", "(none)")),
         ]
         if feedback := context.get("feedback"):
-            parts.append(f"\n## Execution Feedback\n{feedback}")
+            parts.append(f"\n{PromptText.execution_feedback(feedback)}")
         if batch_mode and (task_ids := context.get("task_ids")):
-            parts.append(f"\n## Candidate Scope\nskill_id=executor task_ids={task_ids}")
+            parts.append(f"\n{PromptText.candidate_scope(task_ids)}")
         if history := context.get("edit_history"):
-            parts.append(f"\n## Recent Edit History\n{history}")
+            parts.append(f"\n{PromptText.recent_edit_history(history)}")
         if rejected_history := context.get("rejected_update_history"):
-            parts.append(
-                "\n## Recently Rejected Skill Updates\n"
-                "Treat these as negative evidence. Do not repeat edits that "
-                "failed empirical validation, regressed a validation task, or "
-                "produced unusable validation traces unless the new candidate "
-                "directly fixes that rejection cause.\n"
-                f"{rejected_history}"
-            )
+            parts.append(f"\n{PromptText.rejected_skill_updates(rejected_history)}")
         parts.append(f"\n{response_schema}")
         return "\n".join(parts)

@@ -20,6 +20,7 @@ from mediated_coevo.runtime.token_budget import (
     pack_sections,
 )
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
+from tests.prompt_helpers import assert_contains_all, assert_omits_all, message_text
 
 
 def test_token_count_falls_back_when_litellm_counter_fails(monkeypatch):
@@ -294,7 +295,7 @@ def test_planner_constructed_prompt_fits_budget():
             "action": "plan_task",
             "task_id": "task-A",
             "base_instruction": "Fix the build.",
-            "mediator_report": "prior feedback " * 300,
+            "prior_context": "prior feedback " * 300,
         }
     )
 
@@ -370,61 +371,72 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
     assert "COMPACTED ISSUE SIGNAL" in task_spec.instruction
 
 
-def test_planner_plan_prompt_contains_only_prior_feedback_section():
+def test_planner_routes_plan_and_update_prompt_context_separately():
     planner = PlannerAgent(LLMClient(model="test-model"))
 
-    messages = planner.construct_messages(
-        {
-            "action": "plan_task",
-            "task_id": "task-A",
-            "base_instruction": "Fix the build.",
-            "mediator_report": "source_task=task-A iter=0 reward=0.25 OK",
-            "feedback": "CURRENT OUTCOME iter=1 reward=0.90 SHOULD_NOT_APPEAR",
-            "edit_history": [
-                {
-                    "iteration": 1,
-                    "reasoning": "SHOULD_NOT_APPEAR",
-                    "reward": 0.90,
-                }
-            ],
-        }
+    plan_prompt = message_text(
+        planner.construct_messages(
+            {
+                "action": "plan_task",
+                "task_id": "task-A",
+                "base_instruction": "Fix the build.",
+                "prior_context": "source_task=task-A iter=0 reward=0.25 OK",
+                "feedback": "CURRENT OUTCOME iter=1 reward=0.90 SHOULD_NOT_APPEAR",
+                "edit_history": [
+                    {
+                        "iteration": 1,
+                        "reasoning": "SHOULD_NOT_APPEAR",
+                        "reward": 0.90,
+                    }
+                ],
+            }
+        )
     )
-    prompt_text = "\n\n".join(message["content"] for message in messages)
 
-    assert "## Feedback from previous execution" in prompt_text
-    assert "iter=0 reward=0.25 OK" in prompt_text
-    assert "## Execution Feedback" not in prompt_text
-    assert "## Recent Edit History" not in prompt_text
-    assert "CURRENT OUTCOME" not in prompt_text
-    assert "iter=1" not in prompt_text
-    assert "reward=0.90" not in prompt_text
-    assert "SHOULD_NOT_APPEAR" not in prompt_text
-
-
-def test_planner_update_prompt_separates_execution_feedback_from_plan_prompt():
-    planner = PlannerAgent(LLMClient(model="test-model"))
-
-    messages = planner.construct_messages(
-        {
-            "action": "update_skill",
-            "current_skill": "# Executor\n",
-            "feedback": "source_task=task-A iter=1 reward=0.90 OK",
-            "edit_history": [
-                {
-                    "iteration": 0,
-                    "reasoning": "previous edit",
-                    "reward": 0.25,
-                }
-            ],
-        }
+    update_prompt = message_text(
+        planner.construct_messages(
+            {
+                "action": "update_skill",
+                "current_skill": "# Executor\n",
+                "feedback": "source_task=task-A iter=1 reward=0.90 OK",
+                "edit_history": [
+                    {
+                        "iteration": 0,
+                        "reasoning": "previous edit",
+                        "reward": 0.25,
+                    }
+                ],
+            }
+        )
     )
-    prompt_text = "\n\n".join(message["content"] for message in messages)
 
-    assert "## Execution Feedback" in prompt_text
-    assert "source_task=task-A iter=1 reward=0.90 OK" in prompt_text
-    assert "## Recent Edit History" in prompt_text
-    assert "Plan a task for task_id" not in prompt_text
-    assert "## Feedback from previous execution" not in prompt_text
+    assert_contains_all(
+        plan_prompt,
+        ["## Feedback from previous execution", "iter=0 reward=0.25 OK"],
+    )
+    assert_omits_all(
+        plan_prompt,
+        [
+            "## Execution Feedback",
+            "## Recent Edit History",
+            "CURRENT OUTCOME",
+            "iter=1",
+            "reward=0.90",
+            "SHOULD_NOT_APPEAR",
+        ],
+    )
+    assert_contains_all(
+        update_prompt,
+        [
+            "## Execution Feedback",
+            "source_task=task-A iter=1 reward=0.90 OK",
+            "## Recent Edit History",
+        ],
+    )
+    assert_omits_all(
+        update_prompt,
+        ["Plan a task for task_id", "## Feedback from previous execution"],
+    )
 
 
 def test_iteration_record_serializes_llm_token_events_and_total_tokens():

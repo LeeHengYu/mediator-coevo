@@ -10,6 +10,7 @@ from mediated_coevo.models.skill import SkillValidationResult
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryEntry, HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
+from tests.prompt_helpers import assert_contains_all
 
 
 class _MarkdownLLM:
@@ -204,7 +205,12 @@ async def test_reflector_records_rejected_draft_and_prompts_with_negative_histor
     )
     user_prompt = llm.messages[1]["content"]
 
-    assert "Recently Rejected Reflection Updates" in user_prompt
-    assert "validation_rejected_all_candidates" in user_prompt
-    assert "mean_delta_below_threshold" in user_prompt
-    assert "broad" in user_prompt
+    assert_contains_all(
+        user_prompt,
+        [
+            "Recently Rejected Reflection Updates",
+            "validation_rejected_all_candidates",
+            "mean_delta_below_threshold",
+            "broad",
+        ],
+    )

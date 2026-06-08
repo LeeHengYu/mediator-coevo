@@ -30,6 +30,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
+from mediated_coevo.prompt_text import PromptText
 from mediated_coevo.runtime.token_budget import count_text_tokens, fit_text_to_tokens
 
 if TYPE_CHECKING:
@@ -55,28 +56,8 @@ DIFF_EXCERPT_HEAD_LINES = 12
 DIFF_EXCERPT_TAIL_LINES = 12
 
 
-COMPACTOR_SYSTEM_PROMPT = """\
-You are a log compactor. Your job is to condense a long mediator report
-into a structured JSON object with exactly two fields:
-
-- "headline": ONE sentence capturing the key observation or decision
-  the mediator is communicating.
-- "evidence": 2-4 sentences of the most diagnostic text from the report,
-  quoted verbatim where possible. Prefer concrete error messages,
-  failing assertions, or specific recommendations over generic framing.
-
-Respond with ONLY a JSON object — no prose, no markdown fences."""
-
-
-CONTEXT_COMPACTOR_SYSTEM_PROMPT = """\
-You are a log compactor. Condense long execution context for a planner prompt.
-
-Return JSON with exactly two string fields:
-- "headline": ONE sentence naming the most important signal.
-- "evidence": 2-4 concise sentences preserving concrete error messages,
-  failing assertions, command names, paths, or verifier details where relevant.
-
-Respond with ONLY a JSON object — no prose, no markdown fences."""
+COMPACTOR_SYSTEM_PROMPT = PromptText.COMPACTOR_SYSTEM
+CONTEXT_COMPACTOR_SYSTEM_PROMPT = PromptText.CONTEXT_COMPACTOR_SYSTEM
 
 
 async def compact_text_for_context(
@@ -113,14 +94,15 @@ async def compact_text_for_context(
 
         response = await llm_client.complete(
             messages=[
-                {"role": "system", "content": CONTEXT_COMPACTOR_SYSTEM_PROMPT},
+                {"role": "system", "content": PromptText.CONTEXT_COMPACTOR_SYSTEM},
                 {
                     "role": "user",
-                    "content": (
-                        f"## {label} ({len(raw)} chars)\n\n"
-                        f"{prompt_raw}\n\n"
-                        f"Keep evidence to about {TARGET_EVIDENCE_CHARS} "
-                        f"characters and headline to about {TARGET_HEADLINE_CHARS}."
+                    "content": PromptText.context_compactor_user(
+                        label=label,
+                        raw_length=len(raw),
+                        prompt_raw=prompt_raw,
+                        target_evidence_chars=TARGET_EVIDENCE_CHARS,
+                        target_headline_chars=TARGET_HEADLINE_CHARS,
                     ),
                 },
             ],

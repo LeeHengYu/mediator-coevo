@@ -7,7 +7,7 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mediated_coevo.diffusion.models import (
     DiffusionArtifact,
@@ -17,6 +17,7 @@ from mediated_coevo.diffusion.models import (
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.prompt_text import PromptText
 
 if TYPE_CHECKING:
     from mediated_coevo.core.config import BudgetsConfig
@@ -178,29 +179,7 @@ class DiffusionEmitter:
 
         evidence = "\n\n".join(evidence_parts)
         signal = _outcome_signal(trace, record)
-        if signal == "success":
-            focus = (
-                "This run succeeded. Emphasize what worked and why it is reusable, "
-                "while still naming avoidable pitfalls or assumptions."
-            )
-        elif signal == "failure":
-            focus = (
-                "This run failed. Emphasize what to avoid and the concrete failure "
-                "mode, while still preserving any partial progress or useful setup."
-            )
-        else:
-            focus = (
-                "This run had a mixed or partial outcome. Balance what worked, what "
-                "failed, and what a later run should verify."
-            )
-        content = (
-            f"{focus}\n\n"
-            "Return a mixed run-outcome signal with:\n"
-            "- what worked or seemed promising\n"
-            "- what to avoid or re-check\n"
-            "- concrete verifier evidence\n\n"
-            f"{evidence}"
-        )
+        content = PromptText.run_outcome_content(signal=signal, evidence=evidence)
         return await self._compact_text(
             content,
             label=f"run outcome for {trace.task_id} iter {trace.iteration}",
@@ -370,7 +349,10 @@ def _report_artifact_path(report: MediatorReport) -> str:
     )
 
 
-def _outcome_signal(trace: ExecutionTrace, record: IterationRecord) -> str:
+def _outcome_signal(
+    trace: ExecutionTrace,
+    record: IterationRecord,
+) -> Literal["success", "failure", "mixed"]:
     if record.success is True:
         return "success"
     if record.success is False or trace.status == "task_failed":

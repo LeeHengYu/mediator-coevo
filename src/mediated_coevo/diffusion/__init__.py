@@ -19,8 +19,6 @@ from .models import (
 )
 from .policy import (
     DiffusionSubscription,
-    build_capped_broadcast_context,
-    build_random_k_context,
     select_capped_broadcast_subscriptions,
     select_random_k_subscriptions,
     select_top_k_similarity_subscriptions,
@@ -44,8 +42,6 @@ __all__ = [
     "DiffusedRecord",
     "DiffusionStore",
     "adjacency_from_snapshot",
-    "build_capped_broadcast_context",
-    "build_random_k_context",
     "emit_diffusion_artifacts",
     "render_diffusion_subscriptions",
     "select_capped_broadcast_subscriptions",

@@ -23,6 +23,7 @@ from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
+from mediated_coevo.agents.prompt_context import PlannerPriorContextBundle
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from tests.config_helpers import (
@@ -561,6 +562,107 @@ async def test_feedback_conditions_control_planner_context_and_mediator_calls(
     assert record.diffusion_policy == "none"
     assert record.execution_trace is not None
     assert record.execution_trace.iteration == 1
+
+
+@pytest.mark.asyncio
+async def test_prior_context_bundle_sections_follow_condition_matrix(tmp_path):
+    bundles: dict[str, PlannerPriorContextBundle] = {}
+
+    orch, _, _ = _orchestrator(tmp_path / "no-feedback", "no_feedback")
+    bundles["no_feedback"] = await orch._build_prior_context_bundle(
+        "no_feedback",
+        "task-A",
+        current_iteration=1,
+    )
+
+    orch, _, _ = _orchestrator(tmp_path / "shared-notes", "shared_notes")
+    bundles["shared_notes"] = await orch._build_prior_context_bundle(
+        "shared_notes",
+        "task-A",
+        current_iteration=1,
+    )
+
+    orch, _, _ = _orchestrator(tmp_path / "full-traces", "full_traces")
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-A", iteration=0, reward=0.25, status="ok")
+    )
+    orch.artifact_store.store_trace(
+        ExecutionTrace(task_id="task-B", iteration=0, reward=0.75, status="ok")
+    )
+    bundles["full_traces"] = await orch._build_prior_context_bundle(
+        "full_traces",
+        "task-A",
+        current_iteration=1,
+    )
+
+    for condition in ("static_mediator", "learned_mediator"):
+        orch, _, _ = _orchestrator(tmp_path / condition, condition)
+        orch._previous_report_by_task["task-A"] = MediatorReport(
+            task_id="task-A",
+            iteration=0,
+            content=f"{condition} same-task report",
+        )
+        orch._released_cross_task_reports_by_task["task-B"] = MediatorReport(
+            task_id="task-B",
+            iteration=0,
+            content=f"{condition} cross-task report",
+        )
+        bundles[condition] = await orch._build_prior_context_bundle(
+            condition,
+            "task-A",
+            current_iteration=1,
+        )
+
+    assert [section.kind for section in bundles["no_feedback"].sections()] == []
+    assert [section.kind for section in bundles["shared_notes"].sections()] == [
+        "same_task_prior"
+    ]
+    assert [section.kind for section in bundles["full_traces"].sections()] == [
+        "same_task_prior",
+        "cross_task_prior",
+    ]
+    assert [section.kind for section in bundles["static_mediator"].sections()] == [
+        "same_task_prior",
+        "cross_task_prior",
+    ]
+    assert [section.kind for section in bundles["learned_mediator"].sections()] == [
+        "same_task_prior",
+        "cross_task_prior",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_diffusion_context_is_condition_independent_and_priority_routed(
+    tmp_path,
+):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "capped_broadcast"
+    orch.config.diffusion.max_artifacts = 1
+    orch._released_cross_task_reports_by_task["task-B"] = MediatorReport(
+        task_id="task-B",
+        iteration=0,
+        content="explicit cross-task report",
+    )
+    orch._ensure_diffusion_runtime_state()
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="task-c-artifact",
+        source_task_id="task-C",
+        content="diffused hint",
+    )
+
+    bundle = await orch._build_prior_context_bundle(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert [section.kind for section in bundle.sections()] == ["diffusion_context"]
+    assert bundle.diffusion_context is not None
+    assert "diffused hint" in bundle.diffusion_context
+    assert bundle.cross_task_prior is None
+    assert "explicit cross-task report" not in bundle.flatten()
 
 
 @pytest.mark.asyncio

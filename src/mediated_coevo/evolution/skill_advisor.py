@@ -11,27 +11,14 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mediated_coevo.prompt_text import PromptText
+
 if TYPE_CHECKING:
     from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.skill import SkillProposal
 
 logger = logging.getLogger(__name__)
-
-_SYSTEM = """\
-You are a Skill Advisor in a multi-agent co-evolution system.
-Review a batch of proposed edits to the Executor's skill file.
-Each proposal includes the Planner's reasoning, a diff, and an evolution reward
-(normally judge-derived from the iteration AFTER the proposal; "n/a" if not yet
-known).
-
-Approve if the proposals show a consistent, well-reasoned direction.
-Reject if proposals contradict each other, lack supporting evidence, or the
-current skill already captures the proposed changes.
-
-Respond with ONLY a JSON object (no prose, no fences):
-  {"approve": true,  "feedback": "<2-4 sentence instruction for the Planner>"}
-  {"approve": false, "feedback": "<1-2 sentence rejection reason>"}"""
 
 
 @dataclass(frozen=True)
@@ -46,15 +33,9 @@ class SkillAdvisorPrompt:
     def render(self) -> tuple[str, int | None]:
         from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
 
-        user_content = "\n".join(
-            [
-                "## Current Executor Skill\n",
-                self._current_skill_text(),
-                "\n## Buffered Proposals\n",
-                *self._proposal_blocks(),
-                "\nRespond with JSON only. The feedback field is required and "
-                "must be non-empty for both approval and rejection.",
-            ]
+        user_content = PromptText.advisor_review_user(
+            current_skill=self._current_skill_text(),
+            proposal_blocks=self._proposal_blocks(),
         )
         if not self.budgets:
             return user_content, None
@@ -110,13 +91,16 @@ class SkillAdvisorPrompt:
                 excerpt,
                 self.budgets.skill_update_diff_tokens,
             )
-        return (
-            f"### Proposal {index} — iter={proposal.iteration} "
-            f"task={proposal.task_id} reward={reward_str} "
-            f"reward_source={reward_source}\n"
-            f"**Reasoning**: {proposal.reasoning}\n"
-            f"**Diff**: +{added}/-{removed} lines\n"
-            f"```diff\n{excerpt}```\n"
+        return PromptText.advisor_proposal_block(
+            index=index,
+            iteration=proposal.iteration,
+            task_id=proposal.task_id,
+            reward=reward_str,
+            reward_source=reward_source,
+            lines_added=added,
+            lines_removed=removed,
+            reasoning=proposal.reasoning,
+            diff_excerpt=excerpt,
         )
 
 
@@ -170,7 +154,7 @@ class SkillAdvisor:
         try:
             resp = await self._llm.complete(
                 messages=[
-                    {"role": "system", "content": _SYSTEM},
+                    {"role": "system", "content": PromptText.ADVISOR_SYSTEM},
                     {"role": "user", "content": user_content},
                 ],
                 temperature=temperature,
