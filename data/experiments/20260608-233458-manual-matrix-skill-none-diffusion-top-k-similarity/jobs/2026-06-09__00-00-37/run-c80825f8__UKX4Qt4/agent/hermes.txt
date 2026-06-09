@@ -1,0 +1,159 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve_workbook.py → b/solve_workbook.py
+@@ -0,0 +1,349 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++from pathlib import Path
++import shutil
++import re
++
++SRC = Path('/root/data/workbook.xlsx')
++OUT = Path('/root/output/result.xlsx')
++OUT.parent.mkdir(parents=True, exist_ok=True)
++
++print('=== Setup check ===')
++try:
++    import openpyxl
++    print(f'openpyxl version: {openpyxl.__version__}')
++except Exception as exc:
++    raise RuntimeError(f'openpyxl is required but could not be imported: {exc}')
++print(f'Source workbook: {SRC} exists={SRC.exists()}')
++
++# IMPORTANT: do not use data_only=True; formulas must be preserved.
++wb = load_workbook(SRC, data_only=False)
++print('\n=== Workbook sheets ===')
++print(wb.sheetnames)
++if 'Task' not in wb.sheetnames or 'Data' not in wb.sheetnames:
++    raise RuntimeError(f'Expected sheets Task and Data, found {wb.sheetnames}')
++ws_task = wb['Task']
++ws_data = wb['Data']
++
++# Helpers
++BLOCKS = [(12, 17), (19, 24), (26, 31)]
++YEAR_COLS = list(range(8, 13))  # H:L
++
++def fmt(v):
++    return '<empty>' if v is None else repr(v)
++
++def row_values(ws, row, start_col, end_col):
++    return [ws.cell(row=row, column=c).value for c in range(start_col, end_col + 1)]
++
++def nonempty_in_row(ws, row, start_col=1, end_col=None):
++    if end_col is None:
++        end_col = ws.max_column
++    out = []
++    for c in range(start_col, end_col + 1):
++        v = ws.cell(row=row, column=c).value
++        if v is not None:
++            out.append((get_column_letter(c), v))
++    return out
++
++def normalize_metric(s):
++    if s is None:
++        return ''
++    s = str(s).lower()
++    s = re.sub(r'[^a-z0-9]+', ' ', s)
++    return re.sub(r'\s+', ' ', s).strip()
++
++print('\n=== Step 0: Task sheet inspection ===')
++for start, end in BLOCKS:
++    print(f'Task column D rows {start}-{end} series codes:')
++    for r in range(start, end + 1):
++        print(f'  D{r}: {fmt(ws_task.cell(r, 4).value)}')
++
++print('Task row 10 columns H-L years:')
++for c in YEAR_COLS:
++    print(f'  {get_column_letter(c)}10: {fmt(ws_task.cell(10, c).value)}')
++
++years = [ws_task.cell(10, c).value for c in YEAR_COLS]
++if any(y is None for y in years):
++    raise RuntimeError(f'Expected years in H10:L10, got {years}')
++
++print('\nTask H35:L40 current contents:')
++for r in range(35, 41):
++    print(f'  row {r}: {row_values(ws_task, r, 8, 12)}')
++print('Task H42:L47 current contents:')
++for r in range(42, 48):
++    print(f'  row {r}: {row_values(ws_task, r, 8, 12)}')
++print('Task H50:L50 current contents:')
++print(f'  row 50: {row_values(ws_task, 50, 8, 12)}')
++
++print('\nTask labels near rows 35-40 (columns A-G):')
+… omitted 271 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/solve_workbook.py → b//root/solve_workbook.py
+@@ -162,15 +162,13 @@
+ print('\n=== Step 2 metric block identification ===')
+ block_metric_text = {}
+ for idx, (start, end) in enumerate(BLOCKS, start=1):
++    # The metric label is repeated in column E on each row of the block. Use the
++    # first data row's column E as the authoritative label; do not include nearby
++    # rows from adjacent blocks, because that can mix labels and misidentify the
++    # metric.
+     pieces = []
+-    for r in range(start - 2, start):
+-        for c in range(1, 8):
+-            v = ws_task.cell(r, c).value
+-            if v is not None:
+-                pieces.append(str(v))
+-    # Include D codes? no, only labels A-G nearby; include row start A-C/E-G region labels if helpful.
+     for c in range(1, 8):
+-        if c == 4:
++        if c == 4:  # omit series code from label text
+             continue
+         v = ws_task.cell(start, c).value
+         if v is not None:
+@@ -184,17 +182,15 @@
+     n = normalize_metric(text)
+     if 'successful' in n and ('api' in n or 'request' in n):
+         metric_to_block['successful'] = idx
+-    if 'failed' in n and ('api' in n or 'request' in n):
++    elif 'failed' in n and ('api' in n or 'request' in n):
+         metric_to_block['failed'] = idx
+-    if 'compute' in n and 'capacity' in n:
++    elif 'compute' in n and 'capacity' in n:
+         metric_to_block['capacity'] = idx
+ 
+ # Conservative fallback by apparent common layout if labels are absent.
+ if set(metric_to_block) != {'successful', 'failed', 'capacity'}:
+     print('WARNING: Could not identify all metrics from labels. Falling back to common layout: block 1=successful, block 2=failed, block 3=capacity.')
+-    metric_to_block.setdefault('successful', 1)
+-    metric_to_block.setdefault('failed', 2)
+-    metric_to_block.setdefault('capacity', 3)
++    metric_to_block = {'successful': 1, 'failed': 2, 'capacity': 3}
+ print(f'Identified metric_to_block: {metric_to_block}')
+ 
+ block_rows = {idx: BLOCKS[idx - 1] for idx in (1, 2, 3)}
+
+session_id: 20260608_160305_47f9f7
+Done. Created and verified the populated workbook at:
+
+/root/output/result.xlsx
+
+Also left the single Python script used for the work at:
+
+/root/solve_workbook.py
+
+Key verified formulas include:
+
+H12:
+=INDEX(Data!$H$21:$L$38, MATCH($D12, Data!$D$21:$D$38, 0), MATCH(H$10, Data!$H$4:$L$4, 0))
+
+H35:
+=(H12-H19)/H26*100
+
+H42:
+=MIN(H35:H40)
+
+H50:
+=SUMPRODUCT(H35:H40, H26:H31)/SUM(H26:H31)
+
+Verification passed:
+- Workbook sheets remained ['Task', 'Data']
+- Lookup blocks H12:L17, H19:L24, H26:L31 contain formulas
+- Net reliability gap block H35:L40 contains formulas
+- Summary statistics H42:L47 contain formulas
+- Weighted mean H50:L50 contains formulas
+- Formatting-preserving openpyxl save was used
+- No new sheets were added

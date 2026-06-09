@@ -1,0 +1,192 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/output/inspect_workbook.py → b/output/inspect_workbook.py
+@@ -0,0 +1,39 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/data/workbook.xlsx'
++wb = load_workbook(path, data_only=False)
++print('SHEETS:', wb.sheetnames)
++
++for sheet_name, max_row, max_col in [('Task', 55, 13), ('Data', 40, None)]:
++    ws = wb[sheet_name]
++    if max_col is None:
++        max_col = ws.max_column
++    print('\n=== SHEET', sheet_name, 'max_row', ws.max_row, 'max_col', ws.max_column, 'printing rows 1-', max_row, 'cols A-', get_column_letter(max_col), '===')
++    header = ['Row'] + [get_column_letter(c) for c in range(1, max_col+1)]
++    print('\t'.join(header))
++    for r in range(1, max_row+1):
++        vals = [str(r)]
++        for c in range(1, max_col+1):
++            v = ws.cell(r, c).value
++            if v is None:
++                vals.append('')
++            else:
++                vals.append(repr(v))
++        print('\t'.join(vals))
++
++# Focused summaries requested by task
++ws = wb['Task']
++print('\nTask row 10 A:M:', [(get_column_letter(c), ws.cell(10,c).value) for c in range(1,14)])
++print('Task D12:D31:', [(r, ws.cell(r,4).value) for r in range(12,32)])
++print('Task rows 35:50 D:G:', [(r, [ws.cell(r,c).value for c in range(4,8)]) for r in range(35,51)])
++for rng in ['H12:L17','H19:L24','H26:L31','H35:L47','H50:L50']:
++    print('\nExisting Task', rng)
++    for row in ws[rng]:
++        print([cell.coordinate + '=' + repr(cell.value) for cell in row])
++
++ws = wb['Data']
++print('\nData dimensions:', ws.max_row, ws.max_column)
++print('Data rows 21:38 A:{}:'.format(get_column_letter(ws.max_column)))
++for r in range(21,39):
++    print(r, [ws.cell(r,c).value for c in range(1, ws.max_column+1)])
+  ┊ review diff
+a/output/populate_formulas.py → b/output/populate_formulas.py
+@@ -0,0 +1,63 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++src = '/root/data/workbook.xlsx'
++out = '/root/output/result.xlsx'
++
++wb = load_workbook(src, data_only=False)
++ws = wb['Task']
++
++# Data layout discovered by inspection:
++# Data!D21:D38 contains series codes; Data!H4:L4 contains years; Data!H21:L38 contains values.
++lookup_blocks = [(12, 17), (19, 24), (26, 31)]
++for start, end in lookup_blocks:
++    for row in range(start, end + 1):
++        for col in range(8, 13):  # H:L
++            letter = get_column_letter(col)
++            ws.cell(row=row, column=col).value = (
++                f'=INDEX(Data!$H$21:$L$38,MATCH($D{row},Data!$D$21:$D$38,0),MATCH({letter}$10,Data!$H$4:$L$4,0))'
++            )
++
++# Step 3: Net production slack by plant = (Finished Output - Scrap And Rework) / Rated Production Capacity * 100
++# Rows 12:17 are Finished Output, 19:24 are Scrap And Rework, 26:31 are Rated Production Capacity.
++for row in range(35, 41):
++    offset = row - 35
++    fin_row = 12 + offset
++    scrap_row = 19 + offset
++    cap_row = 26 + offset
++    for col in range(8, 13):
++        letter = get_column_letter(col)
++        ws.cell(row=row, column=col).value = f'=({letter}{fin_row}-{letter}{scrap_row})/{letter}{cap_row}*100'
++
++# Summary statistic formulas, matched to row labels observed in Task!E42:E47.
++stat_by_label = {
++    'Minimum': 'MIN',
++    'Maximum': 'MAX',
++    'Median': 'MEDIAN',
++    'Simple mean': 'AVERAGE',
++    '25th percentile': 'PERCENTILE25',
++    '75th percentile': 'PERCENTILE75',
++}
++for row in range(42, 48):
++    label = ws.cell(row=row, column=5).value
++    if label not in stat_by_label:
++        raise ValueError(f'Unexpected summary label at E{row}: {label!r}')
++    for col in range(8, 13):
++        letter = get_column_letter(col)
++        rng = f'{letter}35:{letter}40'
++        stat = stat_by_label[label]
++        if stat == 'PERCENTILE25':
++            formula = f'=PERCENTILE({rng},0.25)'
++        elif stat == 'PERCENTILE75':
++            formula = f'=PERCENTILE({rng},0.75)'
++        else:
++            formula = f'={stat}({rng})'
++        ws.cell(row=row, column=col).value = formula
++
++# Weighted mean row: Step 2 percentages as values, Rated Production Capacity as weights.
++for col in range(8, 13):
++    letter = get_column_letter(col)
++    ws.cell(row=50, column=col).value = f'=SUMPRODUCT({letter}35:{letter}40,{letter}26:{letter}31)/SUM({letter}26:{letter}31)'
++
++wb.save(out)
++print(f'Saved {out}')
+  ┊ review diff
+a/output/validate_result.py → b/output/validate_result.py
+@@ -0,0 +1,78 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++src = '/root/data/workbook.xlsx'
++out = '/root/output/result.xlsx'
++orig = load_workbook(src, data_only=False)
++wb = load_workbook(out, data_only=False)
++ws = wb['Task']
++
++print('Original sheets:', orig.sheetnames)
++print('Result sheets:', wb.sheetnames)
++if wb.sheetnames != orig.sheetnames:
++    raise AssertionError('Sheet names changed or new sheets added')
++
++ranges = ['H12:L17', 'H19:L24', 'H26:L31', 'H35:L40', 'H42:L47', 'H50:L50']
++for rng in ranges:
++    missing = []
++    for row in ws[rng]:
++        for cell in row:
++            if not (isinstance(cell.value, str) and cell.value.startswith('=')):
++                missing.append((cell.coordinate, cell.value))
++    print(f'{rng}: formula cells checked = {sum(1 for row in ws[rng] for _ in row)}, missing/non-formula = {missing}')
++    if missing:
++        raise AssertionError(f'Non-formula cells in {rng}: {missing}')
++
++lookup_ranges = ['H12:L17', 'H19:L24', 'H26:L31']
++for rng in lookup_ranges:
++    bad = []
++    for row in ws[rng]:
++        for cell in row:
++            v = cell.value
++            if 'MATCH(' not in v or 'INDEX(' not in v or 'Data!' not in v:
++                bad.append((cell.coordinate, v))
++    print(f'{rng}: lookup formulas include INDEX/MATCH/Data references')
++    if bad:
++        raise AssertionError(f'Bad lookup formulas in {rng}: {bad}')
++
++bad_weighted = []
++for cell in ws['H50:L50'][0]:
++    if 'SUMPRODUCT(' not in cell.value:
++        bad_weighted.append((cell.coordinate, cell.value))
++print('H50:L50 SUMPRODUCT check:', 'OK' if not bad_weighted else bad_weighted)
++if bad_weighted:
++    raise AssertionError('Missing SUMPRODUCT in weighted mean formulas')
++
++samples = {
++    'lookup_finished': ['H12', 'L17'],
++    'lookup_scrap': ['H19', 'L24'],
++    'lookup_capacity': ['H26', 'L31'],
++    'slack': ['H35', 'L40'],
++    'stats': ['H42', 'H43', 'H44', 'H45', 'H46', 'H47'],
++    'weighted': ['H50', 'L50'],
++}
++print('\nFormula samples:')
++for name, coords in samples.items():
++    print(name)
++    for coord in coords:
++        print(' ', coord, ws[coord].value)
++
++# Additional exact expected spot checks
++expected = {
++    'H12': '=INDEX(Data!$H$21:$L$38,MATCH($D12,Data!$D$21:$D$38,0),MATCH(H$10,Data!$H$4:$L$4,0))',
++    'L31': '=INDEX(Data!$H$21:$L$38,MATCH($D31,Data!$D$21:$D$38,0),MATCH(L$10,Data!$H$4:$L$4,0))',
++    'H35': '=(H12-H19)/H26*100',
++    'L40': '=(L17-L24)/L31*100',
++    'H42': '=MIN(H35:H40)',
++    'H43': '=MAX(H35:H40)',
++    'H44': '=MEDIAN(H35:H40)',
++    'H45': '=AVERAGE(H35:H40)',
++    'H46': '=PERCENTILE(H35:H40,0.25)',
++    'H47': '=PERCENTILE(H35:H40,0.75)',
++    'H50': '=SUMPRODUCT(H35:H40,H26:H31)/SUM(H26:H31)',
++}
++for coord, formula in expected.items():
++    actual = ws[coord].value
++    if actual != formula:
++        raise AssertionError(f'{coord} expected {formula!r}, got {actual!r}')
++print('\nAll validation checks passed.')
+
+session_id: 20260608_051048_6c0ccf

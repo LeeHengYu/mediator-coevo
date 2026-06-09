@@ -1,0 +1,207 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a//tmp/inspect_workbook.py → b//tmp/inspect_workbook.py
+@@ -0,0 +1,64 @@
++import os
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++os.makedirs('/root/output', exist_ok=True)
++path='/root/data/workbook.xlsx'
++wb=load_workbook(path, data_only=False)
++print('Workbook sheets:', wb.sheetnames)
++ws=wb['Task']
++wd=wb['Data']
++print('\nTask series codes in D12:D17, D19:D24, D26:D31:')
++for start,end in [(12,17),(19,24),(26,31)]:
++    print(f'Rows {start}-{end}:')
++    for r in range(start,end+1):
++        print(f'  D{r}: {ws.cell(r,4).value!r}')
++print('\nTask year headers H10:L10:')
++for c in range(8,13):
++    v=ws.cell(10,c).value
++    print(f'  {get_column_letter(c)}10: {v!r} ({type(v).__name__})')
++print('\nTask labels/row content rows 35-40, 42-47, 50 columns A-G:')
++for r in list(range(35,41))+list(range(42,48))+[50]:
++    nonempty=[]
++    for c in range(1,8):
++        v=ws.cell(r,c).value
++        if v is not None:
++            nonempty.append((get_column_letter(c), v))
++    print(f'  Row {r}: {nonempty}')
++print('\nData rows 21-38 used range inspection:')
++nonempty_cols=set()
++for r in range(21,39):
++    for c in range(1, wd.max_column+1):
++        if wd.cell(r,c).value is not None:
++            nonempty_cols.add(c)
++if nonempty_cols:
++    minc,maxc=min(nonempty_cols),max(nonempty_cols)
++else:
++    minc,maxc=1,wd.max_column
++print(f'  Non-empty columns in rows 21-38: {get_column_letter(minc)}:{get_column_letter(maxc)} ({minc}:{maxc})')
++for r in range(21,39):
++    cells=[]
++    for c in range(minc,maxc+1):
++        v=wd.cell(r,c).value
++        if v is not None:
++            cells.append(f'{get_column_letter(c)}{r}={v!r}({type(v).__name__})')
++    print(f'  Row {r}: ' + '; '.join(cells))
++print('\nCandidate year cells in Data rows 21-38:')
++for r in range(21,39):
++    years=[]
++    for c in range(minc,maxc+1):
++        v=wd.cell(r,c).value
++        is_year = (isinstance(v, int) and 1900 <= v <= 2100) or (isinstance(v, str) and v.strip().isdigit() and 1900 <= int(v.strip()) <= 2100)
++        if is_year:
++            years.append(f'{get_column_letter(c)}{r}={v!r}({type(v).__name__})')
++    if years:
++        print(f'  Row {r}: ' + ', '.join(years))
++print('\nCandidate Task series code matches in Data rows 21-38:')
++task_rows=list(range(12,18))+list(range(19,25))+list(range(26,32))
++task_codes=[ws.cell(r,4).value for r in task_rows]
++for code in task_codes:
++    locs=[]
++    for r in range(21,39):
++        for c in range(minc,maxc+1):
++            if wd.cell(r,c).value == code:
++                locs.append(f'{get_column_letter(c)}{r}')
++    print(f'  {code!r}: {locs}')
+  ┊ review diff
+a//tmp/update_workbook.py → b//tmp/update_workbook.py
+@@ -0,0 +1,56 @@
++import os
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++input_path = '/root/data/workbook.xlsx'
++output_path = '/root/output/result.xlsx'
++os.makedirs('/root/output', exist_ok=True)
++
++wb = load_workbook(input_path, data_only=False)
++ws = wb['Task']
++
++# Phase 1: lookup formulas. Data sheet header row is 4; lookup rows are 21:38.
++# Series codes are in Data!D21:D38; years are numeric headers in Data!H4:L4.
++# Use INDEX/MATCH/MATCH over the exact values area H21:L38, keyed by $Drow and H$10.
++for row in list(range(12, 18)) + list(range(19, 25)) + list(range(26, 32)):
++    for col in range(8, 13):  # H:L
++        cell = ws.cell(row=row, column=col)
++        year_cell = f'{get_column_letter(col)}$10'
++        formula = f'=INDEX(Data!$H$21:$L$38,MATCH($D{row},Data!$D$21:$D$38,0),MATCH({year_cell},Data!$H$4:$L$4,0))'
++        cell.value = formula
++
++# Phase 2: net reliability gap formulas, rows 35:40 map to success 12:17, fail 19:24, cap 26:31.
++for offset, row in enumerate(range(35, 41)):
++    success_row = 12 + offset
++    fail_row = 19 + offset
++    cap_row = 26 + offset
++    for col in range(8, 13):
++        letter = get_column_letter(col)
++        ws.cell(row=row, column=col).value = f'=({letter}{success_row}-{letter}{fail_row})/{letter}{cap_row}*100'
++
++# Phase 3: summary statistics. Labels verified: 42 Minimum, 43 Maximum, 44 Median,
++# 45 Simple mean, 46 25th percentile, 47 75th percentile.
++summary_templates = {
++    42: '=MIN({col}35:{col}40)',
++    43: '=MAX({col}35:{col}40)',
++    44: '=MEDIAN({col}35:{col}40)',
++    45: '=AVERAGE({col}35:{col}40)',
++    46: '=PERCENTILE({col}35:{col}40,0.25)',
++    47: '=PERCENTILE({col}35:{col}40,0.75)',
++}
++for col in range(8, 13):
++    letter = get_column_letter(col)
++    for row, template in summary_templates.items():
++        ws.cell(row=row, column=col).value = template.format(col=letter)
++
++# Phase 4: weighted mean in row 50.
++for col in range(8, 13):
++    letter = get_column_letter(col)
++    ws.cell(row=50, column=col).value = f'=SUMPRODUCT({letter}35:{letter}40,{letter}26:{letter}31)/SUM({letter}26:{letter}31)'
++
++wb.save(output_path)
++print(f'Saved {output_path}')
++print('Sheets:', wb.sheetnames)
++print('Sample formulas written:')
++for coord in ['H12','L17','H19','L24','H26','L31','H35','L40','H42','L47','H50','L50']:
++    print(f'  {coord}: {ws[coord].value}')
+  ┊ review diff
+a//tmp/validate_workbook.py → b//tmp/validate_workbook.py
+@@ -0,0 +1,41 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++path='/root/output/result.xlsx'
++wb=load_workbook(path, data_only=False)
++ws=wb['Task']
++print('Validation for', path)
++print('Sheets:', wb.sheetnames)
++expected_sheets=['Task','Data']
++print('No new sheets added:', wb.sheetnames == expected_sheets)
++checks=['H12','L17','H19','L24','H26','L31','H35','L40','H42','L47','H50','L50']
++all_formula=True
++for coord in checks:
++    value=ws[coord].value
++    ok=isinstance(value,str) and value.startswith('=')
++    all_formula = all_formula and ok
++    print(f'{coord}: formula={ok} value={value}')
++print('Required sample cells all formulas:', all_formula)
++
++# Verify every required formula cell starts with '='.
++ranges = [(12,17), (19,24), (26,31), (35,40), (42,47), (50,50)]
++missing=[]
++for start,end in ranges:
++    for r in range(start,end+1):
++        for c in range(8,13):
++            v=ws.cell(r,c).value
++            if not (isinstance(v,str) and v.startswith('=')):
++                missing.append(f'{get_column_letter(c)}{r}:{v!r}')
++print('All formula cells in required blocks present:', not missing)
++if missing:
++    print('Missing/non-formula cells:', missing)
++
++print('\nSample by block:')
++for label, coords in {
++    'Lookup formulas': ['H12','I13','L17','H19','L24','H26','L31'],
++    'Net reliability gap': ['H35','I36','L40'],
++    'Summary statistics': ['H42','H43','H44','H45','H46','H47','L47'],
++    'Weighted mean': ['H50','L50'],
++}.items():
++    print(label + ':')
++    for coord in coords:
++        print(f'  {coord}: {ws[coord].value}')
+
+session_id: 20260608_052620_548da0
+Completed. The updated workbook was saved here:
+
+/root/output/result.xlsx
+
+Inspection confirmed:
+- Task year headers H10:L10 are numeric years 2019, 2020, 2021, 2022, 2023.
+- Task series codes are in column D:
+  - Success rows 12-17: ATL_SUCCESS_REQ through FLX_SUCCESS_REQ
+  - Failure rows 19-24: ATL_FAIL_REQ through FLX_FAIL_REQ
+  - Capacity rows 26-31: ATL_COMP_CAP through FLX_COMP_CAP
+- Data sheet lookup layout:
+  - Header row: Data row 4
+  - Series codes: Data!D21:D38
+  - Year headers: Data!H4:L4
+  - Values: Data!H21:L38
+  - Data rows 21-38 contain one row per series code.
+
+Formula pattern used for lookup cells:
+
+=INDEX(Data!$H$21:$L$38,MATCH($D12,Data!$D$21:$D$38,0),MATCH(H$10,Data!$H$4:$L$4,0))
+
+Validation after reopening /root/output/result.xlsx without data_only:
+- Sheets are still exactly: ['Task', 'Data']
+- No new sheets were added.
+- All required formula cells in H12:L17, H19:L24, H26:L31, H35:L40, H42:L47, and H50:L50 contain formula strings.
+- Sample verified formulas:
+  - H12: =INDEX(Data!$H$21:$L$38,MATCH($D12,Data!$D$21:$D$38,0),MATCH(H$10,Data!$H$4:$L$4,0))
+  - L31: =INDEX(Data!$H$21:$L$38,MATCH($D31,Data!$D$21:$D$38,0),MATCH(L$10,Data!$H$4:$L$4,0))
+  - H35: =(H12-H19)/H26*100
+  - L40: =(L17-L24)/L31*100
+  - H42: =MIN(H35:H40)
+  - L47: =PERCENTILE(L35:L40,0.75)
+  - H50: =SUMPRODUCT(H35:H40,H26:H31)/SUM(H26:H31)
+  - L50: =SUMPRODUCT(L35:L40,L26:L31)/SUM(L26:L31)

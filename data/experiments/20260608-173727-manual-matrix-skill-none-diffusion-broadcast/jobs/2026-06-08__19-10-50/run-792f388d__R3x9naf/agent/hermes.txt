@@ -1,0 +1,269 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a//tmp/inspect_workbook.py → b//tmp/inspect_workbook.py
+@@ -0,0 +1,63 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++from pathlib import Path
++p=Path('/root/data/workbook.xlsx')
++wb=load_workbook(p, data_only=False)
++print('Sheet names:', wb.sheetnames)
++ws=wb['Task']
++print('\nTask D12:D17, D19:D24, D26:D31 (series codes):')
++for start,end in [(12,17),(19,24),(26,31)]:
++    print(f'D{start}:D{end}:')
++    for r in range(start,end+1):
++        print(f'  D{r} = {ws[f"D{r}"].value!r}')
++print('\nTask H10:L10 (year headers):')
++for c in range(ws['H10'].column, ws['L10'].column+1):
++    cell=ws.cell(10,c)
++    print(f'  {cell.coordinate} = {cell.value!r}')
++print('\nTask labels around blocks (A:G rows 10-50 non-empty):')
++for r in list(range(10,32))+list(range(34,51)):
++    vals=[]
++    for c in range(1,8):
++        v=ws.cell(r,c).value
++        if v is not None:
++            vals.append(f'{get_column_letter(c)}={v!r}')
++    if vals:
++        print(f'  row {r}: ' + ', '.join(vals))
++print('\nTask existing content in target ranges:')
++for rng in ['H12:L17','H19:L24','H26:L31','H35:L40','H42:L47','H50:L50']:
++    print(f'Range {rng}:')
++    for row in ws[rng]:
++        non=[]
++        for cell in row:
++            if cell.value is not None:
++                non.append(f'{cell.coordinate}={cell.value!r}')
++        print('  ' + (', '.join(non) if non else '(all empty)'))
++
++ds=wb['Data']
++print('\nData row 21 headers fully:')
++max_col=ds.max_column
++for c in range(1,max_col+1):
++    print(f'  {get_column_letter(c)}21 = {ds.cell(21,c).value!r}')
++print('\nData rows 22-38 sample/full non-empty:')
++for r in range(22,39):
++    vals=[]
++    for c in range(1,max_col+1):
++        v=ds.cell(r,c).value
++        if v is not None:
++            vals.append(f'{get_column_letter(c)}={v!r}')
++    print(f'  row {r}: ' + (', '.join(vals) if vals else '(empty)'))
++codes={ws.cell(r,4).value for start,end in [(12,17),(19,24),(26,31)] for r in range(start,end+1) if ws.cell(r,4).value is not None}
++years={ws.cell(10,c).value for c in range(ws['H10'].column, ws['L10'].column+1) if ws.cell(10,c).value is not None}
++print('\nHeuristic identification:')
++print('  Task codes:', sorted(map(str,codes)))
++print('  Task years:', sorted(map(str,years)))
++for c in range(1,max_col+1):
++    vals={ds.cell(r,c).value for r in range(22,39)}
++    overlap=len(vals & codes)
++    if overlap:
++        print(f'  possible series code col {get_column_letter(c)}: {overlap} matches; header={ds.cell(21,c).value!r}')
++year_strs={str(y) for y in years}
++for c in range(1,max_col+1):
++    h=ds.cell(21,c).value
++    if h in years or str(h) in year_strs:
++        print(f'  possible year value col {get_column_letter(c)}: header={h!r}')
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,85 @@
++from pathlib import Path
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++INPUT = Path('/root/data/workbook.xlsx')
++OUTPUT_DIR = Path('/root/output')
++OUTPUT = OUTPUT_DIR / 'result.xlsx'
++
++wb = load_workbook(INPUT, data_only=False)
++ws = wb['Task']
++ds = wb['Data']
++
++# Discovered workbook layout:
++# - Data row 4 contains the actual year headers (H4:L4).
++# - Data rows 21:38 contain the data records.
++# - Data column D contains series codes.
++# - Data columns H:L contain annual values for 2019:2023.
++data_first_row = 21
++data_last_row = 38
++series_col = 4  # D
++year_header_row = 4
++first_value_col = 8  # H
++last_value_col = 12  # L
++last_value_letter = get_column_letter(last_value_col)
++series_letter = get_column_letter(series_col)
++
++# Step 1: lookup formulas for source data blocks.
++lookup_blocks = [(12, 17), (19, 24), (26, 31)]
++for start_row, end_row in lookup_blocks:
++    for row in range(start_row, end_row + 1):
++        for col in range(first_value_col, last_value_col + 1):
++            col_letter = get_column_letter(col)
++            ws.cell(row=row, column=col).value = (
++                f'=INDEX(Data!$H${data_first_row}:${last_value_letter}${data_last_row}, '
++                f'MATCH($D{row}, Data!${series_letter}${data_first_row}:${series_letter}${data_last_row}, 0), '
++                f'MATCH({col_letter}$10, Data!$H${year_header_row}:${last_value_letter}${year_header_row}, 0))'
++            )
++
++# Step 2: net budget buffer = (Committed Funding - Operating Spend) / Approved Budget Base * 100.
++# Blocks verified by labels in Task!E12:E17, E19:E24, E26:E31.
++for offset, row in enumerate(range(35, 41)):
++    committed_row = 12 + offset
++    operating_row = 19 + offset
++    budget_base_row = 26 + offset
++    for col in range(first_value_col, last_value_col + 1):
++        col_letter = get_column_letter(col)
++        ws.cell(row=row, column=col).value = (
++            f'=({col_letter}{committed_row}-{col_letter}{operating_row})/{col_letter}{budget_base_row}*100'
++        )
++
++# Step 2b: summary statistics, assigned by labels in column E.
++stat_formulas = {
++    'minimum': 'MIN',
++    'maximum': 'MAX',
++    'median': 'MEDIAN',
++    'simple mean': 'AVERAGE',
++    '25th percentile': 'PERCENTILE_25',
++    '75th percentile': 'PERCENTILE_75',
++}
++for row in range(42, 48):
++    label = str(ws.cell(row=row, column=5).value or '').strip().lower()
++    stat = stat_formulas.get(label)
++    if not stat:
++        raise ValueError(f'Unrecognized statistic label in Task!E{row}: {label!r}')
++    for col in range(first_value_col, last_value_col + 1):
++        col_letter = get_column_letter(col)
++        data_range = f'{col_letter}35:{col_letter}40'
++        if stat == 'PERCENTILE_25':
++            formula = f'=PERCENTILE({data_range},0.25)'
++        elif stat == 'PERCENTILE_75':
++            formula = f'=PERCENTILE({data_range},0.75)'
++        else:
++            formula = f'={stat}({data_range})'
++        ws.cell(row=row, column=col).value = formula
++
++# Step 3: weighted mean using Approved Budget Base as weights.
++for col in range(first_value_col, last_value_col + 1):
++    col_letter = get_column_letter(col)
+… omitted 7 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/verify_workbook.py → b//tmp/verify_workbook.py
+@@ -0,0 +1,43 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/output/result.xlsx'
++wb = load_workbook(path, data_only=False)
++ws = wb['Task']
++print('Workbook:', path)
++print('Sheet names:', wb.sheetnames)
++print('\nModified-cell formulas:')
++for rng in ['H12:L17','H19:L24','H26:L31','H35:L40','H42:L47','H50:L50']:
++    print(f'Range {rng}:')
++    for row in ws[rng]:
++        print('  ' + ', '.join(f'{cell.coordinate}={cell.value!r}' for cell in row))
++
++bad_literals = {'#NAME?', '#REF!', '#VALUE!'}
++found = []
++for ws2 in wb.worksheets:
++    for row in ws2.iter_rows():
++        for cell in row:
++            if cell.value in bad_literals:
++                found.append((ws2.title, cell.coordinate, cell.value))
++print('\nLiteral error string check:', 'PASS - none found' if not found else f'FAIL - {found}')
++
++# Additional syntax/constraint checks over the cells we modified.
++issues = []
++for rng in ['H12:L17','H19:L24','H26:L31']:
++    for row in ws[rng]:
++        for cell in row:
++            v = cell.value
++            if not (isinstance(v, str) and v.startswith('=INDEX(') and 'MATCH(' in v):
++                issues.append((cell.coordinate, 'lookup formula is not INDEX/MATCH', v))
++for rng in ['H42:L47']:
++    for row in ws[rng]:
++        for cell in row:
++            v = cell.value
++            if isinstance(v, str) and ('PERCENTILE.INC' in v or 'PERCENTILE.EXC' in v):
++                issues.append((cell.coordinate, 'wrong percentile function', v))
++for rng in ['H12:L17','H19:L24','H26:L31','H35:L40','H42:L47','H50:L50']:
++    for row in ws[rng]:
++        for cell in row:
++            if not (isinstance(cell.value, str) and cell.value.startswith('=')):
++                issues.append((cell.coordinate, 'modified cell does not contain a formula', cell.value))
++print('Formula constraint check:', 'PASS' if not issues else f'FAIL - {issues}')
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -19,21 +19,26 @@
+ data_last_row = 38
+ series_col = 4  # D
+ year_header_row = 4
++first_data_col = 1  # A
+ first_value_col = 8  # H
+ last_value_col = 12  # L
+ last_value_letter = get_column_letter(last_value_col)
+ series_letter = get_column_letter(series_col)
++first_data_letter = get_column_letter(first_data_col)
+ 
+ # Step 1: lookup formulas for source data blocks.
++# Use the full discovered data row width A:L as the INDEX array so the formula
++# follows the workbook contract; MATCH ranges use the discovered series-code
++# column D and actual year header row 4.
+ lookup_blocks = [(12, 17), (19, 24), (26, 31)]
+ for start_row, end_row in lookup_blocks:
+     for row in range(start_row, end_row + 1):
+         for col in range(first_value_col, last_value_col + 1):
+             col_letter = get_column_letter(col)
+             ws.cell(row=row, column=col).value = (
+-                f'=INDEX(Data!$H${data_first_row}:${last_value_letter}${data_last_row}, '
++                f'=INDEX(Data!${first_data_letter}${data_first_row}:${last_value_letter}${data_last_row}, '
+                 f'MATCH($D{row}, Data!${series_letter}${data_first_row}:${series_letter}${data_last_row}, 0), '
+-                f'MATCH({col_letter}$10, Data!$H${year_header_row}:${last_value_letter}${year_header_row}, 0))'
++                f'MATCH({col_letter}$10, Data!${first_data_letter}${year_header_row}:${last_value_letter}${year_header_row}, 0))'
+             )
+ 
+ # Step 2: net budget buffer = (Committed Funding - Operating Spend) / Approved Budget Base * 100.
+
+session_id: 20260608_111315_d1d6c6
+Done.
+
+Created:
+- /root/data/workbook_backup.xlsx
+- /root/solve.py
+- /root/output/result.xlsx
+
+Workbook inspection findings:
+- Sheets: Task, Data
+- Task years H10:L10: 2019, 2020, 2021, 2022, 2023
+- Task source blocks:
+  - D12:D17 = committed funding series codes
+  - D19:D24 = operating spend series codes
+  - D26:D31 = approved budget base series codes
+- Data layout:
+  - Data rows: 21:38
+  - Series code column: D
+  - Actual year header row: row 4
+  - Year/value columns: H:L
+  - Full lookup width used in formulas: A:L
+
+Generated formulas:
+- H12:L17, H19:L24, H26:L31 use INDEX/MATCH.
+- H35:L40 use net budget buffer formulas.
+- H42:L47 use statistic formulas matched to labels:
+  - Minimum
+  - Maximum
+  - Median
+  - Simple mean
+  - 25th percentile using PERCENTILE
+  - 75th percentile using PERCENTILE
+- H50:L50 use weighted mean formulas with SUMPRODUCT.
+
+Verification run:
+- Command succeeded:
+  - mkdir -p /root/output
+  - python3 /root/solve.py
+- Reopened /root/output/result.xlsx with openpyxl.
+- Confirmed formulas are present in all modified cells.
+- Confirmed no literal #NAME?, #REF!, or #VALUE! strings were found.
+- Confirmed no extra sheets were added; workbook still has only Task and Data.
