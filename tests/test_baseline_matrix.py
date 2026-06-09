@@ -5,9 +5,11 @@ import tomllib
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
 import mediated_coevo.cli.matrix as matrix_module
 import mediated_coevo.cli.run as run_module
+from mediated_coevo.main import app
 from mediated_coevo.core.config import (
     Config,
     ConfigLoadError,
@@ -278,6 +280,91 @@ def test_matrix_command_rejects_row_local_diffusion_overrides(tmp_path):
             diffusion_policy="random_k",
             config_dir=tmp_path / "config",
         )
+
+
+@pytest.mark.parametrize("flag", ["--list", "-l"])
+def test_matrix_list_prints_indexed_rows_without_runtime_setup(monkeypatch, flag):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("listing rows should not load runtime config")
+
+    monkeypatch.setattr(matrix_module, "_load_config_or_bad_parameter", fail_if_called)
+
+    result = CliRunner().invoke(app, ["matrix", flag])
+
+    assert result.exit_code == 0, result.output
+    assert "Matrix rows:" in result.output
+    assert "0: skill_none_diffusion_none" in result.output
+    assert "7: skill_all_top_k_similarity" in result.output
+    assert "skill update: none, diffusion policy: top_k_similarity" in result.output
+    assert "skill update: all, diffusion policy: top_k_similarity" in result.output
+
+
+def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+    captured: dict[str, object] = {}
+    repository = object()
+
+    class Selection:
+        task_ids = ["task-A"]
+        family = None
+        task_set = None
+
+    class Factory:
+        def __init__(self, project_root):
+            self.project_root = project_root
+
+        def create_matrix_dir(self, *, seed, data_dir):
+            captured["matrix_seed"] = seed
+            captured["matrix_data_dir"] = data_dir
+            return tmp_path / "matrix"
+
+    def capture_matrix_build(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        matrix_module,
+        "prepare_llm_credentials_or_exit",
+        lambda config: config,
+    )
+    monkeypatch.setattr(matrix_module, "ensure_harbor_available", lambda config: None)
+    monkeypatch.setattr(
+        matrix_module,
+        "build_benchmark_repo",
+        lambda project_root, config: repository,
+    )
+    monkeypatch.setattr(
+        matrix_module,
+        "resolve_task_selection",
+        lambda **kwargs: Selection(),
+    )
+    monkeypatch.setattr(matrix_module, "ExperimentFactory", Factory)
+    monkeypatch.setattr(
+        matrix_module,
+        "build_matrix_runtimes",
+        capture_matrix_build,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "matrix",
+            "--task",
+            "task-A",
+            "--index",
+            "3",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["preset_names"] == [BASELINE_PRESET_NAMES[3]]
+    assert captured["benchmark_repo"] is repository
+    assert captured["matrix_seed"] == 42
+    assert "Rows: skill_none_top_k_similarity" in result.output
+    assert "skill_all_top_k_similarity" not in result.output
 
 
 @pytest.mark.parametrize(
@@ -829,6 +916,36 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
     (row_skill_dirs[0] / "executor" / "SKILL.md").write_text("# Changed\n")
     assert (tmp_path / "skills" / "executor" / "SKILL.md").read_text() == "# Executor\n"
     assert (row_skill_dirs[1] / "executor" / "SKILL.md").read_text() == "# Executor\n"
+
+
+def test_matrix_runtimes_can_build_only_selected_presets(tmp_path):
+    _write_skill(tmp_path, "executor", "# Executor\n")
+    _write_skill(tmp_path, "planner", "# Planner\n")
+    _write_skill(tmp_path, "mediator", "# Mediator\n")
+    config = _config()
+    config.paths.skills_dir = "skills"
+    config.paths.data_dir = "data"
+    config.paths.benchmarks_dir = "benchmarks/skillflow"
+    matrix_dir = tmp_path / "data" / "experiments" / "matrix"
+    benchmark_repo = SkillFlowRepository(
+        root_dir=tmp_path / "benchmarks" / "skillflow",
+        task_dirs=["tasks"],
+    )
+    selected_preset = BASELINE_PRESET_NAMES[3]
+
+    rows = build_matrix_runtimes(
+        factory=ExperimentFactory(tmp_path),
+        base_config=config,
+        seed=123,
+        matrix_dir=matrix_dir,
+        benchmark_repo=benchmark_repo,
+        preset_names=[selected_preset],
+    )
+
+    assert [row.preset_name for row in rows] == [selected_preset]
+    assert rows[0].runtime.experiment_dir == matrix_dir / selected_preset
+    assert (matrix_dir / selected_preset / "config.toml").is_file()
+    assert not (matrix_dir / BASELINE_PRESET_NAMES[0]).exists()
 
 
 class _NoCallPlanner:

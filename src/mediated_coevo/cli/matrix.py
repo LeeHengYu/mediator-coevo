@@ -30,6 +30,7 @@ from mediated_coevo.cli.output import (
 )
 from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
 from mediated_coevo.experiment.baselines import (
+    BASELINE_PRESETS,
     BASELINE_PRESET_NAMES,
     get_baseline_preset,
 )
@@ -120,11 +121,33 @@ def matrix(
             help="Override diffusion.top_k_neighbors.",
         ),
     ] = None,
+    list_rows: Annotated[
+        bool,
+        typer.Option(
+            "--list",
+            "-l",
+            help="List matrix row indexes and row-local config, then exit.",
+        ),
+    ] = False,
+    row_index: Annotated[
+        int | None,
+        typer.Option(
+            "--index",
+            "-i",
+            min=0,
+            max=len(BASELINE_PRESET_NAMES) - 1,
+            help="Run only the matrix row at this zero-based index.",
+        ),
+    ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Run the eight-row learned-mediator diffusion matrix."""
     setup_logging(verbose)
+    if list_rows:
+        _print_matrix_rows()
+        return
+
     if (
         diffusion_enabled is not None
         or diffusion_policy is not None
@@ -135,6 +158,7 @@ def matrix(
             "diffusion.graph; use --diffusion-max-artifacts or "
             "--diffusion-top-k-neighbors for shared matrix knobs"
         )
+    preset_names = _selected_preset_names(row_index)
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides=_run_config_overrides(
@@ -152,7 +176,7 @@ def matrix(
             harbor_agent_setup_timeout_multiplier=None,
         ),
     )
-    for preset_name in BASELINE_PRESET_NAMES:
+    for preset_name in preset_names:
         preset = get_baseline_preset(preset_name)
         validate_experiment_design(
             condition=preset.condition_name,
@@ -178,6 +202,7 @@ def matrix(
         seed=seed,
         matrix_dir=matrix_dir,
         benchmark_repo=repository,
+        preset_names=preset_names,
     )
 
     print_task_selection(selection)
@@ -185,7 +210,7 @@ def matrix(
     console.print(f"[bold]Seed per row:[/] {seed}")
     print_experiment_controls(config)
     console.print(f"[bold]Matrix:[/] {matrix_dir}")
-    console.print(f"[bold]Rows:[/] {', '.join(BASELINE_PRESET_NAMES)}")
+    console.print(f"[bold]Rows:[/] {', '.join(preset_names)}")
     console.print("[bold]Row-local diffusion:[/] enabled, policy, graph")
 
     for row in rows:
@@ -228,6 +253,39 @@ def matrix(
             history_store=row.runtime.orchestrator.history_store,
         )
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
+
+
+def _print_matrix_rows() -> None:
+    console.print("[bold]Matrix rows:[/]")
+    for index, preset in enumerate(BASELINE_PRESETS):
+        skill_updates = preset.skill_updates.model_dump()
+        enabled_roles = [
+            role for role, enabled in skill_updates.items() if enabled
+        ]
+        if not enabled_roles:
+            skill_update_label = "none"
+        elif len(enabled_roles) == len(skill_updates):
+            skill_update_label = "all"
+        else:
+            skill_update_label = ",".join(enabled_roles)
+
+        console.print(
+            f"  {index}: {preset.name} "
+            f"(skill update: {skill_update_label}, "
+            f"diffusion policy: {preset.diffusion_policy}, "
+            f"diffusion graph: {preset.diffusion_graph})",
+            soft_wrap=True,
+        )
+
+
+def _selected_preset_names(row_index: int | None) -> list[str]:
+    if row_index is None:
+        return list(BASELINE_PRESET_NAMES)
+    if row_index < 0 or row_index >= len(BASELINE_PRESET_NAMES):
+        raise typer.BadParameter(
+            f"matrix row index must be between 0 and {len(BASELINE_PRESET_NAMES) - 1}"
+        )
+    return [BASELINE_PRESET_NAMES[row_index]]
 
 
 def register_matrix_command(app: typer.Typer) -> None:

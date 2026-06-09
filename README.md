@@ -371,11 +371,17 @@ SkillFlow task selection, seed, model config, and budget config. Use it when you
 want the fixed `skill_updates x diffusion_policy` design rather than one manual
 `run` condition.
 
+Use `-l` or `--list` to display all row setup.
+
+Run only one indexed row while keeping the usual task selectors and shared
+controls, run all 8 rows if ignored (default):
+
 ```bash
 uv run medcoevo matrix \
-  --family Weighted-Risk-Assessment \
-  --iterations 3 \
+  --task smoke-skillflow \
+  --iterations 1 \
   --seed 42 \
+  --index 3 \
   --diffusion-max-artifacts 3 \
   --diffusion-top-k-neighbors 3
 ```
@@ -386,21 +392,21 @@ For a cheap smoke check, use a single local task and one iteration:
 uv run medcoevo matrix \
   --task smoke-skillflow \
   --iterations 1 \
-  --seed 42
+  --seed 1
 ```
 
 Matrix rows:
 
-| Preset                         | Condition          | Skill updates               | Diffusion policy    | Diffusion graph    |
-| ------------------------------ | ------------------ | --------------------------- | ------------------- | ------------------ |
-| `skill_none_diffusion_none`    | `learned_mediator` | `none`                      | `none`              | `none`             |
-| `skill_none_capped_broadcast`  | `learned_mediator` | `none`                      | `capped_broadcast`  | `none`             |
-| `skill_none_random_k`          | `learned_mediator` | `none`                      | `random_k`          | `none`             |
-| `skill_none_top_k_similarity`  | `learned_mediator` | `none`                      | `top_k_similarity`  | `task_similarity`  |
-| `skill_all_diffusion_none`     | `learned_mediator` | `executor,planner,mediator` | `none`              | `none`             |
-| `skill_all_capped_broadcast`   | `learned_mediator` | `executor,planner,mediator` | `capped_broadcast`  | `none`             |
-| `skill_all_random_k`           | `learned_mediator` | `executor,planner,mediator` | `random_k`          | `none`             |
-| `skill_all_top_k_similarity`   | `learned_mediator` | `executor,planner,mediator` | `top_k_similarity`  | `task_similarity`  |
+| Index | Preset                         | Condition          | Skill updates               | Diffusion policy    | Diffusion graph    |
+| ----- | ------------------------------ | ------------------ | --------------------------- | ------------------- | ------------------ |
+| `0`   | `skill_none_diffusion_none`    | `learned_mediator` | `none`                      | `none`              | `none`             |
+| `1`   | `skill_none_capped_broadcast`  | `learned_mediator` | `none`                      | `capped_broadcast`  | `none`             |
+| `2`   | `skill_none_random_k`          | `learned_mediator` | `none`                      | `random_k`          | `none`             |
+| `3`   | `skill_none_top_k_similarity`  | `learned_mediator` | `none`                      | `top_k_similarity`  | `task_similarity`  |
+| `4`   | `skill_all_diffusion_none`     | `learned_mediator` | `executor,planner,mediator` | `none`              | `none`             |
+| `5`   | `skill_all_capped_broadcast`   | `learned_mediator` | `executor,planner,mediator` | `capped_broadcast`  | `none`             |
+| `6`   | `skill_all_random_k`           | `learned_mediator` | `executor,planner,mediator` | `random_k`          | `none`             |
+| `7`   | `skill_all_top_k_similarity`   | `learned_mediator` | `executor,planner,mediator` | `top_k_similarity`  | `task_similarity`  |
 
 Each row gets an isolated copy of the skill tree under its experiment
 directory and writes its own `config.toml`, metrics, summaries, diffusion
@@ -408,8 +414,8 @@ artifacts, and graph snapshots.
 
 `matrix` accepts the same task selectors as `run`, plus shared controls:
 `--iterations`, `--seed`, `--coevo-interval`, `--advisor-buffer-max`,
-`--diffusion-max-artifacts`, `--diffusion-top-k-neighbors`, `--config-dir`, and
-`--verbose`.
+`--diffusion-max-artifacts`, `--diffusion-top-k-neighbors`, `--index`/`-i`,
+`--list`/`-l`, `--config-dir`, and `--verbose`.
 
 Do not pass `--condition`, `--skill-updates`, `--diffusion-enabled`,
 `--diffusion-policy`, or `--diffusion-graph` to `matrix`. Those settings are

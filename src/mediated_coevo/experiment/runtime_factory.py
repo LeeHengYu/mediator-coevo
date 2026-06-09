@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -228,10 +229,14 @@ def build_matrix_runtimes(
     matrix_dir: Path,
     benchmark_repo: SkillFlowRepository,
     harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
+    preset_names: Sequence[str] | None = None,
 ) -> list[MatrixRuntime]:
-    """Build all matrix rows with isolated skill stores."""
+    """Build matrix rows with isolated skill stores."""
     rows: list[MatrixRuntime] = []
-    for preset_name in BASELINE_PRESET_NAMES:
+    selected_preset_names = (
+        BASELINE_PRESET_NAMES if preset_names is None else preset_names
+    )
+    for preset_name in selected_preset_names:
         preset = get_baseline_preset(preset_name)
         row_config = preset.build_config(base_config, seed=seed)
         runtime = factory.build(
