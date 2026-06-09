@@ -1,0 +1,65 @@
+{
+  "name": "TBIK（Tree-Based Invariant Kernels，树状不变核）。别名/变体：TP-Invariant Kernels、TP-不变矩阵乘/归约原语、TP_INVARIANT_MATMUL；论文标题《Deterministic Inference across Tensor Parallel Sizes That Eliminates Training–Inference Mismatch（跨张量并行规模的确定性推理，消除训练—推理不匹配）》（arXiv:2511.17826）。配套代码仓库 nanomaoli/llm_reproducibility。",
+
+  "type": "control（控制/缓解方法）——一套确定性 GPU 内核（Tree-Based MatMul + Tree-Based All-Reduce），用于消除张量并行（TP）规模变化引起的非确定性；同时兼具 framework（vLLM/FSDP 集成补丁）与 position_paper（论证“批不变性不足、TP 不变性是缺失的最后一块拼图”）属性。",
+
+  "year": "2025年11月18日首次在 arXiv 发布（v1，2511.17826）；v2 于 2026年5月更新（含自定义 tree all-reduce、NVLink 支持）。配套代码仓库自 2025年6月创建。前置工作（Yuan 等 NeurIPS 2025 Oral，arXiv:2506.09501）于 2025年6月发布。",
+
+  "venue": "arXiv 预印本（cs.LG，2511.17826）；GitHub 官方仓库 nanomaoli/llm_reproducibility；ICML 风格排版（疑似投稿 ICML）。作者机构关联前置工作发表于 NeurIPS 2025（Oral）。",
+
+  "org_authors": "作者：Ziyang Zhang、Xinheng Ding、Jiayi Yuan、Rixin Liu、Huizi Mao、Jiarong Xing、Zirui Liu（通讯/资深作者 Zirui Liu、Jiarong Xing）。团队与 Rice University / 相关高校实验室关联（与 NeurIPS 2025 Oral 论文 arXiv:2506.09501 同一核心团队，含 Xia Hu 等）。",
+
+  "url_repo": "论文：https://arxiv.org/abs/2511.17826 ；HTML 全文：https://arxiv.org/html/2511.17826v2 ；官方代码：https://github.com/nanomaoli/llm_reproducibility ；项目博客：https://festive-clam-15f.notion.site/Enabling-Large-Scale-True-on-Policy-RL-by-Bringing-Tensor-Parallelism-to-Order-2b039f5cabfa807b9770fcbe339f0f9b",
+
+  "definition": "TBIK 是一组在 Triton 中实现的确定性矩阵乘法与归约内核，旨在解决“张量并行（TP）规模变化导致 LLM 推理非确定性”这一问题。即使在贪婪解码下，现有服务框架（vLLM/SGLang）在 TP 规模或批大小变化时，会因浮点运算的非结合性与跨 GPU 归约顺序不一致而对相同输入产生不同输出。先前的“批不变内核（BIO）”只解决了批大小维度，TBIK 进一步通过强制一个与 GPU 数无关的固定二叉树归约拓扑，保证跨任意 TP 规模的逐位（bit-wise）相同结果，并将其集成进 vLLM（rollout）与 FSDP（training），从而在 RL 中实现 rollout 与 training 引擎之间零概率分歧，达成真正的 on-policy 训练。",
+
+  "domain_task_type": "领域：LLM 推理/服务系统的可复现性与确定性、强化学习（RL）训练—推理一致性、GPU 内核工程。任务类型：确定性推理内核（确定性矩阵乘 + 确定性 all-reduce）；目标能力/属性：跨系统配置（TP 规模、批大小、GPU 类型）的逐位可复现性，以及 RL 中 rollout（vLLM，TP>1）与 training（FSDP，TP=1）引擎之间的精度对齐。直接影响的下游场景：LLM-as-a-judge 评测、多智能体系统、RL（GRPO/REINFORCE/PPO 类）训练稳定性。",
+
+  "how_it_works": "核心洞见：浮点 IEEE 754 加法非结合（(a+b)+c≠a+(b+c)），TP 规模改变会改变行并行（row-parallel）层（如 o_proj、down_proj）的跨 GPU 归约顺序，从而改变结果；列并行（column-parallel）层（qkv_proj、up_proj、gate_proj、lm_head）因各 GPU 输出相互独立、不沿共享维累加，故对 TP 规模不敏感。TBIK 因此协同设计 intra-GPU（核内）与 inter-GPU（跨卡）归约，使全局浮点累加顺序与 TP 规模无关。机制两部分：(1) Tree-Based MatMul 内核（Triton）：将 K 维分块为 T_K 个 tile，每 GPU 处理 T_K/C 个 tile（C 为 GPU 数），核内采用固定满二叉树归约（深度 L=log2(T_K/C)），用 L 个累加器缓冲区与计数器，当某层计数达 2 触发 carry-over 向上一层做成对累加，最终结果存于 S[L]；当 T_K 非 2 的幂时引入自适应参数 K_first 控制首层归约数量，只要 T_K/(C·K_first) ≥ TP_max 即保持累加顺序不变。(2) Tree-Based All-Reduce：跨 GPU 采用与核内相同的二叉树拓扑（reduce 阶段 + broadcast 阶段，world size W=2^q），不直接用 NCCL 内置 tree all-reduce（因 NCCL 仅在节点间用树、节点内仍默认链式归约）。论文给出归约顺序不变性的理论证明（Theorem 1，对 C 为 2 的幂做数学归纳，证明分层归约与全局归约执行完全相同的成对 ⊕ 序列，结果逐位相同）。集成时：列并行层用 BIO，行并行层用 TBIK，注意力固定 TritonAttention tile 大小并关闭 chunked prefill、统一 prefill/decode 注意力核；RMSNorm/RoPE/SiLU 在 FSDP 复用 vLLM 同款实现以对齐。",
+
+  "contamination_risk": "不适用/极低。TBIK 是确定性推理内核与系统级控制方法，不是数据集型基准，因此不存在训练数据污染问题。其实验用到的评测数据集 AIME24、AMC23、GSM8K 本身可能存在数学推理基准的污染风险，但这与 TBIK 方法本身的有效性无关——TBIK 度量的是“同一模型在不同系统配置下输出是否逐位一致”，与答案是否被模型记住无关。",
+
+  "leakage_findings": "不适用。本工作不涉及评测内答案可达性/泄漏（in-eval leakage）问题；它关注的是数值非确定性而非信息泄漏。需要注意的相关现象是：作者明确指出 vLLM v1 默认开启且无法关闭的 chunked prefill 会隐式改变计算/调度顺序，即使底层内核确定也会破坏可复现性（引用 vLLM issue #18547），这是“隐藏的系统行为影响输出”的一类问题，与泄漏类别 G 有方法论上的相关性（评测harness的隐藏状态可影响结果）。",
+
+  "reproducibility_properties": "这正是本工作的核心主题。确定性级别：BIO+TBIK 达到逐位（bitwise-identical）确定性——跨 4 个 TP 规模（1/2/4/8）× 3 个批大小（8/16/32）共 12 种配置、跨两类 GPU（RTX PRO 6000 与 L40S）、跨 vLLM(TP=4) 与 FSDP(TP=1) 引擎，Maximum Probability Divergence 严格为 0，Count of Unique Outputs 降为 1。版本/种子固定：实验固定随机种子=42，eager 模式（禁用 CUDA Graph）、关闭 prefix caching、关闭/规避 chunked prefill。环境漂移暴露：作者明确暴露并讨论了 chunked prefill、CUDA Graph、GPU 架构（Hopper wgmma）、Split-K vs Non-Split-K、block size、continuous batching、collective all-reduce 等多种非确定性来源。容器化：未明确强调容器/镜像摘要，但提供完整可复现代码与 apply_patches() 一键补丁。",
+
+  "statistical_treatment": "报告的是确定性度量而非传统统计显著性检验。两项主要指标：(1) Count of Unique Outputs U（K 次/多配置运行下不同 token 序列数，U=1 表示完全一致）；(2) Maximum Probability Divergence（各位置 top-5 预测概率的最大分歧的全位置平均，0 表示逐位一致）。表 1/2（L40S）与表 3/4（RTX PRO 6000）给出跨模型平均值。前置动机部分引用了“仅改 TP 规模在 AIME24 上对 Qwen3-8B 造成 >4% 准确率波动”（图 2 给出不同 TP 下的准确率标准差），以及先前工作报告的“最高 9% AIME 准确率波动”。未报告置信区间或 p 值，因其论点恰是“理想情况下方差应被工程手段消除为 0”。",
+
+  "seed_variance_sensitivity": "作者固定随机种子=42 做随机采样（reasoning 模型 temperature=0.6/top-p=0.95/top-k=20；非 reasoning 模型 temperature=0.7/top-p=0.8/top-k=20）。关键发现：在固定种子与解码参数下，仅改变系统配置（TP/批大小）仍导致 run-to-run/config-to-config 的输出分歧——BF16 下 AIME24 上 Count of Unique Outputs 高达 9.0–12.0（接近配置总数），AMC23 上 8.0–11.2；BIO 仅降至约 6.75–7.97；BIO+TBIK 降为 1。即“固定种子不足以保证确定性”，系统配置（尤其 TP 规模）才是主导方差来源。准确率层面，仅改 TP 规模导致 Qwen3-8B 在 AIME24 上 >4% 波动（先前相关工作报告最高 9%）。",
+
+  "ablation_practices": "做了较充分的组件消融：(1) 三方法对比——vanilla BF16 / 仅 BIO / BIO+TBIK，量化各自的 Unique Outputs 与 Probability Divergence。(2) 性能开销细粒度分解（附录 H）：5 种配置——BF16、BIO、BIO+仅 Tree All-Reduce、BIO+仅 Tree MatMul、BIO+两者全开；得出 Tree MatMul 贡献 2–25% 端到端开销、Tree All-Reduce 最多 ~10% 开销，BIO 贡献 10–33%、纯 TBIK 额外 5–30%，合计 22–63%。(3) 跨 GPU 类型（L40S vs RTX PRO 6000）一致性验证。(4) block size 网格搜索（[16,32,64,128,256]，按 dtype 选最优）。(5) RL 端到端消融（BF16 vs BIO vs TBIK 的 KL、Reward、Pass@1、Entropy 曲线）。混杂控制：对 Qwen3-32B 因显存设 max_num_seqs=1 以隔离 chunked-prefill 调度行为对评测的干扰。",
+
+  "known_pitfalls_criticisms": "主要局限/批评点（多由作者自陈）：(1) 性能开销显著——BIO+TBIK 相对 vanilla BF16 端到端延迟增加 22%–63%；Tree-Based MatMul 在小 M 时因固定 block 约束慢于 cuBLAS，大批量下仅达 cuBLAS 约 63% 性能（BF16 约 120 TFLOPS vs cuBLAS 190 TFLOPS）。作者称当前实现“主要用于证明 TP 不变确定性可达”，尚未做 warp specialization、block tuning 等深度优化。(2) 适用范围受限：当前仅支持 BF16/FP16/FP32，尚不支持量化（AWQ/GPTQ/KIVI 等，列为 future work）；要求 TP 规模 C 与 tile 数为 2 的幂（或借 K_first 放宽），理论证明假设 C 为 2 的幂且 tile 在 GPU 间均分。(3) 依赖关闭/规避 vLLM 的关键优化（chunked prefill、CUDA Graph、prefix caching），这些在生产高吞吐部署中通常开启，关闭会进一步降速；vLLM v1 默认开启 chunked prefill 且无法用户禁用，是实践障碍（vLLM issue #18547）。(4) 代码目前仅在 Qwen3-1.7B 上充分测试（RL 部分），更大模型/MoE 的工程验证有限——而作者同时指出 MoE 因路由对概率扰动极敏感，问题更严重，意味着 TBIK 在 MoE 上的必要性更高但验证更少。(5) Tree All-Reduce 的低延迟版本依赖 NVLink。(6) 与算法级替代方案（FP16、TIS、SIS、GSPO 等重要性采样/序列级优化）相比，TBIK 走的是“内核级根治”路线，开销更大但唯一能给出逐位一致的真 on-policy；作者承认算法级方法只能部分缓解、无法做到逐位一致。",
+
+  "recommended_mitigations": "作者/方法给出的最佳实践与缓解：(1) 在行并行层（o_proj、down_proj）用 Tree-Based MatMul，在列并行层（qkv/up/gate/lm_head）用 BIO，并配合 Tree-Based All-Reduce，统一核内与跨卡归约拓扑。(2) RL 中将同一套确定性内核同时打补丁到 vLLM 与 FSDP，并对齐 RMSNorm/RoPE/SiLU/Attention 实现，关闭 chunked prefill、统一 prefill/decode 注意力核，实现 rollout↔training 逐位一致（零 KL）。(3) 推理侧用 eager 模式、关闭 CUDA Graph 与 prefix caching、固定种子。(4) 通过 apply_patches() 按环境变量（VLLM_BATCH_INVARIANT=1、VLLM_TP_INVARIANT=1、ALIGN_TRAIN_INFERENCE=1）一键启用。(5) 性能可通过 block size 调优、warp specialization 等进一步优化。(6) 对显存受限大模型，设 max_num_seqs=1 隔离调度非确定性。未来：扩展到量化数据类型，将确定性从 good-to-have 升级为 must-have。",
+
+  "adoption_influence": "新发布（2025年11月），引用与衍生工作仍在早期累积。配套 GitHub 仓库 nanomaoli/llm_reproducibility 约 89 stars、6 forks、5 名贡献者（截至抓取时）。建立在被广泛关注的两项前置工作之上并与之同源/互补：Thinking Machines Lab《Defeating Nondeterminism in LLM Inference》（He, 2025，提出 batch-invariant 内核，引发社区对确定性推理的高关注，并被 SGLang 2025-09 确定性推理博客采纳）与 Yuan 等《Understanding and Mitigating Numerical Sources of Nondeterminism in LLM Inference / Give Me FP32 or Give Me Death》（NeurIPS 2025 Oral，arXiv:2506.09501，报告最高 9% AIME 波动）。TBIK 被定位为“批不变性之后、走向完全确定性推理的最后一块拼图（TP 不变性）”。已被第三方知识聚合站（Emergent Mind）专门收录条目，作者在 LinkedIn 推广。",
+
+  "key_citations": "1) Zhang et al., 'Deterministic Inference across Tensor Parallel Sizes That Eliminates Training–Inference Mismatch'（TBIK 原论文）https://arxiv.org/abs/2511.17826 ；2) 官方代码 https://github.com/nanomaoli/llm_reproducibility ；3) He & Thinking Machines Lab, 'Defeating Nondeterminism in LLM Inference'（批不变内核/BIO 起点）https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/ ；4) Yuan et al., 'Understanding and Mitigating Numerical Sources of Nondeterminism in LLM Inference'（NeurIPS 2025 Oral；9% AIME 波动）https://arxiv.org/abs/2506.09501 ；5) Yao et al., 'Your efficient RL framework secretly brings you off-policy RL training' https://fengyao.notion.site/off-policy-rl",
+
+  "relevance_to_mediator_coevo": "高度相关。mediator-coevo 是多智能体/协同进化系统，其评测既可能用 LLM-as-a-judge，又可能涉及 RL 式自我改进与多智能体 rollout——这三类正是本论文点名的“确定性最关键”的场景。关键启示：(1) 若 mediator 与各 agent 在评测/训练时使用不同 TP 规模或不同引擎（如 vLLM rollout vs FSDP/training），即便同一权重、同一种子、贪婪解码，也会出现逐位不一致，导致多智能体轨迹分叉、调试困难、coevolution 信号被数值噪声污染；(2) 协同进化若含 RL 更新，rollout↔training 的概率不匹配会把 on-policy 隐式变成 off-policy，可能导致奖励/训练崩溃——这与本任务 note 中“RL train(TP=1)/rollout(TP>1) mismatch collapses training”直接对应；(3) 因此 mediator-coevo 的评测harness必须固定并记录 TP 规模、引擎、批大小等系统配置，或在关键复现性实验中启用 TBIK/BIO 类确定性内核，否则不同硬件/部署下的对比结果不可比。",
+
+  "actionable_checklist": "- 做：在评测harness中显式记录并固定张量并行规模（TP size）、批大小、推理引擎与版本、GPU 架构、精度（dtype），并将其纳入结果元数据——仅固定 temperature/seed 不足以保证可复现。\n- 做：当训练（FSDP/TP=1）与 rollout（vLLM/SGLang，TP>1）使用不同并行策略时，假定二者概率分布默认不一致；在 RL/coevolution 实验中度量 rollout↔training 的 KL 散度或 per-token 概率差，若非零则视为 off-policy 风险。\n- 做：对需要逐位可复现的关键实验，启用确定性内核栈——列并行层用 BIO、行并行层用 Tree-Based MatMul，并配合 Tree-Based All-Reduce；在 vLLM 用 eager 模式、关闭 CUDA Graph/prefix caching/chunked prefill、统一 prefill/decode 注意力核。\n- 做：用“Count of Unique Outputs（=1 为理想）”与“Maximum Probability Divergence（=0 为逐位一致）”作为复现性回归指标，跨多 TP/批大小/GPU 配置回归测试。\n- 做：在结论稳健性敏感时，跨至少两类 GPU 验证一致性（论文用 L40S 与 RTX PRO 6000）。\n- 不要：假设贪婪解码或固定种子=确定性——TP/批大小/调度（chunked prefill）变化会破坏它。\n- 不要：直接比较不同 TP 规模/不同引擎下产生的 agent 输出或奖励，除非已对齐数值（否则差异可能纯属浮点归约顺序噪声）。\n- 不要：忽视 MoE 模型——小概率扰动会改变专家路由，使非确定性后果被放大。\n- 注意权衡：完全确定性内核会带来约 22–63% 的端到端延迟开销，应仅在复现性关键的对照实验/RL 对齐中开启，常规高吞吐评测可改为“固定+记录系统配置”的较轻方案。\n- 注意范围：当前 TBIK 仅支持 BF16/FP16/FP32，要求 TP 与 tile 数为 2 的幂，尚不支持量化；低延迟 all-reduce 依赖 NVLink。",
+
+  "nondeterminism_source": "TP/parallel-config（张量并行规模变化导致的非确定性，为本工作主因）；根因=IEEE 754 浮点非结合性 + 跨 GPU 归约顺序随 TP 规模改变（行并行层 all-reduce 顺序敏感）。同时覆盖：batch-invariance(server-load/批大小，由 BIO 解决)、kernel/FP（Split-K vs Non-Split-K、block size、Hopper wgmma、cuBLAS/NCCL 归约顺序、chunked prefill 调度）；在 RL/多智能体下叠加 agent-scaffold-compounding（级联放大）。",
+
+  "determinism_level": "bitwise-identical（逐位相同）。BIO+TBIK 在所有受测配置下使 Maximum Probability Divergence 严格为 0、Count of Unique Outputs 为 1，并实现 vLLM(TP=4) 与 FSDP(TP=1) 之间逐位一致的概率（RL 中零 KL）。相较之下，vanilla BF16 仅 distribution-level（甚至 sequence-level 都不满足，跨配置完全分叉），仅 BIO 仅在 TP=1 或 2 时对批大小不变、跨 TP 仍非确定。",
+
+  "variance_magnitude_quantified": "仅改 TP 规模在 AIME24 上对 Qwen3-8B 造成 >4% 准确率波动；先前相关工作报告最高 9% AIME 准确率波动。BF16 下跨 12 种配置的 Count of Unique Outputs：AIME24 约 9.0–12.0、AMC23 约 8.0–11.2（接近配置上限，几乎每改一个配置就换一组输出）。Maximum Probability Divergence（×10^-3，L40S）：BF16 约 8.01–26.48、BIO 约 7.79–27.54、BIO+TBIK=0。RL（GRPO/GSM8K/Qwen3-1.7B）：Pass@1 最终 TBIK 0.73 vs BIO 0.68 vs BF16 0.60；TBIK 在前 20 步即超 0.6 且 rollout↔training KL=0，BF16 全程非零 KL。性能开销：BIO+TBIK 端到端 22–63%（BIO 10–33%、纯 TBIK 额外 5–30%；Tree MatMul 2–25%、Tree All-Reduce ≤10%）；Tree MatMul 大批量约 cuBLAS 63% 性能（120 vs 190 TFLOPS BF16）。",
+
+  "determinism_controllability": "可由工程手段消除（eliminable by engineering）。TP 引起的非确定性是确定性算法选择问题（归约顺序），而非不可约的随机性——通过固定二叉树归约拓扑（TBIK）即可逐位消除；论文给出理论证明保证其与 TP 规模无关。这与 provider-drift（API 后端不可控漂移）等不可约来源形成对比。代价是显著的延迟开销（22–63%）与功能限制（暂不支持量化、需 2 的幂 TP）。批大小维度的非确定性同样可由 BIO 工程消除；二者结合（BIO+TBIK）覆盖批与 TP 两大可工程消除来源。",
+
+  "inference_settings_disclosure": "论文充分披露推理设置：随机种子=42；reasoning 模型（Qwen3）temperature=0.6、top-p=0.95、top-k=20、max output 8192、thinking 模式；非 reasoning 模型（Mistral-7B-Instruct、Llama-3.1-8B-Instruct）temperature=0.7、top-p=0.8、top-k=20、max output 2048；引擎=vLLM（eager 模式、关闭 CUDA Graph/prefix caching、规避 chunked prefill）；精度=BF16（兼测 FP16/FP32）；TP=1/2/4/8、批大小=8/16/32；GPU=NVIDIA L40S、RTX PRO 6000、H20（端到端延迟用 4×H20+NVLink）；RL 用 GRPO、group size=8、rollout batch=64、train batch=32、lr=1e-5、max new tokens=512/RL、256 训练+64 评测样本。符合并超出本类别期望的披露标准。",
+
+  "harness_version_stamping": "提供完整可复现代码仓库（nanomaoli/llm_reproducibility，Python 3.12 + uv），含 apply_patches() 与按环境变量（TP_INVARIANT_MATMUL、VLLM_BATCH_INVARIANT、VLLM_TP_INVARIANT、ALIGN_TRAIN_INFERENCE）切换的脚本，以及 verify_installation.py 验证。论文记录 vLLM/SGLang/FSDP/TorchTitan 等依赖与配置。但未明确强调 harness git-commit 哈希或内容寻址的评测镜像摘要（content-addressed eval-image digest）这类强版本戳实践——属于可改进点。[不确定]（是否在仓库 release/tag 中固定 commit 与镜像摘要未在抓取材料中确认）",
+
+  "model_version_pinning_policy": "使用带明确版本的开源权重快照：Qwen3-8B、Qwen3-32B、Qwen3-1.7B、Mistral-7B-Instruct-v0.3、Llama-3.1-8B-Instruct（均为带版本号的固定 checkpoint，而非可变 API 别名）。因属于本地开源模型，不涉及 API 别名/快照退役窗口/漂移再校准计划。论文未讨论模型退休或漂移再校准（因其针对本地确定性推理，模型权重本身固定不漂移）。[不确定]（无显式 retirement/recalibration 策略，因场景为固定本地权重而非托管 API）",
+
+  "repeats_seeds_recommended": "论文做法是固定单一种子=42 并跨 12 种系统配置（4 TP × 3 批大小）重复评测，论点是“若内核确定，配置变化下输出应逐位一致（U=1，divergence=0），无需多种子来平均掉数值噪声”。即推荐：用确定性内核消除系统配置引起的方差，而非靠增加 seeds/repeats 取平均来掩盖。pass@1 估计：在 RL 实验中以 64 题评测集上的通过率报告 Pass@1（如最终 0.73）。论文未给出针对采样随机性的“建议重复/种子数”通用值——其立场是确定性优先；若仍需估计采样方差，应在固定且记录系统配置下重复采样。[不确定]（未给出明确的推荐重复/种子数字，因方法目标是消除而非平均方差）",
+
+  "uncertain": [
+    "harness_version_stamping",
+    "model_version_pinning_policy",
+    "repeats_seeds_recommended"
+  ]
+}
