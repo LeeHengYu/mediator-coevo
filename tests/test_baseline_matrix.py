@@ -314,9 +314,10 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
         def __init__(self, project_root):
             self.project_root = project_root
 
-        def create_matrix_dir(self, *, seed, data_dir):
+        def create_matrix_dir(self, *, seed, data_dir, run_id=None):
             captured["matrix_seed"] = seed
             captured["matrix_data_dir"] = data_dir
+            captured["matrix_run_id"] = run_id
             return tmp_path / "matrix"
 
     def capture_matrix_build(**kwargs):
@@ -354,6 +355,8 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
             "task-A",
             "--index",
             "3",
+            "--run-id",
+            "custom-matrix-run",
             "--config-dir",
             str(config_dir),
         ],
@@ -363,6 +366,7 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
     assert captured["preset_names"] == [BASELINE_PRESET_NAMES[3]]
     assert captured["benchmark_repo"] is repository
     assert captured["matrix_seed"] == 42
+    assert captured["matrix_run_id"] == "custom-matrix-run"
     assert "Rows: skill_none_top_k_similarity" in result.output
     assert "skill_all_top_k_similarity" not in result.output
 
@@ -853,6 +857,18 @@ def test_factory_build_uses_experiment_local_skill_store_by_default(tmp_path):
     assert (tmp_path / "skills" / "executor" / "SKILL.md").read_text() == (
         "# Executor\n"
     )
+
+
+def test_factory_create_matrix_dir_accepts_run_id_suffix(tmp_path):
+    matrix_dir = ExperimentFactory(tmp_path).create_matrix_dir(
+        seed=42,
+        data_dir="data",
+        run_id="csm-matrix-skill-none-diffusion-none",
+    )
+
+    assert matrix_dir.parent == tmp_path / "data" / "experiments"
+    assert matrix_dir.name.endswith("-csm-matrix-skill-none-diffusion-none")
+    assert matrix_dir.is_dir()
 
 
 def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):

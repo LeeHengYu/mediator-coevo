@@ -378,13 +378,17 @@ controls, run all 8 rows if ignored (default):
 
 ```bash
 uv run medcoevo matrix \
-  --task smoke-skillflow \
-  --iterations 1 \
+  --family Compensation-Scenario-Modeling \
+  --iterations 3 \
   --seed 42 \
-  --index 3 \
-  --diffusion-max-artifacts 3 \
-  --diffusion-top-k-neighbors 3
+  --index 0 \
+  --run-id csm-matrix-skill-none-diffusion-none
 ```
+
+With `--run-id`, the parent matrix directory is timestamp-prefixed, for example
+`data/experiments/<timestamp>-csm-matrix-skill-none-diffusion-none/`. The
+selected row still writes under its preset child directory, such as
+`skill_none_diffusion_none/`.
 
 For a cheap smoke check, use a single local task and one iteration:
 
@@ -415,7 +419,7 @@ artifacts, and graph snapshots.
 `matrix` accepts the same task selectors as `run`, plus shared controls:
 `--iterations`, `--seed`, `--coevo-interval`, `--advisor-buffer-max`,
 `--diffusion-max-artifacts`, `--diffusion-top-k-neighbors`, `--index`/`-i`,
-`--list`/`-l`, `--config-dir`, and `--verbose`.
+`--run-id`, `--list`/`-l`, `--config-dir`, and `--verbose`.
 
 Do not pass `--condition`, `--skill-updates`, `--diffusion-enabled`,
 `--diffusion-policy`, or `--diffusion-graph` to `matrix`. Those settings are

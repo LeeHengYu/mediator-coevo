@@ -104,13 +104,19 @@ class ExperimentFactory:
             harbor_runner=harbor_runner,
         )
 
-    def create_matrix_dir(self, seed: int, data_dir: str) -> Path:
+    def create_matrix_dir(
+        self,
+        seed: int,
+        data_dir: str,
+        run_id: str | None = None,
+    ) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        suffix = run_id or f"{seed}-baseline-matrix"
         matrix_dir = (
             self._project_root
             / data_dir
             / "experiments"
-            / f"{timestamp}-{seed}-baseline-matrix"
+            / f"{timestamp}-{suffix}"
         )
         matrix_dir.mkdir(parents=True, exist_ok=True)
         return matrix_dir

@@ -139,6 +139,16 @@ def matrix(
             help="Run only the matrix row at this zero-based index.",
         ),
     ] = None,
+    run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--run-id",
+            help=(
+                "Matrix run ID suffix. The parent matrix directory is prefixed "
+                "with a timestamp."
+            ),
+        ),
+    ] = None,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -195,7 +205,11 @@ def matrix(
     factory = ExperimentFactory(PROJECT_ROOT)
     seed = config.experiment.seed
     iterations = config.experiment.num_iterations
-    matrix_dir = factory.create_matrix_dir(seed=seed, data_dir=config.paths.data_dir)
+    matrix_dir = factory.create_matrix_dir(
+        seed=seed,
+        data_dir=config.paths.data_dir,
+        run_id=run_id,
+    )
     rows = build_matrix_runtimes(
         factory=factory,
         base_config=config,
