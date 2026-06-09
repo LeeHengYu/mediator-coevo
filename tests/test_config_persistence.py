@@ -41,6 +41,7 @@ def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
     assert saved["diffusion"]["graph"] == "none"
     assert saved["diffusion"]["max_artifacts"] == 3
     assert saved["diffusion"]["top_k_neighbors"] == 3
+    assert saved["diffusion"]["avoid_recheck_max_artifacts"] == 1
     assert saved["experiment"]["skill_updates"] == {
         "executor": True,
         "planner": True,

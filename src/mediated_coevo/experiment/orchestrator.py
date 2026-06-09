@@ -30,9 +30,11 @@ from mediated_coevo.core.utils import format_optional_reward
 from mediated_coevo.diffusion import (
     DiffusedRecord,
     DiffusionArtifact,
+    DiffusionArtifactType,
     DiffusionStore,
     DiffusionSubscription,
     TaskGraphSnapshot,
+    diffusion_channel_for_artifact,
     emit_diffusion_artifacts,
     render_diffusion_subscriptions,
     select_capped_broadcast_subscriptions,
@@ -909,6 +911,9 @@ class Orchestrator:
             return select_capped_broadcast_subscriptions(
                 eligible_artifacts=eligible_artifacts,
                 max_artifacts=self.config.diffusion.max_artifacts,
+                avoid_recheck_max_artifacts=(
+                    self.config.diffusion.avoid_recheck_max_artifacts
+                ),
             )
         if policy_name == "random_k":
             return select_random_k_subscriptions(
@@ -917,6 +922,9 @@ class Orchestrator:
                 target_iteration=current_iteration,
                 max_artifacts=self.config.diffusion.max_artifacts,
                 seed=self.config.experiment.seed,
+                avoid_recheck_max_artifacts=(
+                    self.config.diffusion.avoid_recheck_max_artifacts
+                ),
             )
         if policy_name == "top_k_similarity":
             return select_top_k_similarity_subscriptions(
@@ -925,6 +933,9 @@ class Orchestrator:
                 target_task_id=target_task_id,
                 max_artifacts=self.config.diffusion.max_artifacts,
                 top_k_neighbors=self.config.diffusion.top_k_neighbors,
+                avoid_recheck_max_artifacts=(
+                    self.config.diffusion.avoid_recheck_max_artifacts
+                ),
             )
         return []
 
@@ -1015,6 +1026,7 @@ class Orchestrator:
         for artifact in eligible_artifacts:
             if artifact.artifact_id in selected_ids:
                 continue
+            diffusion_channel = diffusion_channel_for_artifact(artifact)
             self._diffusion_store.append_diffused_record(
                 DiffusedRecord(
                     artifact_id=artifact.artifact_id,
@@ -1030,9 +1042,27 @@ class Orchestrator:
                     eligible=True,
                     selected=False,
                     rendered=False,
+                    verifier_reward=artifact.verifier_reward,
+                    judge_reward=artifact.judge_reward,
+                    success=(
+                        None
+                        if artifact.verifier_reward is None
+                        else artifact.verifier_reward == 1.0
+                    ),
+                    regression=(
+                        True
+                        if artifact.artifact_type
+                        == DiffusionArtifactType.REGRESSION_WARNING
+                        else None
+                    ),
                     metadata={
                         "artifact_type": artifact.artifact_type.value,
                         "risk_level": artifact.risk_level.value,
+                        **(
+                            {"diffusion_channel": diffusion_channel}
+                            if diffusion_channel is not None
+                            else {}
+                        ),
                     },
                 )
             )

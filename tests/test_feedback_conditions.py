@@ -148,6 +148,8 @@ def _store_diffusion_artifact(
     source_iteration: int = 0,
     artifact_type: DiffusionArtifactType = DiffusionArtifactType.DEBUG_HINT,
     content: str | None = None,
+    verifier_reward: float = 1.0,
+    judge_reward: float | None = None,
 ) -> None:
     orch._diffusion_store.store_artifact(
         DiffusionArtifact(
@@ -157,6 +159,8 @@ def _store_diffusion_artifact(
             artifact_type=artifact_type,
             risk_level=DiffusionRiskLevel.LOW,
             content=content or artifact_id,
+            verifier_reward=verifier_reward,
+            judge_reward=judge_reward,
         )
     )
 
@@ -1065,6 +1069,7 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
         source_task_id="task-B",
         artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
         content="warning from task-B",
+        verifier_reward=0.0,
     )
     _store_diffusion_artifact(
         orch,
@@ -1086,9 +1091,10 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
     )
 
     assert context is not None
-    assert "hint from task-B" in context
     assert "outcome from task-B" in context
     assert "warning from task-B" in context
+    assert "Avoid/Recheck Artifacts" in context
+    assert "hint from task-B" not in context
     assert "duplicate debug from task-B" not in context
     assert "hint from task-C" not in context
     assert "hint from task-D" not in context
@@ -1099,10 +1105,9 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
     selected_records = [record for record in records if record.selected]
     selected_artifact_ids = {record.artifact_id for record in selected_records}
     assert sum(1 for record in records if record.eligible) == 6
-    assert len(selected_records) == 3
-    assert sum(1 for record in records if record.rendered) == 3
+    assert len(selected_records) == 2
+    assert sum(1 for record in records if record.rendered) == 2
     assert selected_artifact_ids == {
-        "task-b-debug",
         "task-b-outcome",
         "task-b-warning",
     }
@@ -1116,8 +1121,8 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
     orch._attach_diffusion_context_metrics(record)
 
     assert record.diffusion_artifacts_eligible == 6
-    assert record.diffusion_artifacts_selected == 3
-    assert record.diffusion_artifacts_rendered == 3
+    assert record.diffusion_artifacts_selected == 2
+    assert record.diffusion_artifacts_rendered == 2
     assert record.reward_after_diffusion_context == 0.0
     assert record.regression_after_diffusion_context is True
     assert record.source_task_ids == ["task-B"]

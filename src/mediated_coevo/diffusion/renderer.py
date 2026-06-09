@@ -6,9 +6,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mediated_coevo.diffusion.policy import (
+    AVOID_RECHECK_CHANNEL,
+    REUSE_SUCCESS_CHANNEL,
+)
 from mediated_coevo.diffusion.models import (
     DiffusedRecord,
     DiffusionArtifact,
+    DiffusionArtifactType,
     TaskGraphSnapshot,
 )
 from mediated_coevo.diffusion.store import DiffusionStore
@@ -19,6 +24,12 @@ if TYPE_CHECKING:
     from mediated_coevo.diffusion.policy import DiffusionSubscription
 
 DIFFUSED_SECTION_NAME = "Diffused Cross-Task Context"
+REUSE_SECTION_NAME = "Reusable Success Artifacts"
+AVOID_RECHECK_SECTION_NAME = "Avoid/Recheck Artifacts"
+AVOID_RECHECK_WARNING = (
+    "These artifacts came from failed source runs. Use them only to avoid or "
+    "re-check failure modes; do not copy failed choices."
+)
 DiffusionArtifactCompactor = Callable[[DiffusionArtifact, int], Awaitable[str]]
 
 
@@ -55,7 +66,7 @@ async def render_diffusion_subscriptions(
     compact_artifact_content: DiffusionArtifactCompactor | None = None,
 ) -> DiffusionContextBundle:
     """Render and audit the target's consumed diffusion subscriptions."""
-    rendered_sections: list[str] = []
+    rendered_sections: list[tuple[str, str]] = []
     rendered_subscriptions: list[DiffusionSubscription] = []
     rendered_artifact_ids: list[str] = []
     compacted_artifact_ids: list[str] = []
@@ -69,10 +80,10 @@ async def render_diffusion_subscriptions(
         )
         if _sections_fit(
             model,
-            [*rendered_sections, rendered_section],
+            [*rendered_sections, (subscription.context_channel, rendered_section)],
             max_context_tokens,
         ):
-            rendered_sections.append(rendered_section)
+            rendered_sections.append((subscription.context_channel, rendered_section))
             rendered_subscriptions.append(subscription)
             rendered_artifact_ids.append(subscription.artifact.artifact_id)
             _append_rendered_record(
@@ -97,10 +108,10 @@ async def render_diffusion_subscriptions(
         )
         if compacted_section is not None and _sections_fit(
             model,
-            [*rendered_sections, compacted_section],
+            [*rendered_sections, (subscription.context_channel, compacted_section)],
             max_context_tokens,
         ):
-            rendered_sections.append(compacted_section)
+            rendered_sections.append((subscription.context_channel, compacted_section))
             rendered_subscriptions.append(subscription)
             rendered_artifact_ids.append(subscription.artifact.artifact_id)
             compacted_artifact_ids.append(subscription.artifact.artifact_id)
@@ -134,10 +145,15 @@ async def render_diffusion_subscriptions(
                 selected=True,
                 rendered=False,
                 token_count=0,
+                verifier_reward=subscription.artifact.verifier_reward,
+                judge_reward=subscription.artifact.judge_reward,
+                success=_artifact_success(subscription.artifact),
+                regression=_artifact_regression(subscription.artifact),
                 metadata=_record_metadata(
                     subscription.artifact,
                     {
                         **subscription.metadata,
+                        "diffusion_channel": subscription.context_channel,
                         "max_context_tokens": max_context_tokens,
                         "compaction_attempted": compact_artifact_content is not None,
                     },
@@ -211,9 +227,17 @@ def _append_rendered_record(
             rendered_section=DIFFUSED_SECTION_NAME,
             token_count=token_count,
             citation_text=rendered_section,
+            verifier_reward=subscription.artifact.verifier_reward,
+            judge_reward=subscription.artifact.judge_reward,
+            success=_artifact_success(subscription.artifact),
+            regression=_artifact_regression(subscription.artifact),
             metadata=_record_metadata(
                 subscription.artifact,
-                {**subscription.metadata, **(metadata or {})},
+                {
+                    **subscription.metadata,
+                    "diffusion_channel": subscription.context_channel,
+                    **(metadata or {}),
+                },
             ),
         )
     )
@@ -224,7 +248,7 @@ async def _compacted_artifact_section(
     compact_artifact_content: DiffusionArtifactCompactor | None,
     max_context_tokens: int | None,
     model: str,
-    rendered_sections: list[str],
+    rendered_sections: list[tuple[str, str]],
     subscription: DiffusionSubscription,
 ) -> str | None:
     if compact_artifact_content is None or max_context_tokens is None:
@@ -253,7 +277,7 @@ async def _compacted_artifact_section(
 def _remaining_content_budget(
     *,
     model: str,
-    rendered_sections: list[str],
+    rendered_sections: list[tuple[str, str]],
     subscription: DiffusionSubscription,
     max_context_tokens: int,
 ) -> int:
@@ -272,7 +296,7 @@ def _remaining_content_budget(
 
 def _sections_fit(
     model: str,
-    sections: list[str],
+    sections: list[tuple[str, str]],
     max_context_tokens: int | None,
 ) -> bool:
     if max_context_tokens is None:
@@ -282,8 +306,45 @@ def _sections_fit(
     return count_text_tokens(model, _context_text(sections)) <= max_context_tokens
 
 
-def _context_text(rendered_sections: list[str]) -> str:
-    return PromptText.diffusion_context(DIFFUSED_SECTION_NAME, rendered_sections)
+def _context_text(rendered_sections: list[tuple[str, str]]) -> str:
+    return PromptText.diffusion_context(
+        DIFFUSED_SECTION_NAME,
+        _channel_sections(rendered_sections),
+    )
+
+
+def _channel_sections(rendered_sections: list[tuple[str, str]]) -> list[str]:
+    reuse_sections = [
+        section
+        for channel, section in rendered_sections
+        if channel == REUSE_SUCCESS_CHANNEL
+    ]
+    avoid_sections = [
+        section
+        for channel, section in rendered_sections
+        if channel == AVOID_RECHECK_CHANNEL
+    ]
+    sections: list[str] = []
+    if reuse_sections:
+        sections.append(
+            "\n\n".join(
+                [
+                    f"### {REUSE_SECTION_NAME}",
+                    *reuse_sections,
+                ]
+            )
+        )
+    if avoid_sections:
+        sections.append(
+            "\n\n".join(
+                [
+                    f"### {AVOID_RECHECK_SECTION_NAME}",
+                    AVOID_RECHECK_WARNING,
+                    *avoid_sections,
+                ]
+            )
+        )
+    return sections
 
 
 def _record_metadata(
@@ -315,3 +376,15 @@ def _render_artifact_block(
         risk_level=artifact.risk_level.value,
         content=artifact.content if content is None else content,
     )
+
+
+def _artifact_success(artifact: DiffusionArtifact) -> bool | None:
+    if artifact.verifier_reward is None:
+        return None
+    return artifact.verifier_reward == 1.0
+
+
+def _artifact_regression(artifact: DiffusionArtifact) -> bool | None:
+    if artifact.artifact_type == DiffusionArtifactType.REGRESSION_WARNING:
+        return True
+    return None

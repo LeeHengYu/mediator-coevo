@@ -238,6 +238,7 @@ class DiffusionConfig(BaseModel):
     graph: str = "none"
     max_artifacts: int = Field(ge=1)
     top_k_neighbors: int = Field(ge=1)
+    avoid_recheck_max_artifacts: int = Field(default=1, ge=0)
 
     @model_validator(mode="after")
     def validate_policy_graph_combination(self) -> Self:

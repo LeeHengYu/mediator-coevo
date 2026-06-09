@@ -18,7 +18,10 @@ from .models import (
     TaskGraphSnapshot,
 )
 from .policy import (
+    AVOID_RECHECK_CHANNEL,
     DiffusionSubscription,
+    REUSE_SUCCESS_CHANNEL,
+    diffusion_channel_for_artifact,
     select_capped_broadcast_subscriptions,
     select_random_k_subscriptions,
     select_top_k_similarity_subscriptions,
@@ -32,6 +35,7 @@ from .store import DiffusionStore
 
 __all__ = [
     "DIFFUSED_SECTION_NAME",
+    "AVOID_RECHECK_CHANNEL",
     "DiffusionEmitter",
     "DiffusionArtifact",
     "DiffusionArtifactType",
@@ -39,9 +43,11 @@ __all__ = [
     "DiffusionNetwork",
     "DiffusionContextBundle",
     "DiffusionSubscription",
+    "REUSE_SUCCESS_CHANNEL",
     "DiffusedRecord",
     "DiffusionStore",
     "adjacency_from_snapshot",
+    "diffusion_channel_for_artifact",
     "emit_diffusion_artifacts",
     "render_diffusion_subscriptions",
     "select_capped_broadcast_subscriptions",

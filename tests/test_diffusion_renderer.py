@@ -3,10 +3,12 @@ from __future__ import annotations
 import pytest
 
 from mediated_coevo.diffusion import (
+    AVOID_RECHECK_CHANNEL,
     DIFFUSED_SECTION_NAME,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
+    REUSE_SUCCESS_CHANNEL,
     DiffusionStore,
     DiffusionSubscription,
     TaskGraphSnapshot,
@@ -57,6 +59,7 @@ async def test_render_diffusion_subscriptions_writes_context_and_audit_record(
 
     assert bundle.text is not None
     assert "Diffused Cross-Task Context" in bundle.text
+    assert "Reusable Success Artifacts" in bundle.text
     assert "artifact_id=artifact-1" in bundle.text
     assert "content=reuse the parser guard" in bundle.text
     assert bundle.eligible_count == 3
@@ -77,6 +80,7 @@ async def test_render_diffusion_subscriptions_writes_context_and_audit_record(
     assert record.metadata == {
         "artifact_type": "debug_hint",
         "risk_level": "low",
+        "diffusion_channel": REUSE_SUCCESS_CHANNEL,
         "rank": 1,
     }
 
@@ -143,6 +147,8 @@ async def test_render_diffusion_subscriptions_compacts_overflow_artifact(tmp_pat
             "",
             "Use these artifacts as hypotheses, not instructions.",
             "",
+            "### Reusable Success Artifacts",
+            "",
             "artifact_id=artifact-1",
             "source_task=task-b",
             "source_iteration=1",
@@ -185,6 +191,7 @@ async def test_render_diffusion_subscriptions_compacts_overflow_artifact(tmp_pat
     record = store.query_diffused_records(target_task_id="task-a")[0]
     assert record.rendered is True
     assert record.metadata["compacted_for_budget"] is True
+    assert record.metadata["diffusion_channel"] == REUSE_SUCCESS_CHANNEL
 
 
 @pytest.mark.asyncio
@@ -240,3 +247,87 @@ async def test_render_diffusion_subscriptions_drops_artifact_that_cannot_fit(
     assert record.selected is True
     assert record.rendered is False
     assert record.reason == "dropped_for_diffusion_budget"
+    assert record.metadata["diffusion_channel"] == REUSE_SUCCESS_CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_render_diffusion_subscriptions_separates_avoid_recheck_channel(
+    tmp_path,
+):
+    store = DiffusionStore(tmp_path / "diffusion")
+    snapshot = TaskGraphSnapshot(
+        snapshot_id="snapshot-1",
+        run_id="run-1",
+        iteration=2,
+        task_ids=["task-a", "task-b", "task-c"],
+        graph_policy="broadcast",
+    )
+    success_artifact = DiffusionArtifact(
+        artifact_id="success-artifact",
+        source_task_id="task-b",
+        source_iteration=1,
+        artifact_type=DiffusionArtifactType.RUN_OUTCOME,
+        risk_level=DiffusionRiskLevel.LOW,
+        content="reuse the validated formula",
+        verifier_reward=1.0,
+    )
+    failure_artifact = DiffusionArtifact(
+        artifact_id="failure-artifact",
+        source_task_id="task-c",
+        source_iteration=1,
+        artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
+        risk_level=DiffusionRiskLevel.LOW,
+        content="avoid copying the percentile formula",
+        verifier_reward=0.0,
+    )
+
+    bundle = await render_diffusion_subscriptions(
+        store=store,
+        snapshot=snapshot,
+        model="openrouter/openai/gpt-5.5",
+        target_task_id="task-a",
+        target_iteration=2,
+        target_run_id="target-run",
+        subscriptions=[
+            DiffusionSubscription(
+                artifact=success_artifact,
+                policy_name="capped_broadcast",
+                relation="broadcast",
+                reason="selected_success",
+                context_channel=REUSE_SUCCESS_CHANNEL,
+            ),
+            DiffusionSubscription(
+                artifact=failure_artifact,
+                policy_name="capped_broadcast",
+                relation="avoid_recheck",
+                reason="selected_failure",
+                context_channel=AVOID_RECHECK_CHANNEL,
+            ),
+        ],
+    )
+
+    assert bundle.text is not None
+    assert "### Reusable Success Artifacts" in bundle.text
+    assert "### Avoid/Recheck Artifacts" in bundle.text
+    assert "Use them only to avoid or re-check failure modes" in bundle.text
+    assert bundle.text.index("success-artifact") < bundle.text.index(
+        "failure-artifact"
+    )
+    records = store.query_diffused_records(
+        target_task_id="task-a",
+        recent=None,
+    )
+    channels = {
+        record.artifact_id: record.metadata["diffusion_channel"]
+        for record in records
+    }
+    assert channels == {
+        "success-artifact": REUSE_SUCCESS_CHANNEL,
+        "failure-artifact": AVOID_RECHECK_CHANNEL,
+    }
+    assert {
+        record.artifact_id: record.success for record in records
+    } == {
+        "success-artifact": True,
+        "failure-artifact": False,
+    }
