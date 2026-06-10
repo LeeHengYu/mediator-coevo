@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Self, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mediated_coevo.experiment.conditions import ConditionName
 
@@ -19,6 +19,9 @@ DiffusionPolicyName: TypeAlias = Literal[
     "random_k",
     "top_k_similarity",
 ]
+SIMILARITY_DIFFUSION_GRAPH_NAMES = frozenset(
+    {"task_similarity", "precomputed_similarity"}
+)
 
 
 class ModelConfigError(ValueError):
@@ -26,7 +29,7 @@ class ModelConfigError(ValueError):
 
 
 class ConfigLoadError(ValueError):
-    """Raised when configuration files are missing required settings."""
+    """Raised when configuration files are missing or contain invalid settings."""
 
 
 REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
@@ -236,6 +239,37 @@ class DiffusionConfig(BaseModel):
     max_artifacts: int = Field(ge=1)
     top_k_neighbors: int = Field(ge=1)
 
+    @model_validator(mode="after")
+    def validate_policy_graph_combination(self) -> Self:
+        """Reject diffusion combinations that cannot execute as configured."""
+        errors: list[str] = []
+        if not self.enabled:
+            if self.policy != "none":
+                errors.append(
+                    "diffusion.enabled=false requires diffusion.policy='none'"
+                )
+            if self.graph != "none":
+                errors.append(
+                    "diffusion.enabled=false requires diffusion.graph='none'"
+                )
+        elif self.policy == "none":
+            errors.append("diffusion.enabled=true requires diffusion.policy != 'none'")
+        elif self.policy == "top_k_similarity":
+            if self.graph not in SIMILARITY_DIFFUSION_GRAPH_NAMES:
+                allowed_graphs = ", ".join(sorted(SIMILARITY_DIFFUSION_GRAPH_NAMES))
+                errors.append(
+                    "diffusion.policy='top_k_similarity' requires "
+                    f"diffusion.graph to be one of: {allowed_graphs}"
+                )
+        elif self.graph != "none":
+            errors.append(
+                f"diffusion.policy={self.policy!r} requires diffusion.graph='none'"
+            )
+
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self
+
 
 class Config(BaseModel):
     """Top-level configuration. Loaded from TOML."""
@@ -280,7 +314,10 @@ def load_config(
     if missing_paths:
         raise ConfigLoadError(_missing_config_message(default_path, missing_paths))
 
-    return Config(**data)
+    try:
+        return Config(**data)
+    except ValidationError as exc:
+        raise ConfigLoadError(f"invalid config in {default_path}: {exc}") from exc
 
 
 def _deep_merge(target: dict[str, Any], source: Mapping[str, Any]) -> None:

@@ -111,7 +111,7 @@ def test_run_config_overrides_supports_shared_runtime_knobs():
         coevo_interval=2,
         advisor_buffer_max=1,
         diffusion_enabled=True,
-        diffusion_policy="capped_broadcast",
+        diffusion_policy="top_k_similarity",
         diffusion_graph="task_similarity",
         diffusion_max_artifacts=5,
         diffusion_top_k_neighbors=2,
@@ -127,7 +127,7 @@ def test_run_config_overrides_supports_shared_runtime_knobs():
         },
         "diffusion": {
             "enabled": True,
-            "policy": "capped_broadcast",
+            "policy": "top_k_similarity",
             "graph": "task_similarity",
             "max_artifacts": 5,
             "top_k_neighbors": 2,
@@ -152,6 +152,7 @@ def test_materialize_task_graph_for_similarity_diffusion(tmp_path):
     )
     config = _config()
     config.diffusion.enabled = True
+    config.diffusion.policy = "top_k_similarity"
     config.diffusion.graph = "task_similarity"
     repo = SkillFlowRepository(root_dir=tmp_path / "benchmarks", task_dirs=["tasks"])
 
@@ -734,6 +735,80 @@ def test_load_config_requires_diffusion_top_k_neighbors_from_toml_or_overrides(
     )
 
     assert config.diffusion.top_k_neighbors == 2
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        (
+            {"enabled": False, "policy": "capped_broadcast"},
+            "diffusion.enabled=false requires diffusion.policy='none'",
+        ),
+        (
+            {"enabled": False, "graph": "task_similarity"},
+            "diffusion.enabled=false requires diffusion.graph='none'",
+        ),
+        (
+            {"enabled": True, "policy": "none"},
+            "diffusion.enabled=true requires diffusion.policy",
+        ),
+        (
+            {
+                "enabled": True,
+                "policy": "top_k_similarity",
+                "graph": "none",
+            },
+            "top_k_similarity.*diffusion.graph",
+        ),
+        (
+            {
+                "enabled": True,
+                "policy": "random_k",
+                "graph": "task_similarity",
+            },
+            "random_k.*diffusion.graph='none'",
+        ),
+    ],
+)
+def test_load_config_rejects_invalid_diffusion_combinations(
+    tmp_path,
+    overrides,
+    match,
+):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+
+    with pytest.raises(ConfigLoadError, match=match):
+        load_config(config_dir, overrides={"diffusion": overrides})
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enabled": False, "policy": "none", "graph": "none"},
+        {"enabled": True, "policy": "capped_broadcast", "graph": "none"},
+        {"enabled": True, "policy": "random_k", "graph": "none"},
+        {
+            "enabled": True,
+            "policy": "top_k_similarity",
+            "graph": "task_similarity",
+        },
+        {
+            "enabled": True,
+            "policy": "top_k_similarity",
+            "graph": "precomputed_similarity",
+        },
+    ],
+)
+def test_load_config_accepts_valid_diffusion_combinations(tmp_path, overrides):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+
+    config = load_config(config_dir, overrides={"diffusion": overrides})
+
+    assert config.diffusion.enabled is overrides["enabled"]
+    assert config.diffusion.policy == overrides["policy"]
+    assert config.diffusion.graph == overrides["graph"]
 
 
 def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
