@@ -1,0 +1,189 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/run_outbound_audit.py → b/run_outbound_audit.py
+@@ -0,0 +1,187 @@
++import pandas as pd
++import openpyxl
++from openpyxl.utils.dataframe import dataframe_to_rows
++from docx import Document
++import numpy as np
++
++# ── 1. Read source data ──────────────────────────────────────────────
++manifest = pd.read_excel('/root/Manifest_Plan.xlsx')
++dock_scan = pd.read_excel('/root/Dock_Scan_Log.xlsx')
++
++# ── 2. Prepare the template workbook ─────────────────────────────────
++# Copy the template so the Overview sheet is preserved exactly.
++wb = openpyxl.load_workbook('/root/Outbound_Audit_Template.xlsx')
++
++# ── 3. RawData sheet ─────────────────────────────────────────────────
++# Replace NaN with the original cell representation. Read the source
++# again with openpyxl to get the exact cell values (preserving 'N/A'
++# strings, blanks, etc.).
++src_wb = openpyxl.load_workbook('/root/Manifest_Plan.xlsx')
++src_ws = src_wb.active
++
++if 'RawData' not in wb.sheetnames:
++    ws_raw = wb.create_sheet('RawData')
++else:
++    ws_raw = wb['RawData']
++
++for row in src_ws.iter_rows(min_row=1, values_only=False):
++    ws_raw.append([cell.value for cell in row])
++
++# Also build a pandas DataFrame from the openpyxl source for logic below,
++# keeping exact cell values (None stays None, 'N/A' stays 'N/A').
++raw_rows = list(src_ws.iter_rows(min_row=1, values_only=True))
++raw_headers = [str(h) for h in raw_rows[0]]
++manifest_exact = pd.DataFrame(raw_rows[1:], columns=raw_headers)
++
++src_wb.close()
++
++# ── 4. Derive scan status ────────────────────────────────────────────
++# Keep only LOADED scans, then keep the latest per (Shipment ID, Carton ID)
++loaded = dock_scan[dock_scan['Status'] == 'LOADED'].copy()
++
++# Determine the ordering column for "latest". Use Scan Timestamp if present,
++# otherwise fall back to the original row order.
++if 'Scan Timestamp' in loaded.columns:
++    loaded = loaded.sort_values('Scan Timestamp')
++
++kept = loaded.drop_duplicates(subset=['Shipment ID', 'Carton ID'], keep='last')
++
++# Build a lookup dict: (Shipment ID, Carton ID) -> Scanned Zone
++loaded_lookup = {}
++for _, r in kept.iterrows():
++    loaded_lookup[(r['Shipment ID'], r['Carton ID'])] = r.get('Scanned Zone', None)
++
++# ── 5. Formatted Data sheet ──────────────────────────────────────────
++# Use the exact manifest data and the first 8 columns in order.
++first8 = ['Shipment ID', 'Carton ID', 'Planned Zone', 'Route',
++          'Expected Weight', 'Hazmat Flag', 'Carrier', 'Wave']
++
++formatted = manifest_exact[first8].copy()
++
++missing_list = []
++zone_mm_list = []
++for _, r in formatted.iterrows():
++    key = (r['Shipment ID'], r['Carton ID'])
++    if key not in loaded_lookup:
++        missing_list.append(1)
++        zone_mm_list.append(0)  # no scan → no mismatch
++    else:
++        missing_list.append(0)
++        scanned_zone = loaded_lookup[key]
++        if scanned_zone != r['Planned Zone']:
++            zone_mm_list.append(1)
++        else:
++            zone_mm_list.append(0)
++
++formatted['Missing Load Scan'] = missing_list
++formatted['Zone Mismatch'] = zone_mm_list
++formatted['Total Errors'] = formatted['Missing Load Scan'] + formatted['Zone Mismatch']
+… omitted 109 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/verify_outbound_audit.py → b/verify_outbound_audit.py
+@@ -0,0 +1,68 @@
++import os
++import openpyxl
++from docx import Document
++
++src_path = '/root/Manifest_Plan.xlsx'
++out_path = '/root/Outbound_Load_Audit.xlsx'
++doc_path = '/root/Outbound_Load_Brief.docx'
++
++print('exists_xlsx', os.path.exists(out_path), os.path.getsize(out_path) if os.path.exists(out_path) else None)
++print('exists_docx', os.path.exists(doc_path), os.path.getsize(doc_path) if os.path.exists(doc_path) else None)
++
++wb = openpyxl.load_workbook(out_path, data_only=False)
++print('sheets', wb.sheetnames)
++expected_sheets = ['Overview', 'RawData', 'Formatted Data', 'Summary']
++print('has_expected_sheets', all(s in wb.sheetnames for s in expected_sheets))
++
++src_wb = openpyxl.load_workbook(src_path, data_only=False)
++src_ws = src_wb.active
++raw_ws = wb['RawData']
++
++src_values = [[c.value for c in row] for row in src_ws.iter_rows()]
++raw_values = [[c.value for c in row] for row in raw_ws.iter_rows(max_row=src_ws.max_row, max_col=src_ws.max_column)]
++print('raw_dimensions', raw_ws.max_row, raw_ws.max_column)
++print('manifest_dimensions', src_ws.max_row, src_ws.max_column)
++print('raw_matches_manifest', src_values == raw_values)
++na_positions = []
++for i, row in enumerate(src_values, 1):
++    for j, v in enumerate(row, 1):
++        if v == 'N/A':
++            na_positions.append((i, j, raw_ws.cell(i, j).value))
++print('na_positions_count', len(na_positions))
++print('na_positions_sample', na_positions[:10])
++print('na_preserved', all(v == 'N/A' for _, _, v in na_positions))
++
++fmt_ws = wb['Formatted Data']
++fmt_headers = [fmt_ws.cell(1, c).value for c in range(1, fmt_ws.max_column + 1)]
++print('formatted_dimensions', fmt_ws.max_row, fmt_ws.max_column)
++print('formatted_headers', fmt_headers)
++print('formatted_12_columns', fmt_ws.max_column == 12)
++derived = ['Missing Load Scan', 'Zone Mismatch', 'Total Errors', 'Error Summary']
++derived_indices = [fmt_headers.index(h) + 1 for h in derived]
++concrete = True
++samples = []
++for r in range(2, min(fmt_ws.max_row, 11) + 1):
++    vals = [fmt_ws.cell(r, c).value for c in derived_indices]
++    samples.append(vals)
++    if any(v is None for v in vals):
++        concrete = False
++print('derived_concrete_first10', concrete)
++print('derived_samples', samples)
++
++sum_ws = wb['Summary']
++sum_headers = [sum_ws.cell(1, c).value for c in range(1, sum_ws.max_column + 1)]
++rows = [[sum_ws.cell(r, c).value for c in range(1, sum_ws.max_column + 1)] for r in range(2, sum_ws.max_row + 1)]
++print('summary_dimensions', sum_ws.max_row, sum_ws.max_column)
++print('summary_headers', sum_headers)
++print('summary_rows', rows)
++non_grand = rows[:-1]
++last = rows[-1] if rows else None
++only_errors = all(row[4] > 0 for row in non_grand)
++sorted_ok = non_grand == sorted(non_grand, key=lambda row: (row[0], row[1]))
++grand_ok = bool(last and last[0] == 'Grand Total' and last[1] == '-' and last[4] == sum(row[4] for row in non_grand))
++print('summary_only_error_rows', only_errors)
++print('summary_sorted_by_route_shipment', sorted_ok)
++print('summary_grand_total_ok', grand_ok)
++
++doc = Document(doc_path)
++print('doc_paragraphs', [p.text for p in doc.paragraphs])
+  ┊ review diff
+a//root/run_outbound_audit.py → b//root/run_outbound_audit.py
+@@ -23,6 +23,8 @@
+     ws_raw = wb.create_sheet('RawData')
+ else:
+     ws_raw = wb['RawData']
++    # Clear any template placeholder rows so RawData exactly matches Manifest_Plan.xlsx.
++    ws_raw.delete_rows(1, ws_raw.max_row)
+ 
+ for row in src_ws.iter_rows(min_row=1, values_only=False):
+     ws_raw.append([cell.value for cell in row])
+  ┊ review diff
+a//root/run_outbound_audit.py → b//root/run_outbound_audit.py
+@@ -98,6 +98,8 @@
+     ws_fmt = wb.create_sheet('Formatted Data')
+ else:
+     ws_fmt = wb['Formatted Data']
++    # Clear any template placeholder rows before writing current formatted output.
++    ws_fmt.delete_rows(1, ws_fmt.max_row)
+ 
+ # Header
+ ws_fmt.append(list(formatted.columns))
+  ┊ review diff
+a//root/run_outbound_audit.py → b//root/run_outbound_audit.py
+@@ -140,6 +140,8 @@
+     ws_sum = wb.create_sheet('Summary')
+ else:
+     ws_sum = wb['Summary']
++    # Clear any template placeholder rows before writing current summary output.
++    ws_sum.delete_rows(1, ws_sum.max_row)
+ 
+ ws_sum.append(list(summary.columns))
+ for _, r in summary.iterrows():
+
+session_id: 20260610_204138_8467b1

@@ -1,0 +1,188 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_trailer_audit.py → b/create_trailer_audit.py
+@@ -0,0 +1,149 @@
++from openpyxl import load_workbook, Workbook
++from docx import Document
++from collections import defaultdict
++from pathlib import Path
++
++SRC = Path('/root/Trailer_Detention_Log.xlsx')
++AUDIT = Path('/root/Trailer_Detention_Audit.xlsx')
++BRIEF = Path('/root/Trailer_Detention_Brief.docx')
++
++TARGET_HEADERS = [
++    'Load ID', 'Carrier', 'Allowed Hold Hours', 'Actual Hold Hours',
++    'Seal Required', 'Seal Status', 'Yard', 'Dispatcher'
++]
++COMPUTED_HEADERS = ['Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary']
++SUMMARY_HEADERS = ['Carrier', 'Yard', 'Detention Overrun Errors', 'Seal Errors', 'Total Errors']
++
++
++def norm(s):
++    return ''.join(ch.lower() for ch in str(s).strip() if ch.isalnum())
++
++
++def numeric(v):
++    if v is None or v == '':
++        return 0
++    try:
++        return float(v)
++    except Exception:
++        return 0
++
++# Read source workbook and inspect layout
++src_wb = load_workbook(SRC, data_only=False)
++print('Source sheet names:', src_wb.sheetnames)
++src_ws = src_wb[src_wb.sheetnames[0]]
++source_rows = list(src_ws.iter_rows(values_only=True))
++if not source_rows:
++    raise RuntimeError('Source workbook has no rows')
++source_headers = list(source_rows[0])
++print('Source column headers:', source_headers)
++print('Source sample rows:')
++for row in source_rows[1:6]:
++    print(row)
++
++header_map = {norm(h): idx for idx, h in enumerate(source_headers) if h is not None}
++source_indices = []
++for h in TARGET_HEADERS:
++    key = norm(h)
++    if key not in header_map:
++        raise RuntimeError(f'Missing required source column for target header {h!r}')
++    source_indices.append(header_map[key])
++
++# Create audit workbook
++out_wb = Workbook()
++# Remove default and create exactly required sheets in order
++out_wb.remove(out_wb.active)
++raw_ws = out_wb.create_sheet('RawData')
++fmt_ws = out_wb.create_sheet('Formatted Data')
++sum_ws = out_wb.create_sheet('Summary')
++
++# RawData: exact copied values from source table
++for row in source_rows:
++    raw_ws.append(list(row))
++
++# Formatted Data
++fmt_ws.append(TARGET_HEADERS + COMPUTED_HEADERS)
++formatted_records = []
++for source_row in source_rows[1:]:
++    values = []
++    for idx in source_indices:
++        values.append(source_row[idx] if idx < len(source_row) else None)
++    record = dict(zip(TARGET_HEADERS, values))
++    detention_overrun = 1 if numeric(record['Actual Hold Hours']) > numeric(record['Allowed Hold Hours']) else 0
++    seal_required = str(record['Seal Required']).strip().upper() if record['Seal Required'] is not None else ''
++    seal_status = str(record['Seal Status']).strip().upper() if record['Seal Status'] is not None else ''
++    seal_error = 1 if seal_required == 'YES' and seal_status != 'VERIFIED' else 0
++    total_errors = detention_overrun + seal_error
++    parts = []
++    if detention_overrun:
++        parts.append('Detention Overrun')
+… omitted 71 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_trailer_audit.py → b/validate_trailer_audit.py
+@@ -0,0 +1,68 @@
++from openpyxl import load_workbook
++from docx import Document
++from pathlib import Path
++
++AUDIT = Path('/root/Trailer_Detention_Audit.xlsx')
++BRIEF = Path('/root/Trailer_Detention_Brief.docx')
++EXPECTED_SHEETS = ['RawData', 'Formatted Data', 'Summary']
++EXPECTED_FMT_HEADERS = [
++    'Load ID', 'Carrier', 'Allowed Hold Hours', 'Actual Hold Hours',
++    'Seal Required', 'Seal Status', 'Yard', 'Dispatcher',
++    'Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary'
++]
++EXPECTED_SUMMARY_HEADERS = ['Carrier', 'Yard', 'Detention Overrun Errors', 'Seal Errors', 'Total Errors']
++
++wb = load_workbook(AUDIT, data_only=False)
++print('Audit sheet names:', wb.sheetnames)
++assert wb.sheetnames == EXPECTED_SHEETS, wb.sheetnames
++
++fmt = wb['Formatted Data']
++fmt_headers = [cell.value for cell in fmt[1]]
++print('Formatted Data headers:', fmt_headers)
++assert fmt.max_column == 12, fmt.max_column
++assert fmt_headers == EXPECTED_FMT_HEADERS, fmt_headers
++
++for row in fmt.iter_rows(min_row=2, min_col=9, max_col=12):
++    for cell in row:
++        assert cell.data_type != 'f', f'Formula found in Formatted Data {cell.coordinate}'
++    assert isinstance(row[0].value, (int, float)), f'Non-numeric detention flag at {row[0].coordinate}: {row[0].value!r}'
++    assert isinstance(row[1].value, (int, float)), f'Non-numeric seal flag at {row[1].coordinate}: {row[1].value!r}'
++    assert isinstance(row[2].value, (int, float)), f'Non-numeric total at {row[2].coordinate}: {row[2].value!r}'
++    assert isinstance(row[3].value, str), f'Non-string summary at {row[3].coordinate}: {row[3].value!r}'
++
++summary = wb['Summary']
++summary_headers = [cell.value for cell in summary[1]]
++print('Summary headers:', summary_headers)
++assert summary_headers == EXPECTED_SUMMARY_HEADERS, summary_headers
++last = [summary.cell(summary.max_row, col).value for col in range(1, 6)]
++print('Summary last row:', last)
++assert last[0] == 'Grand Total', last
++assert last[1] == '-', last
++for row in summary.iter_rows(min_row=2, min_col=3, max_col=5):
++    for cell in row:
++        assert cell.data_type != 'f', f'Formula found in Summary {cell.coordinate}'
++
++# Recompute totals from formatted rows and compare summary grand total
++computed_det = sum(fmt.cell(r, 9).value for r in range(2, fmt.max_row + 1))
++computed_seal = sum(fmt.cell(r, 10).value for r in range(2, fmt.max_row + 1))
++computed_total = sum(fmt.cell(r, 11).value for r in range(2, fmt.max_row + 1))
++print('Computed totals from Formatted Data:', computed_det, computed_seal, computed_total)
++assert [computed_det, computed_seal, computed_total] == last[2:5], (computed_det, computed_seal, computed_total, last)
++
++doc = Document(BRIEF)
++text = '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
++print('\nBrief document text:')
++print(text)
++required_phrases = [
++    'Detention Overrun means actual hold hours exceeded the allowed threshold',
++    'Seal Error means a seal was required but not verified',
++    '7 Detention Overrun errors',
++    '4 Seal errors',
++    '11 Total Errors',
++    'CarrierE',
++    'CarrierA',
++]
++for phrase in required_phrases:
++    assert phrase in text, f'Missing phrase in brief: {phrase}'
++assert 'Recommended actions' in text or 'recommend' in text.lower(), 'Missing recommendation'
++print('\nAll validation checks passed.')
+
+session_id: 20260611_045417_e2cbe9
+Completed successfully.
+
+Created:
+- /root/Trailer_Detention_Audit.xlsx
+- /root/Trailer_Detention_Brief.docx
+
+Source inspection output:
+- Sheet names: ['Detention']
+- Column headers:
+  Load ID, Carrier, Allowed Hold Hours, Actual Hold Hours, Seal Required, Seal Status, Yard, Dispatcher
+- Sample rows included:
+  - LD-001, CarrierA, 4, 4, YES, VERIFIED, Y1, Diaz
+  - LD-002, CarrierA, 4, 6, YES, PENDING, Y1, Diaz
+  - LD-003, CarrierB, 5, 5, NO, N/A, Y2, Mills
+  - LD-004, CarrierB, 3, 4, NO, N/A, Y2, Mills
+  - LD-005, CarrierC, 2, 2, YES, BROKEN, Y3, Chen
+
+Validation passed:
+- Audit workbook sheet names are exactly:
+  RawData, Formatted Data, Summary
+- Formatted Data has exactly 12 columns with the required headers.
+- Summary last row is:
+  Grand Total, -, 7, 4, 11
+- Computed columns contain concrete values, not formulas.
+- Brief document was reopened and its text printed/validated.
+
+Brief document text:
+Trailer Detention Audit Brief
+
+This audit checks trailer detention and seal-compliance exceptions across the source log. A Detention Overrun means actual hold hours exceeded the allowed threshold, while a Seal Error means a seal was required but not verified. The computed grand totals are 7 Detention Overrun errors, 4 Seal errors, and 11 Total Errors. The carriers with the highest total errors include CarrierE and CarrierA. Recommended actions include tighter dispatch protocols for loads nearing detention thresholds and routine seal verification audits before yard release.
+
+All validation checks passed.

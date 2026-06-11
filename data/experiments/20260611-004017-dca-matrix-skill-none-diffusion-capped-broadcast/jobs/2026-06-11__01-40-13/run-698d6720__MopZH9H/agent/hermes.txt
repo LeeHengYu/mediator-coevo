@@ -1,0 +1,85 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build_cycle_count_variance_audit.py → b/build_cycle_count_variance_audit.py
+@@ -0,0 +1,231 @@
++import shutil
++from copy import copy
++
++import pandas as pd
++import openpyxl
++from openpyxl.utils.dataframe import dataframe_to_rows
++from docx import Document
++
++PLAN_PATH = '/root/Cycle_Plan.xlsx'
++LOG_PATH = '/root/Count_Event_Log.xlsx'
++TEMPLATE_PATH = '/root/Cycle_Template.xlsx'
++OUT_XLSX = '/root/Cycle_Count_Variance_Audit.xlsx'
++OUT_DOCX = '/root/Cycle_Count_Variance_Brief.docx'
++
++# ---- Load source data ----
++plan_df = pd.read_excel(PLAN_PATH)
++log_df = pd.read_excel(LOG_PATH)
++
++required_plan_cols = [
++    'Facility', 'Session ID', 'Bin ID', 'Product ID',
++    'Expected Qty', 'Allowed Variance', 'Approval Needed'
++]
++required_log_cols = [
++    'Facility', 'Session ID', 'Bin ID', 'Event Time',
++    'Event Type', 'Count Qty', 'Approval Code'
++]
++missing_plan = [c for c in required_plan_cols if c not in plan_df.columns]
++missing_log = [c for c in required_log_cols if c not in log_df.columns]
++if missing_plan:
++    raise ValueError(f'Missing required Cycle_Plan columns: {missing_plan}')
++if missing_log:
++    raise ValueError(f'Missing required Count_Event_Log columns: {missing_log}')
++
++# ---- Prepare FINAL event lookup ----
++log_final = log_df.copy()
++log_final['_source_order'] = range(len(log_final))
++log_final = log_final[log_final['Event Type'].astype(str).str.strip().str.upper() == 'FINAL']
++
++for col in ['Facility', 'Session ID', 'Bin ID']:
++    log_final = log_final[log_final[col].notna() & (log_final[col].astype(str).str.strip() != '')]
++log_final = log_final[log_final['Count Qty'].notna()]
++
++# Use actual timestamp column found during inspection. If parsing failed for some rows,
++# source order remains as a deterministic tiebreaker so the latest occurrence wins.
++time_col = 'Event Time'
++log_final['_event_time_parsed'] = pd.to_datetime(log_final[time_col], errors='coerce')
++if log_final['_event_time_parsed'].notna().any():
++    log_final = log_final.sort_values(['_event_time_parsed', '_source_order'], ascending=[False, False])
++else:
++    log_final = log_final.sort_values('_source_order', ascending=False)
++
++log_final = log_final.drop_duplicates(subset=['Facility', 'Session ID', 'Bin ID'], keep='first')
++
++final_lookup = {}
++for _, row in log_final.iterrows():
++    key = (str(row['Facility']).strip(), str(row['Session ID']).strip(), str(row['Bin ID']).strip())
++    final_lookup[key] = row['Count Qty']
++
++# ---- Build Formatted Data ----
++formatted_rows = []
++for _, row in plan_df.iterrows():
++    key = (str(row['Facility']).strip(), str(row['Session ID']).strip(), str(row['Bin ID']).strip())
++    count_qty = final_lookup.get(key, None)
++
++    has_final = count_qty is not None
++    missing_final = 0 if has_final else 1
++
++    approval_gap = 0
++    if has_final:
++        approval_needed = str(row['Approval Needed']).strip().upper()
++        if approval_needed == 'YES':
++            expected = float(row['Expected Qty'])
++            allowed = float(row['Allowed Variance'])
++            if abs(expected - float(count_qty)) > allowed:
++                approval_gap = 1
++
++    total_errors = missing_final + approval_gap
++
+… omitted 153 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260610_174337_cbd3c5

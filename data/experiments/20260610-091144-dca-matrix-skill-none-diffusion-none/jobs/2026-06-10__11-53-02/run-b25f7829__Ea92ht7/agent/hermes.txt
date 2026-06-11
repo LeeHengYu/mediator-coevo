@@ -1,0 +1,119 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/service_queue_sla_audit.py → b/service_queue_sla_audit.py
+@@ -0,0 +1,236 @@
++import os
++import numpy as np
++import pandas as pd
++import openpyxl
++from docx import Document
++
++SOURCE = '/root/Ticket_Queue.xlsx'
++EXCEL_OUT = '/root/Service_Queue_SLA_Audit.xlsx'
++DOCX_OUT = '/root/Service_Queue_SLA_Brief.docx'
++
++pd.set_option('display.max_columns', None)
++pd.set_option('display.width', 200)
++pd.set_option('display.max_colwidth', 80)
++
++print('=' * 80)
++print('Step 0 – Inspect the source workbook')
++wb = openpyxl.load_workbook(SOURCE)
++print('Sheet names:', wb.sheetnames)
++for s in wb.sheetnames:
++    ws = wb[s]
++    print(f'\n--- {s} (rows={ws.max_row}, cols={ws.max_column}) ---')
++    for r in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True):
++        print(r)
++
++print('\n' + '=' * 80)
++print('Step 1 – Read data into Pandas')
++tickets = pd.read_excel(SOURCE, sheet_name='Tickets')
++sla_rules = pd.read_excel(SOURCE, sheet_name='SLA_Rules')
++
++print('\nTickets dtypes:')
++print(tickets.dtypes)
++print('\nTickets head:')
++print(tickets.head())
++print('\nSLA_Rules:')
++print(sla_rules)
++print('\nTickets columns:', list(tickets.columns))
++print('SLA_Rules columns:', list(sla_rules.columns))
++
++# Validate required columns are present after exact inspection.
++required_ticket_cols = ['Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner', 'Escalation Code', 'Region', 'Analyst']
++required_sla_cols = ['Priority Tier', 'Max Open Hours', 'Escalation Required']
++missing_ticket_cols = [c for c in required_ticket_cols if c not in tickets.columns]
++missing_sla_cols = [c for c in required_sla_cols if c not in sla_rules.columns]
++if missing_ticket_cols or missing_sla_cols:
++    raise ValueError(f'Missing expected columns. Tickets missing={missing_ticket_cols}; SLA_Rules missing={missing_sla_cols}')
++
++print('\n' + '=' * 80)
++print('Step 2 – Build RawData')
++raw_data_df = tickets.copy()
++print('RawData columns:', list(raw_data_df.columns))
++print('RawData row count:', len(raw_data_df))
++
++print('\n' + '=' * 80)
++print('Step 3 – Build Formatted Data')
++formatted_source = tickets.copy()
++sla_rules_clean = sla_rules.copy()
++formatted_source['Priority Tier'] = formatted_source['Priority Tier'].astype(str).str.strip()
++sla_rules_clean['Priority Tier'] = sla_rules_clean['Priority Tier'].astype(str).str.strip()
++formatted_source['Open Age Hours'] = pd.to_numeric(formatted_source['Open Age Hours'], errors='coerce').astype(float)
++sla_rules_clean['Max Open Hours'] = pd.to_numeric(sla_rules_clean['Max Open Hours'], errors='coerce').astype(float)
++
++formatted_df = formatted_source.merge(
++    sla_rules_clean[['Priority Tier', 'Max Open Hours', 'Escalation Required']],
++    on='Priority Tier',
++    how='left'
++)
++
++if formatted_df['Max Open Hours'].isna().any():
++    unmatched = sorted(formatted_df.loc[formatted_df['Max Open Hours'].isna(), 'Priority Tier'].dropna().unique().tolist())
++    raise ValueError(f'Priority Tier values without SLA_Rules match: {unmatched}')
++
++formatted_df['SLA Breach'] = (formatted_df['Open Age Hours'].astype(float) > formatted_df['Max Open Hours'].astype(float)).astype(int)
++
++escalation_required = formatted_df['Escalation Required'].astype(str).str.strip().str.upper().eq('Y')
++escalation_code = formatted_df['Escalation Code']
++escalation_blank = (
++    escalation_code.isna()
++    | (escalation_code.astype(str).str.strip() == '')
+… omitted 158 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/service_queue_sla_audit.py → b//root/service_queue_sla_audit.py
+@@ -1,5 +1,4 @@
+ import os
+-import numpy as np
+ import pandas as pd
+ import openpyxl
+ from docx import Document
+  ┊ review diff
+a//root/service_queue_sla_audit.py → b//root/service_queue_sla_audit.py
+@@ -80,13 +80,16 @@
+ formatted_df['Missing Escalation'] = (escalation_required & escalation_blank).astype(int)
+ formatted_df['Total Errors'] = (formatted_df['SLA Breach'] + formatted_df['Missing Escalation']).astype(int)
+ 
+-conditions = [
+-    (formatted_df['SLA Breach'].eq(1) & formatted_df['Missing Escalation'].eq(1)),
+-    (formatted_df['SLA Breach'].eq(1) & formatted_df['Missing Escalation'].eq(0)),
+-    (formatted_df['SLA Breach'].eq(0) & formatted_df['Missing Escalation'].eq(1)),
+-]
+-choices = ['SLA Breach, Missing Escalation', 'SLA Breach', 'Missing Escalation']
+-formatted_df['Error Summary'] = np.select(conditions, choices, default='None').astype(str)
++def build_error_summary(row):
++    if row['SLA Breach'] == 1 and row['Missing Escalation'] == 1:
++        return 'SLA Breach, Missing Escalation'
++    if row['SLA Breach'] == 1:
++        return 'SLA Breach'
++    if row['Missing Escalation'] == 1:
++        return 'Missing Escalation'
++    return 'None'
++
++formatted_df['Error Summary'] = formatted_df.apply(build_error_summary, axis=1).astype(str)
+ 
+ formatted_columns = [
+     'Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner', 'Escalation Code',
+
+session_id: 20260610_035509_d2a033

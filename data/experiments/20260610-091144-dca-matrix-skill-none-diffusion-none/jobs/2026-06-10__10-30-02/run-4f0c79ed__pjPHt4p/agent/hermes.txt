@@ -1,0 +1,124 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_sla_audit.py → b/create_sla_audit.py
+@@ -0,0 +1,211 @@
++import os
++from pathlib import Path
++
++import pandas as pd
++import openpyxl
++from docx import Document
++
++SRC = '/root/Ticket_Queue.xlsx'
++OUT_XLSX = '/root/Service_Queue_SLA_Audit.xlsx'
++OUT_DOCX = '/root/Service_Queue_SLA_Brief.docx'
++
++print('STEP 0 / 1: Loading and inspecting source workbook')
++wb = openpyxl.load_workbook(SRC, data_only=True)
++print('Sheet names:', wb.sheetnames)
++for sheet in wb.sheetnames:
++    ws = wb[sheet]
++    rows = list(ws.iter_rows(values_only=True))
++    print(f'\n--- Sheet: {sheet} ---')
++    print('Dimensions:', ws.max_row, 'rows x', ws.max_column, 'cols')
++    print('Headers:', list(rows[0]) if rows else [])
++    print('First few rows:')
++    for r in rows[:6]:
++        print(r)
++
++tickets = pd.read_excel(SRC, sheet_name='Tickets')
++sla_rules = pd.read_excel(SRC, sheet_name='SLA_Rules')
++
++print('\ntickets.columns.tolist():', tickets.columns.tolist())
++print('sla_rules.columns.tolist():', sla_rules.columns.tolist())
++print('\nsla_rules entirely:')
++print(sla_rules.to_string(index=False))
++print('\ntickets.dtypes:')
++print(tickets.dtypes.to_string())
++if 'Escalation Code' in tickets.columns:
++    esc = tickets['Escalation Code']
++    blank_mask = esc.isna() | esc.astype(str).str.strip().eq('')
++    print('\nEscalation Code NaN count:', esc.isna().sum())
++    print('Escalation Code blank/NaN/whitespace count:', int(blank_mask.sum()))
++    print('Escalation Code values including NaN marker:', esc.astype(object).where(~esc.isna(), '<NaN>').tolist())
++print('\nFull Tickets sheet:')
++print(tickets.to_string(index=False))
++print('Unique Queue values:', tickets['Queue'].drop_duplicates().tolist())
++print('Unique Region values:', tickets['Region'].drop_duplicates().tolist())
++print('Unique Priority Tier values:', tickets['Priority Tier'].drop_duplicates().tolist())
++print('Sample Escalation Code values:', tickets['Escalation Code'].astype(object).where(~tickets['Escalation Code'].isna(), '<NaN>').drop_duplicates().tolist())
++
++print('\nSTEP 2: Building SLA lookup')
++sla_lookup = {
++    row['Priority Tier']: {
++        'Max Open Hours': row['Max Open Hours'],
++        'Escalation Required': row['Escalation Required'],
++    }
++    for _, row in sla_rules.iterrows()
++}
++print('SLA lookup:', sla_lookup)
++
++print('\nSTEP 3: Building Formatted Data')
++required_first = ['Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner', 'Escalation Code', 'Region', 'Analyst']
++missing = [c for c in required_first if c not in tickets.columns]
++if missing:
++    raise ValueError(f'Missing required Tickets columns: {missing}')
++formatted = tickets.copy()[required_first]
++
++def is_blank(value):
++    if pd.isna(value):
++        return True
++    return str(value).strip() == ''
++
++def escalation_required(value):
++    return str(value).strip().lower() in {'y', 'yes'}
++
++formatted['SLA Breach'] = formatted.apply(
++    lambda r: int(r['Open Age Hours'] > sla_lookup[r['Priority Tier']]['Max Open Hours']),
++    axis=1,
++).astype(int)
++formatted['Missing Escalation'] = formatted.apply(
++    lambda r: int(escalation_required(sla_lookup[r['Priority Tier']]['Escalation Required']) and is_blank(r['Escalation Code'])),
++    axis=1,
+… omitted 133 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/create_sla_audit.py → b//root/create_sla_audit.py
+@@ -164,9 +164,9 @@
+ out_wb = openpyxl.load_workbook(OUT_XLSX, data_only=True)
+ print('Output sheet names:', out_wb.sheetnames)
+ assert out_wb.sheetnames == ['RawData', 'Formatted Data', 'Summary']
+-raw_check = pd.read_excel(OUT_XLSX, sheet_name='RawData')
+-formatted_check = pd.read_excel(OUT_XLSX, sheet_name='Formatted Data')
+-summary_check = pd.read_excel(OUT_XLSX, sheet_name='Summary')
++raw_check = pd.read_excel(OUT_XLSX, sheet_name='RawData', keep_default_na=False)
++formatted_check = pd.read_excel(OUT_XLSX, sheet_name='Formatted Data', keep_default_na=False)
++summary_check = pd.read_excel(OUT_XLSX, sheet_name='Summary', keep_default_na=False)
+ assert len(raw_check) == len(tickets)
+ assert formatted_check.columns.tolist() == final_cols
+ assert len(formatted_check.columns) == 12
+  ┊ review diff
+a//root/create_sla_audit.py → b//root/create_sla_audit.py
+@@ -182,12 +182,22 @@
+ print('Excel exists:', Path(OUT_XLSX).exists(), 'size:', Path(OUT_XLSX).stat().st_size)
+ print('Word exists:', Path(OUT_DOCX).exists(), 'size:', Path(OUT_DOCX).stat().st_size)
+ for sheet_name in out_wb.sheetnames:
+-    df = pd.read_excel(OUT_XLSX, sheet_name=sheet_name)
++    df = pd.read_excel(OUT_XLSX, sheet_name=sheet_name, keep_default_na=False)
+     print(f'\nValidation sheet: {sheet_name}')
+     print('Headers:', df.columns.tolist())
+     print('Row count:', len(df))
+     print('Sample rows:')
+     print(df.head(5).to_string(index=False))
++
++# Openpyxl-level check confirms the literal string 'None' is present in Error Summary cells,
++# even though pandas default NA parsing can display that literal as NaN unless keep_default_na=False is used.
++ws_fmt = out_wb['Formatted Data']
++headers = [cell.value for cell in ws_fmt[1]]
++err_col_idx = headers.index('Error Summary') + 1
++openpyxl_error_values = [ws_fmt.cell(row=r, column=err_col_idx).value for r in range(2, ws_fmt.max_row + 1)]
++assert 'None' in openpyxl_error_values
++assert set(openpyxl_error_values).issubset(valid_error_summaries)
++print('\nOpenpyxl Error Summary values:', openpyxl_error_values)
+ print('\nValidation Summary including Grand Total:')
+ print(summary_check.to_string(index=False))
+ 

@@ -1,0 +1,148 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+❌ Error during OpenAI-compatible API call #6: Could not determine home directory.
+❌ Error during OpenAI-compatible API call #7: Could not determine home directory.
+a/timesheet_audit.py → b/timesheet_audit.py
+@@ -0,0 +1,58 @@
++import pandas as pd
++from pathlib import Path
++src = Path('/root/Timesheet_Submissions.xlsx')
++print('Source exists:', src.exists(), 'size:', src.stat().st_size if src.exists() else None)
++entries = pd.read_excel(src, sheet_name='Entries')
++rules = pd.read_excel(src, sheet_name='BreakRules')
++print('\nEntries column headers:')
++print(list(entries.columns))
++print('\nEntries first 5 rows:')
++print(entries.head(5).to_string(index=False))
++print('\nEntries total row count:', len(entries))
++print('\nBreakRules ALL rows:')
++print(rules.to_string(index=False))
++print('\nBreakRules column headers:')
++print(list(rules.columns))
++print('\nExact column names:')
++for col in rules.columns:
++    lower = str(col).lower()
++    if 'role' in lower or 'break' in lower or 'threshold' in lower or 'overtime' in lower:
++        print(repr(col))
++print('\nEntries dtypes:')
++print(entries.dtypes.to_string())
++print('\nBreakRules dtypes:')
++print(rules.dtypes.to_string())
++print('\nEntries null counts:')
++print(entries.isna().sum().to_string())
++print('\nBreakRules null counts:')
++print(rules.isna().sum().to_string())
++if 'Approval Code' in entries.columns:
++    s = entries['Approval Code']
++    print('\nApproval Code blank analysis:')
++    print('dtype:', s.dtype)
++    print('NaN count:', int(s.isna().sum()))
++    print('empty string count:', int((s == '').sum()))
++    print('whitespace-only string count:', int(s.astype(str).str.fullmatch(r'\s*', na=False).sum()))
++    print('unique sample including null marker:')
++    print(s.where(~s.isna(), '<NaN>').drop_duplicates().head(20).to_list())
++print('\nUnexpected null/data-type issues:')
++issues = []
++for col in entries.columns:
++    if col != 'Approval Code' and entries[col].isna().any():
++        issues.append(f'Entries {col} has {entries[col].isna().sum()} nulls')
++for col in rules.columns:
++    if rules[col].isna().any():
++        issues.append(f'BreakRules {col} has {rules[col].isna().sum()} nulls')
++for col in ['Hours Worked','Break Minutes']:
++    if col in entries.columns:
++        coerced = pd.to_numeric(entries[col], errors='coerce')
++        bad = coerced.isna() & ~entries[col].isna()
++        if bad.any():
++            issues.append(f'Entries {col} has {bad.sum()} non-numeric values')
++for col in ['Min Break Minutes','Overtime Threshold']:
++    if col in rules.columns:
++        coerced = pd.to_numeric(rules[col], errors='coerce')
++        bad = coerced.isna() & ~rules[col].isna()
++        if bad.any():
++            issues.append(f'BreakRules {col} has {bad.sum()} non-numeric values')
++print('\n'.join(issues) if issues else 'No unexpected nulls/data-type issues found. Approval Code blanks are NaN (not empty strings) where missing.' )
+  ┊ review diff
+a/build_timesheet_deliverables.py → b/build_timesheet_deliverables.py
+@@ -0,0 +1,221 @@
++from pathlib import Path
++import pandas as pd
++import numpy as np
++from openpyxl import load_workbook
++from docx import Document
++
++SRC = Path('/root/Timesheet_Submissions.xlsx')
++AUDIT = Path('/root/Timesheet_Compliance_Audit.xlsx')
++BRIEF = Path('/root/Timesheet_Compliance_Brief.docx')
++
++REQUIRED_BASE_COLS = [
++    'Week Ending',
++    'Employee ID',
++    'Role',
++    'Hours Worked',
++    'Break Minutes',
++    'Approval Code',
++    'Project Code',
++    'Manager',
++]
++FORMATTED_COLS = REQUIRED_BASE_COLS + [
++    'Break Deficit',
++    'Approval Missing',
++    'Total Errors',
++    'Error Summary',
++]
++SUMMARY_COLS = ['Employee ID', 'Week Ending', 'Break Deficits', 'Approval Gaps', 'Total Errors']
++
++
++def missing_approval(value):
++    if pd.isna(value):
++        return True
++    if isinstance(value, str) and value.strip() == '':
++        return True
++    return False
++
++
++def error_summary(row):
++    break_deficit = int(row['Break Deficit']) == 1
++    approval_missing = int(row['Approval Missing']) == 1
++    if break_deficit and approval_missing:
++        return 'Break Deficit, Approval Missing'
++    if break_deficit:
++        return 'Break Deficit'
++    if approval_missing:
++        return 'Approval Missing'
++    return 'None'
++
++
++def build_workbook():
++    entries = pd.read_excel(SRC, sheet_name='Entries')
++    rules = pd.read_excel(SRC, sheet_name='BreakRules')
++
++    # RawData copies the Entries table exactly.
++    raw = entries.copy()
++
++    # Formatted Data starts with the same data/order and exact first 8 headers.
++    formatted = entries.copy()
++    if len(formatted.columns) < 8:
++        raise ValueError('Entries sheet has fewer than 8 columns')
++    rename_map = {old: new for old, new in zip(formatted.columns[:8], REQUIRED_BASE_COLS)}
++    formatted = formatted.rename(columns=rename_map)
++    formatted = formatted[REQUIRED_BASE_COLS]
++
++    for col in ['Role', 'Min Break Minutes', 'Overtime Threshold']:
++        if col not in rules.columns:
++            raise ValueError(f'BreakRules missing required column: {col}')
++
++    merged = formatted.merge(
++        rules[['Role', 'Min Break Minutes', 'Overtime Threshold']],
++        on='Role',
++        how='left',
++        validate='many_to_one',
++    )
++    if merged[['Min Break Minutes', 'Overtime Threshold']].isna().any().any():
++        missing_roles = merged.loc[
++            merged[['Min Break Minutes', 'Overtime Threshold']].isna().any(axis=1), 'Role'
++        ].drop_duplicates().tolist()
+… omitted 143 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260611_032717_639132

@@ -1,0 +1,167 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a//tmp/receiving_audit.py → b//tmp/receiving_audit.py
+@@ -0,0 +1,141 @@
++from pathlib import Path
++import pandas as pd
++from openpyxl import load_workbook, Workbook
++from docx import Document
++
++SRC = Path('/root/Receiving_Log.xlsx')
++XLSX_OUT = Path('/root/Receiving_Exception_Audit.xlsx')
++DOCX_OUT = Path('/root/Receiving_Exception_Brief.docx')
++EXPECTED_FIRST8 = ['Receipt ID','Item Code','Expected Qty','Received Qty','Storage Class','Temp Status','Supplier','Dock']
++FORMATTED_HEADERS = EXPECTED_FIRST8 + ['Qty Variance','Cold Chain Error','Total Errors','Error Summary']
++SUMMARY_HEADERS = ['Item Code','Supplier','Qty Variance Errors','Cold Chain Errors','Total Errors']
++
++if not SRC.exists():
++    raise FileNotFoundError(SRC)
++
++xl = pd.ExcelFile(SRC)
++sheet_name = xl.sheet_names[0]
++df = pd.read_excel(SRC, sheet_name=sheet_name, engine='openpyxl')
++
++print('SOURCE INSPECTION')
++print('Workbook:', SRC)
++print('Sheet names:', xl.sheet_names)
++print('Selected sheet:', sheet_name)
++print('Total data rows:', len(df))
++print('Column headers:')
++for i, col in enumerate(df.columns, start=1):
++    print(f'  {i}. {col!r}')
++print('Data types:')
++for col, dtype in df.dtypes.items():
++    print(f'  {col}: {dtype}')
++print('First 10 rows:')
++print(df.head(10).to_string(index=False))
++missing = [c for c in EXPECTED_FIRST8 if c not in df.columns]
++if missing:
++    raise ValueError(f'Missing expected source columns: {missing}')
++
++# RawData: preserve exact source columns, row order, values.
++raw_df = df.copy()
++
++# Formatted Data: first 8 exact columns plus computed concrete values.
++fmt = df.loc[:, EXPECTED_FIRST8].copy()
++qty_variance = (fmt['Received Qty'] != fmt['Expected Qty']).astype(int)
++storage_norm = fmt['Storage Class'].astype(str).str.strip().str.upper()
++temp_norm = fmt['Temp Status'].astype(str).str.strip().str.upper()
++cold_error = (storage_norm.isin({'CHILLED','FROZEN'}) & (temp_norm != 'OK')).astype(int)
++fmt['Qty Variance'] = [int(x) for x in qty_variance.tolist()]
++fmt['Cold Chain Error'] = [int(x) for x in cold_error.tolist()]
++fmt['Total Errors'] = [int(q) + int(c) for q, c in zip(fmt['Qty Variance'], fmt['Cold Chain Error'])]
++
++def summarize(q, c):
++    q = int(q); c = int(c)
++    if q == 0 and c == 0:
++        return 'None'
++    if q == 1 and c == 0:
++        return 'Qty Variance'
++    if q == 0 and c == 1:
++        return 'Cold Chain Error'
++    return 'Qty Variance, Cold Chain Error'
++fmt['Error Summary'] = [summarize(q, c) for q, c in zip(fmt['Qty Variance'], fmt['Cold Chain Error'])]
++fmt = fmt.loc[:, FORMATTED_HEADERS]
++
++# Summary: aggregate from formatted data by Item Code, Supplier, only errors > 0, sorted.
++summary = (
++    fmt.groupby(['Item Code','Supplier'], dropna=False, as_index=False)
++    .agg(**{
++        'Qty Variance Errors': ('Qty Variance', 'sum'),
++        'Cold Chain Errors': ('Cold Chain Error', 'sum'),
++        'Total Errors': ('Total Errors', 'sum'),
++    })
++)
++summary = summary[summary['Total Errors'] > 0].copy()
++summary = summary.sort_values(['Item Code','Supplier'], ascending=[True, True], kind='mergesort')
++for c in ['Qty Variance Errors','Cold Chain Errors','Total Errors']:
++    summary[c] = [int(x) for x in summary[c].tolist()]
++
++total_qty = int(fmt['Qty Variance'].sum())
++total_cold = int(fmt['Cold Chain Error'].sum())
++total_errors = int(fmt['Total Errors'].sum())
+… omitted 63 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/validate_receiving.py → b//tmp/validate_receiving.py
+@@ -0,0 +1,97 @@
++from pathlib import Path
++import re
++import pandas as pd
++from openpyxl import load_workbook
++from docx import Document
++
++SRC = Path('/root/Receiving_Log.xlsx')
++XLSX_OUT = Path('/root/Receiving_Exception_Audit.xlsx')
++DOCX_OUT = Path('/root/Receiving_Exception_Brief.docx')
++EXPECTED_FIRST8 = ['Receipt ID','Item Code','Expected Qty','Received Qty','Storage Class','Temp Status','Supplier','Dock']
++FORMATTED_HEADERS = EXPECTED_FIRST8 + ['Qty Variance','Cold Chain Error','Total Errors','Error Summary']
++SUMMARY_HEADERS = ['Item Code','Supplier','Qty Variance Errors','Cold Chain Errors','Total Errors']
++
++checks = []
++def check(name, condition, detail=''):
++    if not condition:
++        raise AssertionError(f'{name} FAILED {detail}')
++    checks.append((name, detail))
++    print(f'PASS: {name}' + (f' — {detail}' if detail else ''))
++
++src_df = pd.read_excel(SRC, sheet_name=0, engine='openpyxl')
++wb = load_workbook(XLSX_OUT, data_only=False)
++check('Sheet names exact', wb.sheetnames == ['RawData','Formatted Data','Summary'], str(wb.sheetnames))
++
++raw_ws = wb['RawData']
++fmt_ws = wb['Formatted Data']
++sum_ws = wb['Summary']
++check('RawData row count matches source data rows', raw_ws.max_row - 1 == len(src_df), f'{raw_ws.max_row - 1} rows')
++raw_headers = [raw_ws.cell(1, c).value for c in range(1, raw_ws.max_column+1)]
++check('RawData headers match source headers', raw_headers == list(src_df.columns), str(raw_headers))
++
++fmt_headers = [fmt_ws.cell(1, c).value for c in range(1, fmt_ws.max_column+1)]
++check('Formatted Data has 12 columns', fmt_ws.max_column == 12, str(fmt_ws.max_column))
++check('Formatted Data headers exact', fmt_headers == FORMATTED_HEADERS, str(fmt_headers))
++
++valid_summaries = {'None','Qty Variance','Cold Chain Error','Qty Variance, Cold Chain Error'}
++for r in range(2, fmt_ws.max_row+1):
++    exp = fmt_ws.cell(r, 3).value
++    rec = fmt_ws.cell(r, 4).value
++    storage = str(fmt_ws.cell(r, 5).value).strip().upper()
++    temp = str(fmt_ws.cell(r, 6).value).strip().upper()
++    q = fmt_ws.cell(r, 9).value
++    c = fmt_ws.cell(r, 10).value
++    t = fmt_ws.cell(r, 11).value
++    s = fmt_ws.cell(r, 12).value
++    expected_q = int(rec != exp)
++    expected_c = int(storage in {'CHILLED','FROZEN'} and temp != 'OK')
++    expected_t = expected_q + expected_c
++    if expected_q == 0 and expected_c == 0:
++        expected_s = 'None'
++    elif expected_q == 1 and expected_c == 0:
++        expected_s = 'Qty Variance'
++    elif expected_q == 0 and expected_c == 1:
++        expected_s = 'Cold Chain Error'
++    else:
++        expected_s = 'Qty Variance, Cold Chain Error'
++    check(f'Formatted computed row {r}', isinstance(q, int) and isinstance(c, int) and isinstance(t, int) and q == expected_q and c == expected_c and t == expected_t and s == expected_s and s in valid_summaries)
++
++sum_headers = [sum_ws.cell(1, c).value for c in range(1, sum_ws.max_column+1)]
++check('Summary has 5 columns', sum_ws.max_column == 5, str(sum_ws.max_column))
++check('Summary headers exact', sum_headers == SUMMARY_HEADERS, str(sum_headers))
++last = sum_ws.max_row
++check('Summary last row Grand Total label', sum_ws.cell(last, 1).value == 'Grand Total')
++check('Summary last row Supplier dash', sum_ws.cell(last, 2).value == '-')
++
++summary_keys = []
++for r in range(2, last):
++    key = (sum_ws.cell(r, 1).value, sum_ws.cell(r, 2).value)
++    summary_keys.append(key)
++    check(f'Summary row {r} Total Errors > 0', sum_ws.cell(r, 5).value > 0)
++check('Summary rows sorted by Item Code asc then Supplier asc', summary_keys == sorted(summary_keys), str(summary_keys))
++
++fmt_qty_total = sum(fmt_ws.cell(r, 9).value for r in range(2, fmt_ws.max_row+1))
++fmt_cold_total = sum(fmt_ws.cell(r, 10).value for r in range(2, fmt_ws.max_row+1))
++fmt_total = sum(fmt_ws.cell(r, 11).value for r in range(2, fmt_ws.max_row+1))
++check('Grand Total values match Formatted Data totals', [sum_ws.cell(last, c).value for c in range(3,6)] == [fmt_qty_total, fmt_cold_total, fmt_total], str([fmt_qty_total, fmt_cold_total, fmt_total]))
++check('Grand Total values are Python/openpyxl ints', all(isinstance(sum_ws.cell(last, c).value, int) for c in range(3,6)))
++
+… omitted 19 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260610_013510_54f54d

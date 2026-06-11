@@ -1,0 +1,110 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_receiving_audit.py → b/create_receiving_audit.py
+@@ -0,0 +1,159 @@
++#!/usr/bin/env python3
++"""Generate receiving exception audit workbook and executive brief."""
++from pathlib import Path
++
++import pandas as pd
++from docx import Document
++
++SOURCE = Path('/root/Receiving_Log.xlsx')
++AUDIT_XLSX = Path('/root/Receiving_Exception_Audit.xlsx')
++BRIEF_DOCX = Path('/root/Receiving_Exception_Brief.docx')
++
++REQUIRED_FIRST_COLUMNS = [
++    'Receipt ID',
++    'Item Code',
++    'Expected Qty',
++    'Received Qty',
++    'Storage Class',
++    'Temp Status',
++    'Supplier',
++    'Dock',
++]
++ADDED_COLUMNS = ['Qty Variance', 'Cold Chain Error', 'Total Errors', 'Error Summary']
++SUMMARY_COLUMNS = ['Item Code', 'Supplier', 'Qty Variance Errors', 'Cold Chain Errors', 'Total Errors']
++
++
++def build_formatted(raw: pd.DataFrame) -> pd.DataFrame:
++    """Return Formatted Data sheet with concrete computed values."""
++    missing = [col for col in REQUIRED_FIRST_COLUMNS if col not in raw.columns]
++    if missing:
++        raise ValueError(f'Source workbook is missing required columns: {missing}')
++
++    formatted = raw.loc[:, REQUIRED_FIRST_COLUMNS].copy()
++
++    expected = pd.to_numeric(formatted['Expected Qty'], errors='coerce')
++    received = pd.to_numeric(formatted['Received Qty'], errors='coerce')
++    qty_variance = received.ne(expected).astype(int)
++
++    storage_class = formatted['Storage Class'].astype('string').str.strip().str.upper()
++    temp_status = formatted['Temp Status'].astype('string').str.strip().str.upper()
++    cold_chain_error = (storage_class.isin(['CHILLED', 'FROZEN']) & temp_status.ne('OK')).astype(int)
++
++    formatted['Qty Variance'] = qty_variance.astype(int)
++    formatted['Cold Chain Error'] = cold_chain_error.astype(int)
++    formatted['Total Errors'] = (formatted['Qty Variance'] + formatted['Cold Chain Error']).astype(int)
++
++    def summarize(row: pd.Series) -> str:
++        labels = []
++        if int(row['Qty Variance']) == 1:
++            labels.append('Qty Variance')
++        if int(row['Cold Chain Error']) == 1:
++            labels.append('Cold Chain Error')
++        return ', '.join(labels) if labels else 'None'
++
++    formatted['Error Summary'] = formatted.apply(summarize, axis=1).astype(str)
++    return formatted.loc[:, REQUIRED_FIRST_COLUMNS + ADDED_COLUMNS]
++
++
++def build_summary(formatted: pd.DataFrame) -> pd.DataFrame:
++    """Return filtered grouped Summary sheet with Grand Total row."""
++    grouped = (
++        formatted.groupby(['Item Code', 'Supplier'], dropna=False, as_index=False)[
++            ['Qty Variance', 'Cold Chain Error', 'Total Errors']
++        ]
++        .sum()
++        .rename(columns={
++            'Qty Variance': 'Qty Variance Errors',
++            'Cold Chain Error': 'Cold Chain Errors',
++        })
++    )
++    grouped = grouped[grouped['Total Errors'] > 0].copy()
++    grouped = grouped.sort_values(['Item Code', 'Supplier'], ascending=[True, True], kind='mergesort')
++
++    for col in ['Qty Variance Errors', 'Cold Chain Errors', 'Total Errors']:
++        grouped[col] = grouped[col].astype(int)
++
++    totals = {
++        'Item Code': 'Grand Total',
++        'Supplier': '-',
+… omitted 81 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/create_receiving_audit.py → b//root/create_receiving_audit.py
+@@ -93,9 +93,8 @@
+     total_errors = int(formatted['Total Errors'].sum())
+ 
+     item_totals = (
+-        formatted.groupby('Item Code', dropna=False, as_index=False)['Total Errors']
+-        .sum()
+-        .query('`Total Errors` > 0')
++        summary[summary['Item Code'].ne('Grand Total')]
++        .loc[:, ['Item Code', 'Total Errors']]
+         .sort_values(['Total Errors', 'Item Code'], ascending=[False, True], kind='mergesort')
+     )
+     high_priority = [str(x) for x in item_totals.head(2)['Item Code'].tolist()]
+  ┊ review diff
+a//root/create_receiving_audit.py → b//root/create_receiving_audit.py
+@@ -118,7 +118,7 @@
+ def print_verification(brief_text: str) -> None:
+     """Print verifier-requested workbook/docx evidence."""
+     print('\n=== Excel Verification ===')
+-    sheets = pd.read_excel(AUDIT_XLSX, sheet_name=None, engine='openpyxl')
++    sheets = pd.read_excel(AUDIT_XLSX, sheet_name=None, engine='openpyxl', keep_default_na=False)
+     for sheet_name, df in sheets.items():
+         print(f'\nSheet: {sheet_name}')
+         print(f'Shape: {df.shape}')
+
+session_id: 20260610_051549_7ba113

@@ -1,0 +1,167 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build_receiving_audit.py → b/build_receiving_audit.py
+@@ -0,0 +1,165 @@
++from pathlib import Path
++import pandas as pd
++from openpyxl import Workbook, load_workbook
++from docx import Document
++
++SOURCE = Path('/root/Receiving_Log.xlsx')
++AUDIT_XLSX = Path('/root/Receiving_Exception_Audit.xlsx')
++BRIEF_DOCX = Path('/root/Receiving_Exception_Brief.docx')
++
++REQUIRED_HEADERS = [
++    'Receipt ID', 'Item Code', 'Expected Qty', 'Received Qty',
++    'Storage Class', 'Temp Status', 'Supplier', 'Dock'
++]
++FORMATTED_HEADERS = REQUIRED_HEADERS + [
++    'Qty Variance', 'Cold Chain Error', 'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = [
++    'Item Code', 'Supplier', 'Qty Variance Errors', 'Cold Chain Errors', 'Total Errors'
++]
++
++
++def error_summary(qty_var: int, cold_err: int) -> str:
++    if qty_var == 0 and cold_err == 0:
++        return 'None'
++    if qty_var == 1 and cold_err == 0:
++        return 'Qty Variance'
++    if qty_var == 0 and cold_err == 1:
++        return 'Cold Chain Error'
++    return 'Qty Variance, Cold Chain Error'
++
++
++def autosize(ws):
++    for col in ws.columns:
++        max_len = 0
++        letter = col[0].column_letter
++        for cell in col:
++            value = cell.value
++            if value is not None:
++                max_len = max(max_len, len(str(value)))
++        ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 40)
++
++
++def main():
++    # Inspect/load raw source with openpyxl to preserve exact worksheet values/order.
++    src_wb = load_workbook(SOURCE, data_only=True)
++    src_ws = src_wb[src_wb.sheetnames[0]]
++    raw_rows = [list(row) for row in src_ws.iter_rows(values_only=True)]
++    if not raw_rows:
++        raise ValueError('Source workbook contains no rows')
++    raw_headers = raw_rows[0]
++    missing = [h for h in REQUIRED_HEADERS if h not in raw_headers]
++    if missing:
++        raise ValueError(f'Missing required source columns: {missing}; found {raw_headers}')
++
++    # Build pandas DataFrame from exact raw rows and map required columns by exact names.
++    df = pd.DataFrame(raw_rows[1:], columns=raw_headers)
++    formatted = df[REQUIRED_HEADERS].copy()
++
++    qty_variance = (formatted['Received Qty'] != formatted['Expected Qty']).astype(int)
++    storage = formatted['Storage Class'].astype(str).str.upper()
++    temp = formatted['Temp Status'].astype(str).str.upper()
++    cold_chain = (storage.isin(['CHILLED', 'FROZEN']) & (temp != 'OK')).astype(int)
++
++    formatted['Qty Variance'] = qty_variance.astype(int)
++    formatted['Cold Chain Error'] = cold_chain.astype(int)
++    formatted['Total Errors'] = (formatted['Qty Variance'] + formatted['Cold Chain Error']).astype(int)
++    formatted['Error Summary'] = [
++        error_summary(int(q), int(c))
++        for q, c in zip(formatted['Qty Variance'], formatted['Cold Chain Error'])
++    ]
++
++    summary = (
++        formatted.groupby(['Item Code', 'Supplier'], as_index=False)
++        .agg({
++            'Qty Variance': 'sum',
++            'Cold Chain Error': 'sum',
++            'Total Errors': 'sum',
++        })
+… omitted 87 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_receiving_audit.py → b/validate_receiving_audit.py
+@@ -0,0 +1,122 @@
++from pathlib import Path
++from openpyxl import load_workbook
++from docx import Document
++
++SOURCE = Path('/root/Receiving_Log.xlsx')
++AUDIT_XLSX = Path('/root/Receiving_Exception_Audit.xlsx')
++BRIEF_DOCX = Path('/root/Receiving_Exception_Brief.docx')
++
++REQ = ['Receipt ID','Item Code','Expected Qty','Received Qty','Storage Class','Temp Status','Supplier','Dock']
++FMT = REQ + ['Qty Variance','Cold Chain Error','Total Errors','Error Summary']
++SUM = ['Item Code','Supplier','Qty Variance Errors','Cold Chain Errors','Total Errors']
++VALID_SUMMARIES = {'None','Qty Variance','Cold Chain Error','Qty Variance, Cold Chain Error'}
++
++
++def assert_true(cond, msg):
++    if not cond:
++        raise AssertionError(msg)
++
++
++def val_upper(v):
++    return '' if v is None else str(v).upper()
++
++
++def main():
++    source_wb = load_workbook(SOURCE, data_only=True, read_only=True)
++    source_ws = source_wb[source_wb.sheetnames[0]]
++    source_rows = list(source_ws.iter_rows(values_only=True))
++    source_data_rows = len(source_rows) - 1
++
++    wb = load_workbook(AUDIT_XLSX, data_only=False)
++    assert_true(wb.sheetnames == ['RawData', 'Formatted Data', 'Summary'], f'Unexpected sheet names: {wb.sheetnames}')
++
++    raw = wb['RawData']
++    raw_rows = list(raw.iter_rows(values_only=True))
++    assert_true(raw_rows == source_rows, 'RawData does not exactly match source values/order')
++    assert_true(raw.max_row - 1 == source_data_rows, 'RawData data row count mismatch')
++
++    fmt = wb['Formatted Data']
++    fmt_headers = [c.value for c in fmt[1]]
++    assert_true(fmt.max_column == 12, f'Formatted Data has {fmt.max_column} columns, expected 12')
++    assert_true(fmt_headers == FMT, f'Formatted Data headers mismatch: {fmt_headers}')
++
++    fmt_rows = list(fmt.iter_rows(min_row=2, values_only=False))
++    total_qty = total_cold = total_errors = 0
++    for excel_row in fmt_rows:
++        values = [cell.value for cell in excel_row]
++        rec = dict(zip(FMT, values))
++        # Check no formulas in computed cells.
++        for cell in excel_row[8:12]:
++            assert_true(not (isinstance(cell.value, str) and cell.value.startswith('=')), f'Formula found at {cell.coordinate}')
++        expected_qty_var = 1 if rec['Received Qty'] != rec['Expected Qty'] else 0
++        expected_cold = 1 if val_upper(rec['Storage Class']) in {'CHILLED','FROZEN'} and val_upper(rec['Temp Status']) != 'OK' else 0
++        expected_total = expected_qty_var + expected_cold
++        if expected_qty_var == 0 and expected_cold == 0:
++            expected_summary = 'None'
++        elif expected_qty_var == 1 and expected_cold == 0:
++            expected_summary = 'Qty Variance'
++        elif expected_qty_var == 0 and expected_cold == 1:
++            expected_summary = 'Cold Chain Error'
++        else:
++            expected_summary = 'Qty Variance, Cold Chain Error'
++        assert_true(type(rec['Qty Variance']) is int and rec['Qty Variance'] in (0,1), f'Bad Qty Variance value: {rec}')
++        assert_true(type(rec['Cold Chain Error']) is int and rec['Cold Chain Error'] in (0,1), f'Bad Cold Chain Error value: {rec}')
++        assert_true(type(rec['Total Errors']) is int, f'Bad Total Errors type: {rec}')
++        assert_true(rec['Error Summary'] in VALID_SUMMARIES, f'Bad Error Summary value: {rec}')
++        assert_true(rec['Qty Variance'] == expected_qty_var, f'Qty Variance mismatch: {rec}')
++        assert_true(rec['Cold Chain Error'] == expected_cold, f'Cold Chain Error mismatch: {rec}')
++        assert_true(rec['Total Errors'] == expected_total, f'Total Errors mismatch: {rec}')
++        assert_true(rec['Error Summary'] == expected_summary, f'Error Summary mismatch: {rec}')
++        total_qty += rec['Qty Variance']
++        total_cold += rec['Cold Chain Error']
++        total_errors += rec['Total Errors']
++
++    summary = wb['Summary']
++    summary_headers = [c.value for c in summary[1]]
++    assert_true(summary.max_column == 5, f'Summary has {summary.max_column} columns, expected 5')
++    assert_true(summary_headers == SUM, f'Summary headers mismatch: {summary_headers}')
++    sum_rows = list(summary.iter_rows(min_row=2, values_only=True))
+… omitted 44 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260611_031331_3ec7c5

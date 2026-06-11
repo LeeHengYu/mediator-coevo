@@ -1,0 +1,85 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build.py → b/build.py
+@@ -0,0 +1,114 @@
++import pandas as pd
++from openpyxl import load_workbook, Workbook
++from openpyxl.utils.dataframe import dataframe_to_rows
++from docx import Document
++
++# --- Read source ---
++src = '/root/Trailer_Detention_Log.xlsx'
++df_raw = pd.read_excel(src, sheet_name='Detention')
++
++# --- RawData: exact copy ---
++# We will write this as-is.
++
++# --- Formatted Data ---
++# Map source columns to required names. Step 0 inspection found exact headers already match.
++rename_map = {}
++
++# If source headers already match, rename_map can be empty.
++df = df_raw.copy()
++if rename_map:
++    df.rename(columns=rename_map, inplace=True)
++
++# Ensure required columns exist
++required = ['Load ID','Carrier','Allowed Hold Hours','Actual Hold Hours',
++            'Seal Required','Seal Status','Yard','Dispatcher']
++for c in required:
++    assert c in df.columns, f'Missing column: {c}'
++
++# Compute new columns
++df['Detention Overrun'] = (df['Actual Hold Hours'] > df['Allowed Hold Hours']).astype(int)
++df['Seal Error'] = df.apply(
++    lambda r: 1 if str(r['Seal Required']).strip().upper() == 'YES'
++                   and str(r['Seal Status']).strip().upper() != 'VERIFIED'
++              else 0, axis=1).astype(int)
++df['Total Errors'] = (df['Detention Overrun'] + df['Seal Error']).astype(int)
++
++def error_summary(row):
++    parts = []
++    if row['Detention Overrun'] == 1:
++        parts.append('Detention Overrun')
++    if row['Seal Error'] == 1:
++        parts.append('Seal Error')
++    return ', '.join(parts) if parts else 'None'
++
++df['Error Summary'] = df.apply(error_summary, axis=1).astype(str)
++
++# Keep only the 12 required columns in order
++formatted_cols = required + ['Detention Overrun','Seal Error','Total Errors','Error Summary']
++df_fmt = df[formatted_cols]
++
++# --- Summary ---
++agg = df_fmt.groupby(['Carrier','Yard'], sort=False).agg(
++    **{'Detention Overrun Errors': ('Detention Overrun','sum'),
++       'Seal Errors': ('Seal Error','sum'),
++       'Total Errors': ('Total Errors','sum')}
++).reset_index()
++agg = agg[agg['Total Errors'] > 0]
++agg = agg.sort_values(['Carrier','Yard'], ascending=[True,True]).reset_index(drop=True)
++
++grand = pd.DataFrame([{
++    'Carrier': 'Grand Total',
++    'Yard': '-',
++    'Detention Overrun Errors': int(agg['Detention Overrun Errors'].sum()),
++    'Seal Errors': int(agg['Seal Errors'].sum()),
++    'Total Errors': int(agg['Total Errors'].sum())
++}])
++df_summary = pd.concat([agg, grand], ignore_index=True)
++
++# Ensure concrete integer values before writing.
++for col in ['Detention Overrun', 'Seal Error', 'Total Errors']:
++    df_fmt[col] = df_fmt[col].astype(int)
++for col in ['Detention Overrun Errors', 'Seal Errors', 'Total Errors']:
++    df_summary[col] = df_summary[col].astype(int)
++
++# --- Write Excel ---
++out_xlsx = '/root/Trailer_Detention_Audit.xlsx'
++with pd.ExcelWriter(out_xlsx, engine='openpyxl') as writer:
++    df_raw.to_excel(writer, sheet_name='RawData', index=False)
++    df_fmt.to_excel(writer, sheet_name='Formatted Data', index=False)
+… omitted 36 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260610_182422_90b8d2

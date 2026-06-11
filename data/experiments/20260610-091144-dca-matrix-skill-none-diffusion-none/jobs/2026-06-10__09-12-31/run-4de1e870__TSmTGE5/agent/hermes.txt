@@ -1,0 +1,161 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_cycle_files.py → b/inspect_cycle_files.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python3
++from openpyxl import load_workbook
++from pathlib import Path
++from collections import Counter
++
++files = [Path('/root/Cycle_Plan.xlsx'), Path('/root/Count_Event_Log.xlsx'), Path('/root/Cycle_Template.xlsx')]
++
++def infer_type(values):
++    vals=[v for v in values if v is not None]
++    if not vals:
++        return 'empty'
++    types=Counter(type(v).__name__ for v in vals)
++    return ', '.join(f'{k}:{v}' for k,v in types.most_common())
++
++for path in files:
++    print('='*100)
++    print(f'FILE: {path}')
++    wb = load_workbook(path, data_only=False)
++    print('Sheet names:', wb.sheetnames)
++    for ws in wb.worksheets:
++        print('-'*80)
++        print(f'SHEET: {ws.title}')
++        print(f'Dimensions: max_row={ws.max_row}, max_column={ws.max_column}')
++        print('Merged cells:', [str(r) for r in ws.merged_cells.ranges])
++        if ws.max_row >= 1:
++            headers=[ws.cell(1,c).value for c in range(1, ws.max_column+1)]
++            print('Row 1 / headers:', headers)
++            for c,h in enumerate(headers, start=1):
++                vals=[ws.cell(r,c).value for r in range(2, min(ws.max_row, 21)+1)]
++                print(f'  Col {c} {h!r}: inferred sample types {infer_type(vals)}')
++        print('Sample rows:')
++        for r in range(1, min(ws.max_row, 8)+1):
++            vals=[ws.cell(r,c).value for c in range(1, min(ws.max_column, 12)+1)]
++            print(f'  R{r}: {vals}')
++        if path.name == 'Cycle_Template.xlsx' and ws.title == 'Overview':
++            print('OVERVIEW EXACT STRUCTURE DETAILS')
++            print('Column widths:')
++            for c in range(1, ws.max_column+1):
++                letter=ws.cell(1,c).column_letter
++                dim=ws.column_dimensions[letter]
++                print(f'  {letter}: width={dim.width}, hidden={dim.hidden}')
++            print('Row heights:')
++            for r in range(1, ws.max_row+1):
++                dim=ws.row_dimensions[r]
++                print(f'  {r}: height={dim.height}, hidden={dim.hidden}')
++            print('Cell values and style summary:')
++            for r in range(1, ws.max_row+1):
++                row=[]
++                for c in range(1, ws.max_column+1):
++                    cell=ws.cell(r,c)
++                    if cell.value is not None:
++                        row.append((cell.coordinate, cell.value, cell.style_id, cell.number_format, cell.font.name, cell.font.sz, cell.font.bold, cell.fill.fill_type, cell.fill.fgColor.rgb, cell.alignment.horizontal, cell.alignment.vertical))
++                if row:
++                    print(' ', row)
++    print()
+  ┊ review diff
+a/build_cycle_count_variance_audit.py → b/build_cycle_count_variance_audit.py
+@@ -0,0 +1,406 @@
++#!/usr/bin/env python3
++"""Build Cycle Count Variance Audit workbook and Word brief, then validate outputs."""
++
++from __future__ import annotations
++
++from copy import copy
++from collections import Counter, defaultdict
++from pathlib import Path
++from typing import Any
++
++from openpyxl import Workbook, load_workbook
++from openpyxl.cell.cell import MergedCell
++from openpyxl.utils import get_column_letter
++from docx import Document
++
++ROOT = Path('/root')
++PLAN_PATH = ROOT / 'Cycle_Plan.xlsx'
++EVENT_PATH = ROOT / 'Count_Event_Log.xlsx'
++TEMPLATE_PATH = ROOT / 'Cycle_Template.xlsx'
++OUT_XLSX = ROOT / 'Cycle_Count_Variance_Audit.xlsx'
++OUT_DOCX = ROOT / 'Cycle_Count_Variance_Brief.docx'
++
++REQUIRED_FORMATTED_HEADERS = [
++    'Facility', 'Session ID', 'Bin ID', 'Product ID', 'Expected Qty',
++    'Allowed Variance', 'Approval Needed', 'Missing Final Count',
++    'Approval Gap', 'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = ['Facility', 'Session ID', 'Missing Final Counts', 'Approval Gaps', 'Total Errors']
++
++
++def is_blank(value: Any) -> bool:
++    if value is None:
++        return True
++    if isinstance(value, str) and value.strip() == '':
++        return True
++    return False
++
++
++def key_value(value: Any) -> str:
++    if value is None:
++        return ''
++    return str(value).strip()
++
++
++def to_number(value: Any) -> float:
++    if value is None:
++        return 0.0
++    if isinstance(value, (int, float)):
++        return float(value)
++    text = str(value).strip().replace(',', '')
++    if text == '':
++        return 0.0
++    return float(text)
++
++
++def infer_types(values):
++    vals = [v for v in values if v is not None]
++    if not vals:
++        return 'empty'
++    counts = Counter(type(v).__name__ for v in vals)
++    return ', '.join(f'{k}:{v}' for k, v in counts.most_common())
++
++
++def inspect_workbooks() -> None:
++    print('\nSTEP 0: Inspect Input Files')
++    for path in [PLAN_PATH, EVENT_PATH, TEMPLATE_PATH]:
++        wb = load_workbook(path, data_only=False)
++        print('=' * 100)
++        print(f'FILE: {path}')
++        print(f'Sheet names: {wb.sheetnames}')
++        for ws in wb.worksheets:
++            print('-' * 80)
++            print(f'SHEET: {ws.title}')
++            print(f'Dimensions: max_row={ws.max_row}, max_column={ws.max_column}')
++            print(f'Merged cells: {[str(rng) for rng in ws.merged_cells.ranges]}')
++            headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
++            print(f'Row 1 / headers: {headers}')
++            for c, header in enumerate(headers, start=1):
+… omitted 328 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/build_cycle_count_variance_audit.py → b//root/build_cycle_count_variance_audit.py
+@@ -118,7 +118,14 @@
+     dst_ws.page_setup = copy(src_ws.page_setup)
+     dst_ws.print_options = copy(src_ws.print_options)
+     dst_ws.freeze_panes = src_ws.freeze_panes
+-    dst_ws.sheet_view = copy(src_ws.sheet_view)
++    # sheet_view is read-only on Worksheet in this openpyxl version; copy relevant attributes in-place.
++    try:
++        dst_ws.sheet_view.showGridLines = src_ws.sheet_view.showGridLines
++        dst_ws.sheet_view.zoomScale = src_ws.sheet_view.zoomScale
++        dst_ws.sheet_view.zoomScaleNormal = src_ws.sheet_view.zoomScaleNormal
++        dst_ws.sheet_view.view = src_ws.sheet_view.view
++    except Exception:
++        pass
+ 
+     # Copy row heights and column widths/properties.
+     for key, dim in src_ws.row_dimensions.items():
+
+session_id: 20260610_011556_8f55a2

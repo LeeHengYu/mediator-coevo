@@ -1,0 +1,156 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_sla_audit.py → b/create_sla_audit.py
+@@ -0,0 +1,185 @@
++from collections import defaultdict
++from pathlib import Path
++from openpyxl import Workbook, load_workbook
++from docx import Document
++
++SRC = Path('/root/Ticket_Queue.xlsx')
++OUT_XLSX = Path('/root/Service_Queue_SLA_Audit.xlsx')
++OUT_DOCX = Path('/root/Service_Queue_SLA_Brief.docx')
++
++FORMATTED_HEADERS = [
++    'Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner',
++    'Escalation Code', 'Region', 'Analyst', 'SLA Breach',
++    'Missing Escalation', 'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = ['Queue', 'Region', 'SLA Breaches', 'Missing Escalations', 'Total Errors']
++
++
++def is_blank(value):
++    return value is None or (isinstance(value, str) and value.strip() == '')
++
++
++def norm(name):
++    return ''.join(ch for ch in str(name).lower() if ch.isalnum())
++
++
++def find_col(headers, desired):
++    exact = {h: i for i, h in enumerate(headers)}
++    if desired in exact:
++        return exact[desired]
++    desired_norm = norm(desired)
++    for i, h in enumerate(headers):
++        if norm(h) == desired_norm:
++            return i
++    # light synonym support if future input differs slightly
++    synonyms = {
++        'Ticket ID': ['TicketID', 'Ticket Id', 'ID'],
++        'Priority Tier': ['Priority', 'Tier', 'PriorityTier'],
++        'Open Age Hours': ['Open Hours', 'Age Hours', 'OpenAgeHours'],
++        'Escalation Code': ['Escalation', 'EscalationCode', 'Esc Code'],
++    }
++    for alt in synonyms.get(desired, []):
++        alt_norm = norm(alt)
++        for i, h in enumerate(headers):
++            if norm(h) == alt_norm:
++                return i
++    raise KeyError(f'Could not map required column {desired!r}. Source headers: {headers!r}')
++
++
++# Step 1: inspect source workbook
++src_wb_ro = load_workbook(SRC, data_only=True, read_only=True)
++tickets_ws_ro = src_wb_ro['Tickets']
++rules_ws_ro = src_wb_ro['SLA_Rules']
++tickets_rows = list(tickets_ws_ro.iter_rows(values_only=True))
++rules_rows = list(rules_ws_ro.iter_rows(values_only=True))
++ticket_headers = list(tickets_rows[0])
++rules_headers = list(rules_rows[0])
++
++print('Tickets sheet exact column names and order:')
++for idx, name in enumerate(ticket_headers, 1):
++    print(f'  {idx}. {name}')
++print('Tickets first 5 data rows:')
++for row in tickets_rows[1:6]:
++    print(row)
++
++print('SLA_Rules sheet exact column names and order:')
++for idx, name in enumerate(rules_headers, 1):
++    print(f'  {idx}. {name}')
++print('SLA_Rules all data rows:')
++for row in rules_rows[1:]:
++    print(row)
++
++# Step 2: SLA lookup
++priority_i = find_col(rules_headers, 'Priority Tier')
++max_i = find_col(rules_headers, 'Max Open Hours')
++esc_req_i = find_col(rules_headers, 'Escalation Required')
++sla_lookup = {}
++for row in rules_rows[1:]:
++    if row is None or all(v is None for v in row):
+… omitted 107 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_sla_audit.py → b/validate_sla_audit.py
+@@ -0,0 +1,68 @@
++from pathlib import Path
++from openpyxl import load_workbook
++from docx import Document
++
++SRC = Path('/root/Ticket_Queue.xlsx')
++OUT_XLSX = Path('/root/Service_Queue_SLA_Audit.xlsx')
++OUT_DOCX = Path('/root/Service_Queue_SLA_Brief.docx')
++FORMATTED_HEADERS = [
++    'Ticket ID', 'Queue', 'Priority Tier', 'Open Age Hours', 'Owner',
++    'Escalation Code', 'Region', 'Analyst', 'SLA Breach',
++    'Missing Escalation', 'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = ['Queue', 'Region', 'SLA Breaches', 'Missing Escalations', 'Total Errors']
++
++checks = []
++def check(name, condition, detail=''):
++    status = 'PASS' if condition else 'FAIL'
++    print(f'{status}: {name}' + (f' -- {detail}' if detail else ''))
++    checks.append(condition)
++
++src_wb = load_workbook(SRC, data_only=True, read_only=True)
++src_rows = list(src_wb['Tickets'].iter_rows(values_only=True))
++src_data_count = len(src_rows) - 1
++
++wb = load_workbook(OUT_XLSX, data_only=True, read_only=True)
++check('Sheet names exactly match', wb.sheetnames == ['RawData', 'Formatted Data', 'Summary'], str(wb.sheetnames))
++raw = wb['RawData']
++fmt = wb['Formatted Data']
++sumws = wb['Summary']
++
++raw_rows = list(raw.iter_rows(values_only=True))
++fmt_rows = list(fmt.iter_rows(values_only=True))
++sum_rows = list(sumws.iter_rows(values_only=True))
++
++check('RawData row count matches source Tickets row count', len(raw_rows) - 1 == src_data_count, f'raw data rows={len(raw_rows)-1}, source data rows={src_data_count}')
++check('RawData copied exactly as values', raw_rows == src_rows, '')
++check('Formatted Data has 12 exact headers', list(fmt_rows[0]) == FORMATTED_HEADERS, str(list(fmt_rows[0])))
++check('Formatted Data row count matches RawData', len(fmt_rows) == len(raw_rows), f'formatted rows incl header={len(fmt_rows)}, raw rows incl header={len(raw_rows)}')
++check('Summary has 5 exact headers', list(sum_rows[0]) == SUMMARY_HEADERS, str(list(sum_rows[0])))
++check('Summary last row Queue is Grand Total', sum_rows[-1][0] == 'Grand Total', str(sum_rows[-1]))
++
++sla_sum = sum(int(r[8]) for r in fmt_rows[1:])
++missing_sum = sum(int(r[9]) for r in fmt_rows[1:])
++total_sum = sum(int(r[10]) for r in fmt_rows[1:])
++grand = sum_rows[-1]
++check('Grand Total SLA Breaches matches Formatted Data sum', int(grand[2]) == sla_sum, f'grand={grand[2]}, computed={sla_sum}')
++check('Grand Total Missing Escalations matches Formatted Data sum', int(grand[3]) == missing_sum, f'grand={grand[3]}, computed={missing_sum}')
++check('Grand Total Total Errors matches Formatted Data sum', int(grand[4]) == total_sum, f'grand={grand[4]}, computed={total_sum}')
++check('Grand Total Total Errors equals SLA + Missing sums', int(grand[4]) == sla_sum + missing_sum, f'total={grand[4]}, sla+missing={sla_sum+missing_sum}')
++
++print('\nSummary sheet rows:')
++for row in sum_rows:
++    print(row)
++
++print('\nFirst 5 Formatted Data rows:')
++for row in fmt_rows[:6]:
++    print(row)
++
++print('\nWord document text:')
++doc = Document(OUT_DOCX)
++text = '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
++print(text)
++for phrase in ['SLA Breach', 'Missing Escalation', str(sla_sum), str(missing_sum), str(total_sum), 'Claims', 'Support']:
++    check(f'Word document contains required content fragment {phrase!r}', phrase in text)
++
++if not all(checks):
++    raise SystemExit('One or more validation checks failed')
++print('\nAll validation checks passing.')
+
+session_id: 20260611_064438_490ad1

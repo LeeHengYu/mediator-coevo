@@ -1,0 +1,105 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_cycle_audit.py → b/create_cycle_audit.py
+@@ -0,0 +1,144 @@
++import pandas as pd
++import shutil
++from docx import Document
++
++# Step 1: Copy template to output to preserve Overview sheet
++shutil.copy('Cycle_Template.xlsx', 'Cycle_Count_Variance_Audit.xlsx')
++
++# Step 2: Read input data using inspected sheet names
++plan_df = pd.read_excel('Cycle_Plan.xlsx', sheet_name='PlanLines')
++event_df = pd.read_excel('Count_Event_Log.xlsx', sheet_name='Events')
++
++# Step 3: Prepare RawData - exact copy of plan table
++raw_data = plan_df.copy()
++
++# Step 4: Prepare Formatted Data
++# Inspected columns already match required normalized names.
++formatted = plan_df.copy()
++required_first_cols = [
++    'Facility', 'Session ID', 'Bin ID', 'Product ID',
++    'Expected Qty', 'Allowed Variance', 'Approval Needed'
++]
++formatted.columns = required_first_cols + list(formatted.columns[len(required_first_cols):])
++
++# Process event log: filter to Event Type == 'FINAL', drop rows with blank keys or blank Count Qty.
++events = event_df.copy()
++events['Event Time Parsed'] = pd.to_datetime(events['Event Time'], errors='coerce')
++final_events = events[events['Event Type'].astype(str).str.strip().str.upper() == 'FINAL'].copy()
++final_events = final_events.dropna(subset=['Facility', 'Session ID', 'Bin ID', 'Count Qty'])
++for col in ['Facility', 'Session ID', 'Bin ID']:
++    final_events = final_events[final_events[col].astype(str).str.strip() != '']
++
++# Use timestamp to ensure latest FINAL per key, falling back to original order for tied/missing timestamps.
++final_events['_original_order'] = final_events.index
++final_events = final_events.sort_values(['Event Time Parsed', '_original_order'], na_position='first')
++final_events = final_events.drop_duplicates(subset=['Facility', 'Session ID', 'Bin ID'], keep='last')
++
++# Create lookup dict: (Facility, Session ID, Bin ID) -> Count Qty
++final_lookup = {}
++for _, row in final_events.iterrows():
++    key = (str(row['Facility']).strip(), str(row['Session ID']).strip(), str(row['Bin ID']).strip())
++    final_lookup[key] = row['Count Qty']
++
++# Compute new columns
++missing_final = []
++approval_gap = []
++total_errors = []
++error_summary = []
++
++for _, row in formatted.iterrows():
++    key = (str(row['Facility']).strip(), str(row['Session ID']).strip(), str(row['Bin ID']).strip())
++    has_final = key in final_lookup
++
++    mfc = 0 if has_final else 1
++
++    ag = 0
++    if has_final and str(row['Approval Needed']).strip().upper() == 'YES':
++        count_qty = pd.to_numeric(final_lookup[key], errors='coerce')
++        expected = pd.to_numeric(row['Expected Qty'], errors='coerce')
++        allowed = pd.to_numeric(row['Allowed Variance'], errors='coerce')
++        if pd.notna(count_qty) and pd.notna(expected) and pd.notna(allowed):
++            if abs(count_qty - expected) > allowed:
++                ag = 1
++
++    te = mfc + ag
++
++    if mfc == 1 and ag == 1:
++        es = 'Missing Final Count, Approval Gap'
++    elif mfc == 1:
++        es = 'Missing Final Count'
++    elif ag == 1:
++        es = 'Approval Gap'
++    else:
++        es = 'None'
++
++    missing_final.append(mfc)
++    approval_gap.append(ag)
++    total_errors.append(te)
++    error_summary.append(es)
+… omitted 66 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260611_045917_7e9e6b
+Done. Created and verified both deliverables in /root:
+
+- /root/Cycle_Count_Variance_Audit.xlsx
+- /root/Cycle_Count_Variance_Brief.docx
+
+Also saved the processing script at:
+
+- /root/create_cycle_audit.py
+
+Verification results:
+- Excel sheets: Overview, RawData, Formatted Data, Summary
+- RawData rows: 11
+- Formatted Data rows: 11
+- Summary grand total:
+  - Missing Final Counts: 2
+  - Approval Gaps: 3
+  - Total Errors: 5
+- Word file exists and contains the executive brief text.
+
+Note: pandas displays the “None” Error Summary values as NaN when reading back with default NA parsing, but the generated audit logic wrote the intended “None” string values before Excel round-trip parsing.

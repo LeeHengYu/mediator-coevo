@@ -1,0 +1,216 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_outbound_inputs.py → b/inspect_outbound_inputs.py
+@@ -0,0 +1,46 @@
++from openpyxl import load_workbook
++import pandas as pd
++from pathlib import Path
++
++files = [
++    Path('/root/Manifest_Plan.xlsx'),
++    Path('/root/Dock_Scan_Log.xlsx'),
++    Path('/root/Outbound_Audit_Template.xlsx'),
++]
++
++for path in files:
++    print('\n' + '='*100)
++    print(f'FILE: {path}')
++    wb = load_workbook(path, data_only=False)
++    print('Sheet names:', wb.sheetnames)
++    if path.name in ['Manifest_Plan.xlsx', 'Dock_Scan_Log.xlsx']:
++        for s in wb.sheetnames:
++            ws = wb[s]
++            rows = list(ws.iter_rows(values_only=True))
++            headers = list(rows[0]) if rows else []
++            print(f'\nSheet: {s}')
++            print('Headers:', headers)
++            print('First 5 rows:')
++            for row in rows[1:6]:
++                print(list(row))
++            # also print pandas view for exact df columns
++            try:
++                df = pd.read_excel(path, sheet_name=s)
++                print('Pandas columns:', list(df.columns))
++                print(df.head(5).to_string(index=False))
++            except Exception as e:
++                print('Pandas read error:', e)
++    else:
++        for s in wb.sheetnames:
++            ws = wb[s]
++            rows = list(ws.iter_rows(values_only=True))
++            if s == 'Overview':
++                print('\nOverview full contents:')
++                if not rows:
++                    print('(empty)')
++                for i, row in enumerate(rows, start=1):
++                    print(f'Row {i}: {list(row)}')
++            else:
++                headers = list(rows[0]) if rows else []
++                print(f'\nSheet: {s}')
++                print('Headers:', headers)
+  ┊ review diff
+a/build_outbound_audit.py → b/build_outbound_audit.py
+@@ -0,0 +1,149 @@
++from pathlib import Path
++import shutil
++import pandas as pd
++from openpyxl import load_workbook
++from openpyxl.utils.dataframe import dataframe_to_rows
++from docx import Document
++
++manifest_path = Path('/root/Manifest_Plan.xlsx')
++scan_path = Path('/root/Dock_Scan_Log.xlsx')
++template_path = Path('/root/Outbound_Audit_Template.xlsx')
++audit_path = Path('/root/Outbound_Load_Audit.xlsx')
++docx_path = Path('/root/Outbound_Load_Brief.docx')
++
++required_manifest_cols = ['Shipment ID', 'Carton ID', 'Planned Zone', 'Route', 'Expected Weight', 'Hazmat Flag', 'Carrier', 'Wave']
++required_scan_cols = ['Shipment ID', 'Carton ID', 'Scanned Zone', 'Status']
++
++def clear_sheet(ws):
++    if ws.max_row:
++        ws.delete_rows(1, ws.max_row)
++
++def write_df(ws, df):
++    clear_sheet(ws)
++    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), start=1):
++        ws.append(row)
++
++def sheet_or_create(wb, name):
++    if name in wb.sheetnames:
++        return wb[name]
++    return wb.create_sheet(name)
++
++# Read inputs
++manifest_df = pd.read_excel(manifest_path, sheet_name=0)
++scan_df = pd.read_excel(scan_path, sheet_name=0)
++
++print('Manifest columns:', list(manifest_df.columns))
++print('Scan log columns:', list(scan_df.columns))
++
++missing_manifest = [c for c in required_manifest_cols if c not in manifest_df.columns]
++missing_scan = [c for c in required_scan_cols if c not in scan_df.columns]
++if missing_manifest:
++    raise ValueError(f'Missing required manifest columns: {missing_manifest}')
++if missing_scan:
++    raise ValueError(f'Missing required scan columns: {missing_scan}')
++
++# Preserve exact manifest order and values for RawData. Formatted keeps first 8 required columns.
++raw_df = manifest_df.copy()
++formatted_df = manifest_df[required_manifest_cols].copy()
++
++# Determine latest LOADED scan by timestamp if available.
++loaded = scan_df[scan_df['Status'].astype(str).str.strip().eq('LOADED')].copy()
++if 'Scan Timestamp' in loaded.columns:
++    loaded['_sort_ts'] = pd.to_datetime(loaded['Scan Timestamp'], errors='coerce')
++    loaded['_row_order'] = range(len(loaded))
++    # mergesort is stable; row order breaks timestamp ties by keeping last occurrence.
++    loaded = loaded.sort_values(['Shipment ID', 'Carton ID', '_sort_ts', '_row_order'], kind='mergesort')
++    sort_method = 'Scan Timestamp'
++else:
++    loaded['_row_order'] = range(len(loaded))
++    sort_method = 'row order'
++latest_loaded = loaded.drop_duplicates(subset=['Shipment ID', 'Carton ID'], keep='last').copy()
++print('Latest LOADED scan sort method:', sort_method)
++print('Kept LOADED lookup rows:', len(latest_loaded))
++
++lookup = latest_loaded.set_index(['Shipment ID', 'Carton ID'])
++missing_vals = []
++zone_vals = []
++error_summaries = []
++for _, row in formatted_df.iterrows():
++    key = (row['Shipment ID'], row['Carton ID'])
++    has_scan = key in lookup.index
++    missing = 0 if has_scan else 1
++    zone_mismatch = 0
++    if has_scan:
++        scanned_zone = lookup.loc[key, 'Scanned Zone']
++        if isinstance(scanned_zone, pd.Series):  # defensive for accidental duplicate index
++            scanned_zone = scanned_zone.iloc[-1]
++        zone_mismatch = 1 if str(scanned_zone) != str(row['Planned Zone']) else 0
++    total = missing + zone_mismatch
+… omitted 71 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_outbound_outputs.py → b/validate_outbound_outputs.py
+@@ -0,0 +1,80 @@
++from pathlib import Path
++from openpyxl import load_workbook
++from docx import Document
++
++xlsx_path = Path('/root/Outbound_Load_Audit.xlsx')
++docx_path = Path('/root/Outbound_Load_Brief.docx')
++template_path = Path('/root/Outbound_Audit_Template.xlsx')
++
++
++def sheet_rows(wb, name):
++    return [list(row) for row in wb[name].iter_rows(values_only=True)]
++
++def print_rows(label, rows):
++    print(label)
++    if not rows:
++        print('(empty)')
++    for i, row in enumerate(rows, start=1):
++        print(f'Row {i}: {row}')
++
++print('='*100)
++print('FINAL VALIDATION')
++print('Expected files:')
++print('/root/Outbound_Load_Audit.xlsx exists:', xlsx_path.exists())
++print('/root/Outbound_Load_Brief.docx exists:', docx_path.exists())
++if not xlsx_path.exists() or not docx_path.exists():
++    raise SystemExit('Missing required output file')
++
++wb = load_workbook(xlsx_path, data_only=True)
++print('\nWorkbook sheet names:', wb.sheetnames)
++required = ['Overview', 'RawData', 'Formatted Data', 'Summary']
++print('All required sheets exist:', all(s in wb.sheetnames for s in required))
++
++raw_rows = sheet_rows(wb, 'RawData')
++print('\nRawData row count excluding header:', max(len(raw_rows)-1, 0))
++print_rows('RawData first 3 data rows:', raw_rows[1:4])
++
++formatted_rows = sheet_rows(wb, 'Formatted Data')
++formatted_headers = formatted_rows[0] if formatted_rows else []
++print('\nFormatted Data row count excluding header:', max(len(formatted_rows)-1, 0))
++print('Formatted Data headers:', formatted_headers)
++print('Formatted Data column count:', len(formatted_headers))
++print_rows('Formatted Data first 3 data rows:', formatted_rows[1:4])
++
++summary_rows = sheet_rows(wb, 'Summary')
++print('\nSummary all rows including Grand Total:')
++for i, row in enumerate(summary_rows, start=1):
++    print(f'Row {i}: {row}')
++
++print('\nOverview contents in final workbook:')
++overview_final = sheet_rows(wb, 'Overview')
++for i, row in enumerate(overview_final, start=1):
++    print(f'Row {i}: {row}')
++
++twb = load_workbook(template_path, data_only=True)
++overview_template = sheet_rows(twb, 'Overview')
++print('Overview unchanged compared with template:', overview_final == overview_template)
++if overview_final != overview_template:
++    raise SystemExit('Overview changed')
++
++# Specific contract checks
++assert wb.sheetnames == ['Overview', 'RawData', 'Formatted Data', 'Summary']
++assert len(formatted_headers) == 12
++assert formatted_headers[:8] == ['Shipment ID', 'Carton ID', 'Planned Zone', 'Route', 'Expected Weight', 'Hazmat Flag', 'Carrier', 'Wave']
++assert formatted_headers[8:] == ['Missing Load Scan', 'Zone Mismatch', 'Total Errors', 'Error Summary']
++assert summary_rows[0] == ['Route', 'Shipment ID', 'Missing Load Scans', 'Zone Mismatches', 'Total Errors']
++assert summary_rows[-1][0] == 'Grand Total'
++assert summary_rows[-1][1] == '-'
++
++print('\nWord document text content:')
++doc = Document(docx_path)
++texts = []
++for p in doc.paragraphs:
++    if p.text:
++        texts.append(p.text)
++        print(p.text)
++
++print('\nExact filenames verified:')
++print(str(xlsx_path))
+… omitted 2 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260611_030244_015714

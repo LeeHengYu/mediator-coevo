@@ -1,0 +1,197 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/build_outbound_audit.py → b/build_outbound_audit.py
+@@ -0,0 +1,240 @@
++#!/usr/bin/env python3
++"""Build outbound load audit workbook and Word brief."""
++
++from __future__ import annotations
++
++import os
++import shutil
++from pathlib import Path
++
++import pandas as pd
++from docx import Document
++from openpyxl import load_workbook
++
++MANIFEST_PATH = Path('/root/Manifest_Plan.xlsx')
++SCANS_PATH = Path('/root/Dock_Scan_Log.xlsx')
++TEMPLATE_PATH = Path('/root/Outbound_Audit_Template.xlsx')
++AUDIT_PATH = Path('/root/Outbound_Load_Audit.xlsx')
++BRIEF_PATH = Path('/root/Outbound_Load_Brief.docx')
++
++REQUIRED_FIRST_COLUMNS = [
++    'Shipment ID',
++    'Carton ID',
++    'Planned Zone',
++    'Route',
++    'Expected Weight',
++    'Hazmat Flag',
++    'Carrier',
++    'Wave',
++]
++
++
++def canonical(name: object) -> str:
++    """Normalize a column name for case-insensitive / punctuation-tolerant lookup."""
++    return ''.join(ch for ch in str(name).strip().lower() if ch.isalnum())
++
++
++def column_map(df: pd.DataFrame) -> dict[str, str]:
++    return {canonical(col): col for col in df.columns}
++
++
++def require_col(df: pd.DataFrame, desired_name: str, label: str) -> str:
++    cmap = column_map(df)
++    key = canonical(desired_name)
++    if key not in cmap:
++        raise KeyError(f"Missing required {label} column {desired_name!r}. Available: {list(df.columns)!r}")
++    return cmap[key]
++
++
++def find_timestamp_column(df: pd.DataFrame) -> str | None:
++    candidates = []
++    for col in df.columns:
++        key = canonical(col)
++        text = str(col).strip().lower()
++        if 'timestamp' in key or 'datetime' in key or 'scantime' in key or text in {'time', 'date'}:
++            candidates.append(col)
++    return candidates[0] if candidates else None
++
++
++def build_latest_loaded_scans(scans: pd.DataFrame) -> pd.DataFrame:
++    shipment_col = require_col(scans, 'Shipment ID', 'scan log')
++    carton_col = require_col(scans, 'Carton ID', 'scan log')
++    status_col = require_col(scans, 'Status', 'scan log')
++    scanned_zone_col = require_col(scans, 'Scanned Zone', 'scan log')
++
++    loaded_mask = scans[status_col].astype(str).str.strip().str.upper().eq('LOADED')
++    loaded = scans.loc[loaded_mask].copy()
++    if loaded.empty:
++        return pd.DataFrame(columns=['Shipment ID', 'Carton ID', 'Scanned Zone'])
++
++    timestamp_col = find_timestamp_column(loaded)
++    if timestamp_col is not None:
++        loaded['_scan_timestamp_sort'] = pd.to_datetime(loaded[timestamp_col], errors='coerce')
++        loaded['_original_row_order'] = range(len(loaded))
++        loaded = loaded.sort_values(
++            by=['_scan_timestamp_sort', '_original_row_order'],
++            kind='mergesort',
++            na_position='first',
++        )
+… omitted 162 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/build_outbound_audit.py → b//root/build_outbound_audit.py
+@@ -5,6 +5,8 @@
+ 
+ import os
+ import shutil
++import tempfile
++import zipfile
+ from pathlib import Path
+ 
+ import pandas as pd
+  ┊ review diff
+a//root/build_outbound_audit.py → b//root/build_outbound_audit.py
+@@ -102,6 +102,56 @@
+     return ', '.join(parts) if parts else 'None'
+ 
+ 
++def preserve_overview_sheet_xml(template_path: Path, output_path: Path) -> None:
++    """Restore Overview worksheet XML bytes from template after openpyxl saves the workbook.
++
++    pandas/openpyxl append mode rewrites workbook XML. The task specifically requires the
++    Overview sheet to remain byte-identical, so the final package is patched to contain the
++    original Overview worksheet part bytes from the copied template.
++    """
++    with zipfile.ZipFile(template_path, 'r') as template_zip:
++        workbook_xml = template_zip.read('xl/workbook.xml')
++        rels_xml = template_zip.read('xl/_rels/workbook.xml.rels')
++        import xml.etree.ElementTree as ET
++        ns = {
++            'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
++            'rel': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
++            'pkgrel': 'http://schemas.openxmlformats.org/package/2006/relationships',
++        }
++        root = ET.fromstring(workbook_xml)
++        overview_rid = None
++        for sheet in root.find('main:sheets', ns):
++            if sheet.attrib.get('name') == 'Overview':
++                overview_rid = sheet.attrib[f"{{{ns['rel']}}}id"]
++                break
++        if overview_rid is None:
++            raise RuntimeError('Template workbook has no Overview sheet relationship')
++        rels_root = ET.fromstring(rels_xml)
++        overview_target = None
++        for rel in rels_root:
++            if rel.attrib.get('Id') == overview_rid:
++                overview_target = rel.attrib['Target']
++                break
++        if overview_target is None:
++            raise RuntimeError('Template workbook relationship for Overview sheet not found')
++        overview_part = 'xl/' + overview_target.lstrip('/')
++        overview_part = overview_part.replace('xl//', 'xl/')
++        overview_bytes = template_zip.read(overview_part)
++
++    fd, temp_name = tempfile.mkstemp(suffix='.xlsx', dir=str(output_path.parent))
++    os.close(fd)
++    temp_path = Path(temp_name)
++    try:
++        with zipfile.ZipFile(output_path, 'r') as src_zip, zipfile.ZipFile(temp_path, 'w') as dst_zip:
++            for item in src_zip.infolist():
++                data = overview_bytes if item.filename == overview_part else src_zip.read(item.filename)
++                dst_zip.writestr(item, data)
++        shutil.move(temp_path, output_path)
++    finally:
++        if temp_path.exists():
++            temp_path.unlink()
++
++
+ def main() -> None:
+     # 1. Read inputs and inspect template structure.
+     manifest = pd.read_excel(MANIFEST_PATH)
+  ┊ review diff
+a//root/build_outbound_audit.py → b//root/build_outbound_audit.py
+@@ -240,6 +240,7 @@
+         raw_data.to_excel(writer, sheet_name='RawData', index=False)
+         formatted.to_excel(writer, sheet_name='Formatted Data', index=False)
+         summary.to_excel(writer, sheet_name='Summary', index=False)
++    preserve_overview_sheet_xml(TEMPLATE_PATH, AUDIT_PATH)
+ 
+     # 7. Word brief.
+     high_priority = (
+  ┊ review diff
+a//root/build_outbound_audit.py → b//root/build_outbound_audit.py
+@@ -134,8 +134,12 @@
+                 break
+         if overview_target is None:
+             raise RuntimeError('Template workbook relationship for Overview sheet not found')
+-        overview_part = 'xl/' + overview_target.lstrip('/')
+-        overview_part = overview_part.replace('xl//', 'xl/')
++        if overview_target.startswith('/'):
++            overview_part = overview_target.lstrip('/')
++        elif overview_target.startswith('xl/'):
++            overview_part = overview_target
++        else:
++            overview_part = 'xl/' + overview_target
+         overview_bytes = template_zip.read(overview_part)
+ 
+     fd, temp_name = tempfile.mkstemp(suffix='.xlsx', dir=str(output_path.parent))
+  ┊ review diff
+a//root/build_outbound_audit.py → b//root/build_outbound_audit.py
+@@ -279,10 +279,10 @@
+     print('\nValidation:')
+     print('Sheet names:', audit_xl.sheet_names)
+     for sheet in ['RawData', 'Formatted Data', 'Summary']:
+-        df = pd.read_excel(AUDIT_PATH, sheet_name=sheet)
++        df = pd.read_excel(AUDIT_PATH, sheet_name=sheet, keep_default_na=False)
+         print(f'\n{sheet} shape: {df.shape}')
+         print(df.head().to_string(index=False))
+-    summary_read = pd.read_excel(AUDIT_PATH, sheet_name='Summary')
++    summary_read = pd.read_excel(AUDIT_PATH, sheet_name='Summary', keep_default_na=False)
+     print('\nGrand Total row from Summary:')
+     print(summary_read.loc[summary_read['Route'].astype(str) == 'Grand Total'].to_string(index=False))
+ 
+
+session_id: 20260611_050425_6dd319

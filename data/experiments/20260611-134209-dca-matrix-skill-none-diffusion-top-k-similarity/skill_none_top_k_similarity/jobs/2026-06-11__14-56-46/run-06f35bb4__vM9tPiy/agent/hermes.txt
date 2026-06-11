@@ -1,0 +1,167 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_trailer_audit.py → b/create_trailer_audit.py
+@@ -0,0 +1,130 @@
++from collections import defaultdict
++from pathlib import Path
++
++from openpyxl import Workbook, load_workbook
++from openpyxl.styles import Font
++from docx import Document
++
++SRC = Path('/root/Trailer_Detention_Log.xlsx')
++OUT_XLSX = Path('/root/Trailer_Detention_Audit.xlsx')
++OUT_DOCX = Path('/root/Trailer_Detention_Brief.docx')
++
++BASE_HEADERS = [
++    'Load ID', 'Carrier', 'Allowed Hold Hours', 'Actual Hold Hours',
++    'Seal Required', 'Seal Status', 'Yard', 'Dispatcher'
++]
++COMPUTED_HEADERS = ['Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary']
++FORMATTED_HEADERS = BASE_HEADERS + COMPUTED_HEADERS
++SUMMARY_HEADERS = ['Carrier', 'Yard', 'Detention Overrun Errors', 'Seal Errors', 'Total Errors']
++
++src_wb = load_workbook(SRC, data_only=False)
++src_ws = src_wb.worksheets[0]
++source_headers = [src_ws.cell(1, c).value for c in range(1, src_ws.max_column + 1)]
++header_to_col = {h: i + 1 for i, h in enumerate(source_headers)}
++missing = [h for h in BASE_HEADERS if h not in header_to_col]
++if missing:
++    raise ValueError(f'Missing required source columns: {missing}')
++
++# Pull source rows once, preserving exact values/order.
++source_rows = []
++for r in range(2, src_ws.max_row + 1):
++    source_rows.append([src_ws.cell(r, c).value for c in range(1, src_ws.max_column + 1)])
++
++wb = Workbook()
++raw_ws = wb.active
++raw_ws.title = 'RawData'
++formatted_ws = wb.create_sheet('Formatted Data')
++summary_ws = wb.create_sheet('Summary')
++
++# RawData: exact source table values and order.
++for c, value in enumerate(source_headers, 1):
++    raw_ws.cell(1, c, value)
++for r_idx, row in enumerate(source_rows, 2):
++    for c_idx, value in enumerate(row, 1):
++        raw_ws.cell(r_idx, c_idx, value)
++
++# Formatted Data: mapped columns plus static computed values.
++for c, value in enumerate(FORMATTED_HEADERS, 1):
++    formatted_ws.cell(1, c, value)
++
++summary = defaultdict(lambda: {'detention': 0, 'seal': 0, 'total': 0})
++formatted_records = []
++for out_r, src_r in enumerate(range(2, src_ws.max_row + 1), 2):
++    base_values = [src_ws.cell(src_r, header_to_col[h]).value for h in BASE_HEADERS]
++    record = dict(zip(BASE_HEADERS, base_values))
++    allowed = record['Allowed Hold Hours']
++    actual = record['Actual Hold Hours']
++    detention = 1 if actual > allowed else 0
++    seal_required = '' if record['Seal Required'] is None else str(record['Seal Required']).strip()
++    seal_status = '' if record['Seal Status'] is None else str(record['Seal Status']).strip()
++    seal = 1 if seal_required.upper() == 'YES' and seal_status.upper() != 'VERIFIED' else 0
++    total = detention + seal
++    if total == 0:
++        err_summary = 'None'
++    elif detention and seal:
++        err_summary = 'Detention Overrun, Seal Error'
++    elif detention:
++        err_summary = 'Detention Overrun'
++    else:
++        err_summary = 'Seal Error'
++    row_values = base_values + [detention, seal, total, err_summary]
++    formatted_records.append(row_values)
++    for c, value in enumerate(row_values, 1):
++        formatted_ws.cell(out_r, c, value)
++    key = (record['Carrier'], record['Yard'])
++    summary[key]['detention'] += detention
++    summary[key]['seal'] += seal
++    summary[key]['total'] += total
++
+… omitted 52 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_trailer_audit.py → b/validate_trailer_audit.py
+@@ -0,0 +1,115 @@
++from pathlib import Path
++from openpyxl import load_workbook
++from docx import Document
++
++SRC = Path('/root/Trailer_Detention_Log.xlsx')
++OUT_XLSX = Path('/root/Trailer_Detention_Audit.xlsx')
++OUT_DOCX = Path('/root/Trailer_Detention_Brief.docx')
++
++FORMATTED_HEADERS = [
++    'Load ID', 'Carrier', 'Allowed Hold Hours', 'Actual Hold Hours',
++    'Seal Required', 'Seal Status', 'Yard', 'Dispatcher',
++    'Detention Overrun', 'Seal Error', 'Total Errors', 'Error Summary'
++]
++SUMMARY_HEADERS = ['Carrier', 'Yard', 'Detention Overrun Errors', 'Seal Errors', 'Total Errors']
++
++src_wb = load_workbook(SRC, data_only=True)
++src_ws = src_wb.worksheets[0]
++source_data_rows = src_ws.max_row - 1
++
++wb = load_workbook(OUT_XLSX, data_only=False)
++print('Audit sheet names:', wb.sheetnames)
++assert wb.sheetnames == ['RawData', 'Formatted Data', 'Summary']
++
++raw = wb['RawData']
++fmt = wb['Formatted Data']
++sumws = wb['Summary']
++print('Source data rows:', source_data_rows)
++print('RawData rows incl header:', raw.max_row, 'data rows:', raw.max_row - 1)
++assert raw.max_row - 1 == source_data_rows
++
++fmt_headers = [fmt.cell(1, c).value for c in range(1, fmt.max_column + 1)]
++print('Formatted Data headers:', fmt_headers)
++print('Formatted Data rows incl header:', fmt.max_row, 'data rows:', fmt.max_row - 1, 'cols:', fmt.max_column)
++assert fmt.max_column == 12
++assert fmt_headers == FORMATTED_HEADERS
++assert fmt.max_row - 1 == source_data_rows
++
++print('First 5 Formatted Data rows:')
++for r in range(2, min(fmt.max_row, 6) + 1):
++    print([fmt.cell(r, c).value for c in range(1, 13)])
++
++summary_headers = [sumws.cell(1, c).value for c in range(1, sumws.max_column + 1)]
++print('Summary headers:', summary_headers)
++assert summary_headers == SUMMARY_HEADERS
++
++print('Entire Summary sheet:')
++summary_values = []
++for r in range(1, sumws.max_row + 1):
++    row = [sumws.cell(r, c).value for c in range(1, sumws.max_column + 1)]
++    summary_values.append(row)
++    print(row)
++
++# Summary validation: groups only with errors, sorted correctly, grand total last.
++data_summary_rows = summary_values[1:-1]
++grand_row = summary_values[-1]
++assert grand_row[0] == 'Grand Total' and grand_row[1] == '-'
++assert all(row[4] > 0 for row in data_summary_rows)
++assert data_summary_rows == sorted(data_summary_rows, key=lambda row: (row[0], row[1]))
++
++fmt_det = sum(fmt.cell(r, 9).value for r in range(2, fmt.max_row + 1))
++fmt_seal = sum(fmt.cell(r, 10).value for r in range(2, fmt.max_row + 1))
++fmt_total = sum(fmt.cell(r, 11).value for r in range(2, fmt.max_row + 1))
++print('Formatted totals:', fmt_det, fmt_seal, fmt_total)
++print('Grand Total row:', grand_row)
++assert grand_row[2:] == [fmt_det, fmt_seal, fmt_total]
++assert grand_row[2] == sum(row[2] for row in data_summary_rows)
++assert grand_row[3] == sum(row[3] for row in data_summary_rows)
++assert grand_row[4] == sum(row[4] for row in data_summary_rows)
++
++# Confirm computed fields are static, valid values, and logic-correct.
++valid_summaries = {'None', 'Detention Overrun', 'Seal Error', 'Detention Overrun, Seal Error'}
++for r in range(2, fmt.max_row + 1):
++    allowed = fmt.cell(r, 3).value
++    actual = fmt.cell(r, 4).value
++    required = str(fmt.cell(r, 5).value).strip().upper()
++    status = str(fmt.cell(r, 6).value).strip().upper()
++    det = fmt.cell(r, 9).value
++    seal = fmt.cell(r, 10).value
+… omitted 37 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260611_065859_0f8e86

@@ -1,0 +1,85 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_promo_audit.py → b/create_promo_audit.py
+@@ -0,0 +1,123 @@
++import pandas as pd
++import numpy as np
++from docx import Document
++from openpyxl import load_workbook
++
++source = '/root/Promo_Price_Check_Source.xlsx'
++excel_out = '/root/Promo_Register_Audit.xlsx'
++word_out = '/root/Promo_Register_Brief.docx'
++
++# Step 1 — Load and clean data
++df_raw = pd.read_excel(source)
++
++required_cols = ['Promo ID','SKU','Promo Price','Register Price',
++                 'Promo Start Date','Sale Date','Promo End Date','Store ID']
++
++# Map source columns that differ only by whitespace/case; otherwise leave as-is.
++canon_to_required = {c.strip().lower(): c for c in required_cols}
++rename_map = {}
++for col in list(df_raw.columns[:8]):
++    key = str(col).strip().lower()
++    if key in canon_to_required and col != canon_to_required[key]:
++        rename_map[col] = canon_to_required[key]
++if rename_map:
++    df_raw = df_raw.rename(columns=rename_map)
++
++# Confirm required columns are available before transformation.
++missing = [c for c in required_cols if c not in df_raw.columns]
++if missing:
++    raise ValueError(f'Missing required columns after normalization: {missing}; columns={df_raw.columns.tolist()}')
++
++# Parse date columns robustly
++for dc in ['Promo Start Date','Sale Date','Promo End Date']:
++    df_raw[dc] = pd.to_datetime(df_raw[dc])
++
++# Round prices to 2 decimals to avoid float comparison artifacts
++df_raw['Promo Price'] = df_raw['Promo Price'].round(2)
++df_raw['Register Price'] = df_raw['Register Price'].round(2)
++
++# Step 2 — Build Formatted Data
++df_fmt = df_raw.copy()
++df_fmt['Price Error'] = (df_fmt['Register Price'] != df_fmt['Promo Price']).astype(int)
++df_fmt['Window Error'] = ((df_fmt['Sale Date'] < df_fmt['Promo Start Date']) |
++                          (df_fmt['Sale Date'] > df_fmt['Promo End Date'])).astype(int)
++df_fmt['Total Errors'] = df_fmt['Price Error'] + df_fmt['Window Error']
++
++def error_summary(row):
++    parts = []
++    if row['Price Error'] == 1:
++        parts.append('Price Error')
++    if row['Window Error'] == 1:
++        parts.append('Window Error')
++    return ', '.join(parts) if parts else 'None'
++
++df_fmt['Error Summary'] = df_fmt.apply(error_summary, axis=1)
++
++# Step 3 — Build Summary sheet
++grp = df_fmt.groupby(['SKU','Store ID'], as_index=False).agg(
++    **{'Price Errors': ('Price Error','sum'),
++       'Window Errors': ('Window Error','sum'),
++       'Total Errors': ('Total Errors','sum')})
++grp = grp[grp['Total Errors'] > 0].copy()
++grp = grp.sort_values(['SKU','Store ID']).reset_index(drop=True)
++grand = pd.DataFrame([{
++    'SKU': 'Grand Total',
++    'Store ID': '-',
++    'Price Errors': grp['Price Errors'].sum(),
++    'Window Errors': grp['Window Errors'].sum(),
++    'Total Errors': grp['Total Errors'].sum()
++}])
++df_summary = pd.concat([grp, grand], ignore_index=True)
++
++# Step 4 — Write the Excel workbook
++with pd.ExcelWriter(excel_out, engine='openpyxl') as writer:
++    df_raw.to_excel(writer, sheet_name='RawData', index=False)
++    df_fmt.to_excel(writer, sheet_name='Formatted Data', index=False)
++    df_summary.to_excel(writer, sheet_name='Summary', index=False)
++
++# Step 5 — Build the Word brief
+… omitted 45 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260610_175550_80622b
