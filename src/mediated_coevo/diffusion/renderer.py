@@ -13,7 +13,6 @@ from mediated_coevo.diffusion.policy import (
 from mediated_coevo.diffusion.models import (
     DiffusedRecord,
     DiffusionArtifact,
-    DiffusionArtifactType,
     TaskGraphSnapshot,
 )
 from mediated_coevo.diffusion.store import DiffusionStore
@@ -385,6 +384,6 @@ def _artifact_success(artifact: DiffusionArtifact) -> bool | None:
 
 
 def _artifact_regression(artifact: DiffusionArtifact) -> bool | None:
-    if artifact.artifact_type == DiffusionArtifactType.REGRESSION_WARNING:
+    if artifact.metadata.get("regression") is True:
         return True
     return None

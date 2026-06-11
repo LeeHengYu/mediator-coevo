@@ -150,6 +150,7 @@ def _store_diffusion_artifact(
     content: str | None = None,
     verifier_reward: float = 1.0,
     judge_reward: float | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     orch._diffusion_store.store_artifact(
         DiffusionArtifact(
@@ -161,6 +162,7 @@ def _store_diffusion_artifact(
             content=content or artifact_id,
             verifier_reward=verifier_reward,
             judge_reward=judge_reward,
+            metadata=metadata or {},
         )
     )
 
@@ -1065,11 +1067,12 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
     )
     _store_diffusion_artifact(
         orch,
-        artifact_id="task-b-warning",
+        artifact_id="task-b-regressed-outcome",
         source_task_id="task-B",
-        artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
+        artifact_type=DiffusionArtifactType.RUN_OUTCOME,
         content="warning from task-B",
         verifier_reward=0.0,
+        metadata={"regression": True},
     )
     _store_diffusion_artifact(
         orch,
@@ -1109,7 +1112,7 @@ async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(t
     assert sum(1 for record in records if record.rendered) == 2
     assert selected_artifact_ids == {
         "task-b-outcome",
-        "task-b-warning",
+        "task-b-regressed-outcome",
     }
 
     record = IterationRecord(

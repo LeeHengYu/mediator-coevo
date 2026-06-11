@@ -20,7 +20,6 @@ class DiffusionArtifactType(str, Enum):
     RUN_OUTCOME = "run_outcome"
     DEBUG_HINT = "debug_hint"
     MEDIATOR_REPORT_SUMMARY = "mediator_report_summary"
-    REGRESSION_WARNING = "regression_warning"
     OTHER = "other"
 
 

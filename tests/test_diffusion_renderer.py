@@ -275,10 +275,11 @@ async def test_render_diffusion_subscriptions_separates_avoid_recheck_channel(
         artifact_id="failure-artifact",
         source_task_id="task-c",
         source_iteration=1,
-        artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
+        artifact_type=DiffusionArtifactType.RUN_OUTCOME,
         risk_level=DiffusionRiskLevel.LOW,
         content="avoid copying the percentile formula",
         verifier_reward=0.0,
+        metadata={"regression": True},
     )
 
     bundle = await render_diffusion_subscriptions(
@@ -330,4 +331,10 @@ async def test_render_diffusion_subscriptions_separates_avoid_recheck_channel(
     } == {
         "success-artifact": True,
         "failure-artifact": False,
+    }
+    assert {
+        record.artifact_id: record.regression for record in records
+    } == {
+        "success-artifact": None,
+        "failure-artifact": True,
     }

@@ -168,7 +168,7 @@ async def test_emit_diffusion_artifacts_skips_infra_failures():
 
 
 @pytest.mark.asyncio
-async def test_emit_diffusion_artifacts_emits_failure_and_regression_warnings():
+async def test_emit_diffusion_artifacts_merges_regression_detail_into_run_outcome():
     trace = ExecutionTrace(
         task_id="task-A",
         iteration=4,
@@ -191,23 +191,18 @@ async def test_emit_diffusion_artifacts_emits_failure_and_regression_warnings():
         task_metadata={"task_category": "api", "verifier_type": "pytest"},
     )
 
-    artifact_types = {artifact.artifact_type for artifact in artifacts}
-    assert DiffusionArtifactType.RUN_OUTCOME in artifact_types
-    assert DiffusionArtifactType.REGRESSION_WARNING in artifact_types
-    run_outcome = next(
-        artifact
-        for artifact in artifacts
-        if artifact.artifact_type == DiffusionArtifactType.RUN_OUTCOME
-    )
+    assert len(artifacts) == 1
+    run_outcome = artifacts[0]
+    assert run_outcome.artifact_type == DiffusionArtifactType.RUN_OUTCOME
     assert run_outcome.metadata["outcome_signal"] == "failure"
+    assert run_outcome.metadata["regression"] is True
+    assert run_outcome.metadata["previous_reward"] == pytest.approx(0.4)
+    assert run_outcome.metadata["current_reward"] == pytest.approx(0.0)
+    assert run_outcome.metadata["delta_reward"] == pytest.approx(-0.4)
     assert "expected 200 got 500" in run_outcome.content
-    regression = next(
-        artifact
-        for artifact in artifacts
-        if artifact.artifact_type == DiffusionArtifactType.REGRESSION_WARNING
-    )
-    assert "regressed from 0.40 to 0.00" in regression.content
-    assert regression.metadata["trace_ref"] == "task-A:iter0004"
+    assert "Same-task reward regressed from 0.40 to 0.00" in run_outcome.content
+    assert "Treat recent context as a suspect hypothesis" in run_outcome.content
+    assert "delta_reward=-0.40" not in run_outcome.content
 
 
 @pytest.mark.asyncio

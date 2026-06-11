@@ -393,10 +393,10 @@ def _best_first_artifacts(
 
 
 def _reward_score(artifact: DiffusionArtifact) -> float:
-    if artifact.verifier_reward is not None:
-        return artifact.verifier_reward
     if artifact.judge_reward is not None:
         return artifact.judge_reward
+    if artifact.verifier_reward is not None:
+        return artifact.verifier_reward
     return -1.0
 
 
@@ -441,12 +441,10 @@ _REUSE_ARTIFACT_TYPE_PRIORITY = {
     DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY: 1,
     DiffusionArtifactType.DEBUG_HINT: 2,
     DiffusionArtifactType.OTHER: 3,
-    DiffusionArtifactType.REGRESSION_WARNING: 4,
 }
 
 _AVOID_RECHECK_ARTIFACT_TYPE_PRIORITY = {
-    DiffusionArtifactType.REGRESSION_WARNING: 0,
-    DiffusionArtifactType.RUN_OUTCOME: 1,
+    DiffusionArtifactType.RUN_OUTCOME: 0,
     DiffusionArtifactType.DEBUG_HINT: 2,
     DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY: 3,
     DiffusionArtifactType.OTHER: 4,

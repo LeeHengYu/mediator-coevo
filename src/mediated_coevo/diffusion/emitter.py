@@ -58,6 +58,21 @@ class DiffusionEmitter:
             judge_reward=judge_reward,
         )
         if run_outcome:
+            run_outcome_metadata: dict[str, Any] = {
+                **metadata,
+                "outcome_signal": _outcome_signal(trace, record),
+            }
+            if record.delta_reward is not None and record.delta_reward < 0:
+                previous_reward = _previous_reward(record, trace)
+                if previous_reward is not None and trace.reward is not None:
+                    run_outcome_metadata.update(
+                        {
+                            "regression": True,
+                            "delta_reward": record.delta_reward,
+                            "previous_reward": previous_reward,
+                            "current_reward": trace.reward,
+                        }
+                    )
             artifacts.append(
                 self._build_artifact(
                     artifact_type=DiffusionArtifactType.RUN_OUTCOME,
@@ -66,10 +81,7 @@ class DiffusionEmitter:
                     evidence_trace_ids=trace_refs,
                     verifier_reward=trace.reward,
                     judge_reward=judge_reward,
-                    metadata={
-                        **metadata,
-                        "outcome_signal": _outcome_signal(trace, record),
-                    },
+                    metadata=run_outcome_metadata,
                 )
             )
 
@@ -107,24 +119,6 @@ class DiffusionEmitter:
                     )
                 )
 
-        regression_warning = self._regression_warning_content(record, trace)
-        if regression_warning:
-            artifacts.append(
-                self._build_artifact(
-                    artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
-                    trace=trace,
-                    content=regression_warning,
-                    evidence_trace_ids=trace_refs,
-                    verifier_reward=trace.reward,
-                    judge_reward=judge_reward,
-                    metadata={
-                        **metadata,
-                        "delta_reward": record.delta_reward,
-                        "previous_reward": _previous_reward(record, trace),
-                        "current_reward": trace.reward,
-                    },
-                )
-            )
         return artifacts
 
     async def _report_summary_content(
@@ -164,7 +158,28 @@ class DiffusionEmitter:
             f"record_verifier_status={record.verifier_status}",
         ]
         if record.delta_reward is not None:
-            evidence_parts.append(f"delta_reward={record.delta_reward:+.2f}")
+            previous_reward = _previous_reward(record, trace)
+            if previous_reward is not None:
+                if record.delta_reward < 0:
+                    regressed_reward_change = self._regressed_reward_change_content(
+                        record,
+                        trace,
+                    )
+                    if regressed_reward_change is not None:
+                        evidence_parts.append(
+                            f"reward_change={regressed_reward_change}"
+                        )
+                elif record.delta_reward > 0:
+                    evidence_parts.append(
+                        "reward_change=Same-task reward improved from "
+                        f"{previous_reward:.2f} to {trace.reward:.2f} "
+                        f"(delta={record.delta_reward:+.2f})."
+                    )
+                else:
+                    evidence_parts.append(
+                        "reward_change=Same-task reward stayed at "
+                        f"{trace.reward:.2f} (delta={record.delta_reward:+.2f})."
+                    )
         if trace.stdout:
             evidence_parts.append(f"stdout\n{trace.stdout}")
         if trace.stderr:
@@ -244,7 +259,7 @@ class DiffusionEmitter:
             return None
         return headline
 
-    def _regression_warning_content(
+    def _regressed_reward_change_content(
         self,
         record: IterationRecord,
         trace: ExecutionTrace,

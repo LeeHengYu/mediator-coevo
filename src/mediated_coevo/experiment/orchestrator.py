@@ -30,7 +30,6 @@ from mediated_coevo.core.utils import format_optional_reward
 from mediated_coevo.diffusion import (
     DiffusedRecord,
     DiffusionArtifact,
-    DiffusionArtifactType,
     DiffusionStore,
     DiffusionSubscription,
     TaskGraphSnapshot,
@@ -1049,12 +1048,7 @@ class Orchestrator:
                         if artifact.verifier_reward is None
                         else artifact.verifier_reward == 1.0
                     ),
-                    regression=(
-                        True
-                        if artifact.artifact_type
-                        == DiffusionArtifactType.REGRESSION_WARNING
-                        else None
-                    ),
+                    regression=True if artifact.metadata.get("regression") is True else None,
                     metadata={
                         "artifact_type": artifact.artifact_type.value,
                         "risk_level": artifact.risk_level.value,

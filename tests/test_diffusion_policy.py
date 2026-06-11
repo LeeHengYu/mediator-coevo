@@ -45,9 +45,9 @@ def test_capped_broadcast_uses_success_reuse_and_capped_avoid_channels() -> None
             ),
             _artifact("c-debug", source_task_id="task-C"),
             _artifact(
-                "d-warning",
+                "d-regressed-outcome",
                 source_task_id="task-D",
-                artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
+                artifact_type=DiffusionArtifactType.RUN_OUTCOME,
                 verifier_reward=0.0,
             ),
             _artifact("e-debug-failure", source_task_id="task-E", verifier_reward=0.0),
@@ -62,7 +62,7 @@ def test_capped_broadcast_uses_success_reuse_and_capped_avoid_channels() -> None
     ] == [
         ("b-outcome", REUSE_SUCCESS_CHANNEL),
         ("c-debug", REUSE_SUCCESS_CHANNEL),
-        ("d-warning", AVOID_RECHECK_CHANNEL),
+        ("d-regressed-outcome", AVOID_RECHECK_CHANNEL),
     ]
     assert len({subscription.artifact.source_task_id for subscription in subscriptions}) == 3
 
@@ -106,9 +106,9 @@ def test_top_k_similarity_orders_by_edge_reward_type_and_source_diversity() -> N
                 artifact_type=DiffusionArtifactType.RUN_OUTCOME,
             ),
             _artifact(
-                "b-warning",
+                "b-regressed-outcome",
                 source_task_id="task-B",
-                artifact_type=DiffusionArtifactType.REGRESSION_WARNING,
+                artifact_type=DiffusionArtifactType.RUN_OUTCOME,
                 verifier_reward=0.0,
             ),
             _artifact("d-debug", source_task_id="task-D"),
@@ -126,7 +126,7 @@ def test_top_k_similarity_orders_by_edge_reward_type_and_source_diversity() -> N
     ] == [
         ("b-outcome", REUSE_SUCCESS_CHANNEL),
         ("c-debug", REUSE_SUCCESS_CHANNEL),
-        ("b-warning", AVOID_RECHECK_CHANNEL),
+        ("b-regressed-outcome", AVOID_RECHECK_CHANNEL),
     ]
     assert [subscription.metadata["edge_rank"] for subscription in subscriptions] == [
         1,
