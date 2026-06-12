@@ -365,6 +365,7 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert captured["preset_names"] == [BASELINE_PRESET_NAMES[3]]
+    assert captured["flatten_single_row"] is True
     assert captured["benchmark_repo"] is repository
     assert captured["matrix_seed"] == 42
     assert captured["matrix_run_id"] == "custom-matrix-run"
@@ -1037,6 +1038,67 @@ def test_matrix_runtimes_can_build_only_selected_presets(tmp_path):
     assert rows[0].runtime.experiment_dir == matrix_dir / selected_preset
     assert (matrix_dir / selected_preset / "config.toml").is_file()
     assert not (matrix_dir / BASELINE_PRESET_NAMES[0]).exists()
+
+
+def test_matrix_runtimes_can_flatten_single_selected_preset(tmp_path):
+    _write_skill(tmp_path, "executor", "# Executor\n")
+    _write_skill(tmp_path, "planner", "# Planner\n")
+    _write_skill(tmp_path, "mediator", "# Mediator\n")
+    config = _config()
+    config.paths.skills_dir = "skills"
+    config.paths.data_dir = "data"
+    config.paths.benchmarks_dir = "benchmarks/skillflow"
+    matrix_dir = tmp_path / "data" / "experiments" / "matrix"
+    benchmark_repo = SkillFlowRepository(
+        root_dir=tmp_path / "benchmarks" / "skillflow",
+        task_dirs=["tasks"],
+    )
+    selected_preset = BASELINE_PRESET_NAMES[3]
+
+    rows = build_matrix_runtimes(
+        factory=ExperimentFactory(tmp_path),
+        base_config=config,
+        seed=123,
+        matrix_dir=matrix_dir,
+        benchmark_repo=benchmark_repo,
+        preset_names=[selected_preset],
+        flatten_single_row=True,
+    )
+
+    assert [row.preset_name for row in rows] == [selected_preset]
+    assert rows[0].runtime.experiment_dir == matrix_dir
+    assert (matrix_dir / "config.toml").is_file()
+    assert (matrix_dir / "skills" / "executor" / "SKILL.md").read_text() == (
+        "# Executor\n"
+    )
+    assert not (matrix_dir / selected_preset).exists()
+
+    saved = tomllib.loads((matrix_dir / "config.toml").read_text())
+    assert saved["experiment"]["baseline_preset"] == selected_preset
+
+
+def test_matrix_runtimes_reject_flattened_multi_row_matrix(tmp_path):
+    _write_skill(tmp_path, "executor", "# Executor\n")
+    _write_skill(tmp_path, "planner", "# Planner\n")
+    _write_skill(tmp_path, "mediator", "# Mediator\n")
+    config = _config()
+    config.paths.skills_dir = "skills"
+    matrix_dir = tmp_path / "data" / "experiments" / "matrix"
+    benchmark_repo = SkillFlowRepository(
+        root_dir=tmp_path / "benchmarks" / "skillflow",
+        task_dirs=["tasks"],
+    )
+
+    with pytest.raises(ValueError, match="requires exactly one matrix preset"):
+        build_matrix_runtimes(
+            factory=ExperimentFactory(tmp_path),
+            base_config=config,
+            seed=123,
+            matrix_dir=matrix_dir,
+            benchmark_repo=benchmark_repo,
+            preset_names=BASELINE_PRESET_NAMES[:2],
+            flatten_single_row=True,
+        )
 
 
 class _NoCallPlanner:

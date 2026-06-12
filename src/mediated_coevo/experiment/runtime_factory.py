@@ -236,20 +236,26 @@ def build_matrix_runtimes(
     benchmark_repo: SkillFlowRepository,
     harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
     preset_names: Sequence[str] | None = None,
+    flatten_single_row: bool = False,
 ) -> list[MatrixRuntime]:
     """Build matrix rows with isolated skill stores."""
     rows: list[MatrixRuntime] = []
     selected_preset_names = (
         BASELINE_PRESET_NAMES if preset_names is None else preset_names
     )
+    if flatten_single_row and len(selected_preset_names) != 1:
+        raise ValueError("flatten_single_row requires exactly one matrix preset")
     for preset_name in selected_preset_names:
         preset = get_baseline_preset(preset_name)
         row_config = preset.build_config(base_config, seed=seed)
+        experiment_dir = (
+            matrix_dir if flatten_single_row else matrix_dir / preset_name
+        )
         runtime = factory.build(
             config=row_config,
             seed=seed,
             condition_name=preset.condition_name,
-            experiment_dir=matrix_dir / preset_name,
+            experiment_dir=experiment_dir,
             benchmark_repo=benchmark_repo,
             harbor_runner=harbor_runner,
         )

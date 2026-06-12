@@ -244,6 +244,7 @@ def matrix(
         matrix_dir=matrix_dir,
         benchmark_repo=repository,
         preset_names=preset_names,
+        flatten_single_row=row_index is not None,
     )
 
     print_task_selection(selection)
