@@ -90,7 +90,10 @@ class DiffusionEmitter:
             report_metadata = {
                 **metadata,
                 "report_id": report.report_id,
-                "report_artifact_path": _report_artifact_path(report),
+                "report_artifact_path": (
+                    f"artifacts/reports/{report.task_id}_iter"
+                    f"{report.iteration:04d}_{report.report_id}.json"
+                ),
             }
             artifacts.append(
                 self._build_artifact(
@@ -233,7 +236,9 @@ class DiffusionEmitter:
         metadata: dict[str, Any] = {
             "emitter_version": self.emitter_version,
             "trace_ref": _trace_ref(trace),
-            "trace_artifact_path": _trace_artifact_path(trace),
+            "trace_artifact_path": (
+                f"artifacts/traces/{trace.task_id}_iter{trace.iteration:04d}.json"
+            ),
             "verifier_status": trace.status,
         }
         if trace.error_kind:
@@ -289,8 +294,25 @@ class DiffusionEmitter:
         judge_reward: float | None,
         metadata: dict[str, Any],
     ) -> DiffusionArtifact:
+        task_slug = re.sub(r"[^A-Za-z0-9]+", "-", trace.task_id).strip("-").lower()
+        type_slug = artifact_type.value.replace("_", "-")
+        if content:
+            from mediated_coevo.runtime.token_budget import count_text_tokens
+
+            try:
+                token_cost = count_text_tokens(self.model, content)
+            except Exception:
+                logger.debug(
+                    "Token counting failed for diffusion artifact",
+                    exc_info=True,
+                )
+                token_cost = 0
+        else:
+            token_cost = 0
         return DiffusionArtifact(
-            artifact_id=_artifact_id(trace.task_id, trace.iteration, artifact_type),
+            artifact_id=(
+                f"{task_slug or 'artifact'}-iter{trace.iteration:04d}-{type_slug}"
+            ),
             source_task_id=trace.task_id,
             source_iteration=trace.iteration,
             source_run_id=trace.run_id,
@@ -301,7 +323,7 @@ class DiffusionEmitter:
             evidence_report_ids=list(evidence_report_ids or []),
             verifier_reward=verifier_reward,
             judge_reward=judge_reward,
-            token_cost=_token_cost(self.model, content),
+            token_cost=token_cost,
             metadata=metadata,
         )
 
@@ -334,34 +356,8 @@ async def emit_diffusion_artifacts(
     )
 
 
-def _artifact_id(
-    task_id: str,
-    iteration: int,
-    artifact_type: DiffusionArtifactType,
-) -> str:
-    task_slug = _slug(task_id)
-    type_slug = artifact_type.value.replace("_", "-")
-    return f"{task_slug}-iter{iteration:04d}-{type_slug}"
-
-
-def _slug(value: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
-    return slug or "artifact"
-
-
 def _trace_ref(trace: ExecutionTrace) -> str:
     return f"{trace.task_id}:iter{trace.iteration:04d}"
-
-
-def _trace_artifact_path(trace: ExecutionTrace) -> str:
-    return f"artifacts/traces/{trace.task_id}_iter{trace.iteration:04d}.json"
-
-
-def _report_artifact_path(report: MediatorReport) -> str:
-    return (
-        f"artifacts/reports/{report.task_id}_iter{report.iteration:04d}_"
-        f"{report.report_id}.json"
-    )
 
 
 def _outcome_signal(
@@ -391,14 +387,3 @@ def _reward_text(reward: float | None) -> str:
         return "n/a"
     return f"{reward:.2f}"
 
-
-def _token_cost(model: str, content: str) -> int:
-    from mediated_coevo.runtime.token_budget import count_text_tokens
-
-    if not content:
-        return 0
-    try:
-        return count_text_tokens(model, content)
-    except Exception:
-        logger.debug("Token counting failed for diffusion artifact", exc_info=True)
-        return 0

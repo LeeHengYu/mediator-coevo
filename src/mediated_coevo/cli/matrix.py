@@ -155,7 +155,26 @@ def matrix(
     """Run the eight-row learned-mediator diffusion matrix."""
     setup_logging(verbose)
     if list_rows:
-        _print_matrix_rows()
+        console.print("[bold]Matrix rows:[/]")
+        for index, preset in enumerate(BASELINE_PRESETS):
+            skill_updates = preset.skill_updates.model_dump()
+            enabled_roles = [
+                role for role, enabled in skill_updates.items() if enabled
+            ]
+            if not enabled_roles:
+                skill_update_label = "none"
+            elif len(enabled_roles) == len(skill_updates):
+                skill_update_label = "all"
+            else:
+                skill_update_label = ",".join(enabled_roles)
+
+            console.print(
+                f"  {index}: {preset.name} "
+                f"(skill update: {skill_update_label}, "
+                f"diffusion policy: {preset.diffusion_policy}, "
+                f"diffusion graph: {preset.diffusion_graph})",
+                soft_wrap=True,
+            )
         return
 
     if (
@@ -168,7 +187,15 @@ def matrix(
             "diffusion.graph; use --diffusion-max-artifacts or "
             "--diffusion-top-k-neighbors for shared matrix knobs"
         )
-    preset_names = _selected_preset_names(row_index)
+    if row_index is None:
+        preset_names = list(BASELINE_PRESET_NAMES)
+    else:
+        if row_index < 0 or row_index >= len(BASELINE_PRESET_NAMES):
+            raise typer.BadParameter(
+                "matrix row index must be between "
+                f"0 and {len(BASELINE_PRESET_NAMES) - 1}"
+            )
+        preset_names = [BASELINE_PRESET_NAMES[row_index]]
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides=_run_config_overrides(
@@ -267,40 +294,6 @@ def matrix(
             history_store=row.runtime.orchestrator.history_store,
         )
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
-
-
-def _print_matrix_rows() -> None:
-    console.print("[bold]Matrix rows:[/]")
-    for index, preset in enumerate(BASELINE_PRESETS):
-        skill_updates = preset.skill_updates.model_dump()
-        enabled_roles = [
-            role for role, enabled in skill_updates.items() if enabled
-        ]
-        if not enabled_roles:
-            skill_update_label = "none"
-        elif len(enabled_roles) == len(skill_updates):
-            skill_update_label = "all"
-        else:
-            skill_update_label = ",".join(enabled_roles)
-
-        console.print(
-            f"  {index}: {preset.name} "
-            f"(skill update: {skill_update_label}, "
-            f"diffusion policy: {preset.diffusion_policy}, "
-            f"diffusion graph: {preset.diffusion_graph})",
-            soft_wrap=True,
-        )
-
-
-def _selected_preset_names(row_index: int | None) -> list[str]:
-    if row_index is None:
-        return list(BASELINE_PRESET_NAMES)
-    if row_index < 0 or row_index >= len(BASELINE_PRESET_NAMES):
-        raise typer.BadParameter(
-            f"matrix row index must be between 0 and {len(BASELINE_PRESET_NAMES) - 1}"
-        )
-    return [BASELINE_PRESET_NAMES[row_index]]
-
 
 def register_matrix_command(app: typer.Typer) -> None:
     app.command()(matrix)

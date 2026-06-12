@@ -37,7 +37,14 @@ def validate_experiment_design(
     baseline_preset: str | None = None,
 ) -> None:
     """Validate experiment condition/update semantics before runtime side effects."""
-    enabled_updates = _enabled_skill_updates(skill_updates)
+    enabled_roles: list[str] = []
+    if skill_updates.executor:
+        enabled_roles.append("executor")
+    if skill_updates.planner:
+        enabled_roles.append("planner")
+    if skill_updates.mediator:
+        enabled_roles.append("mediator")
+    enabled_updates = tuple(enabled_roles)
     design_label = (
         f"baseline preset {baseline_preset!r}"
         if baseline_preset
@@ -63,18 +70,6 @@ def validate_experiment_design(
         raise ExperimentDesignError(
             f"Invalid {design_label}: static_mediator cannot enable mediator skill updates."
         )
-
-
-def _enabled_skill_updates(skill_updates: SkillUpdateConfig) -> tuple[str, ...]:
-    enabled_roles: list[str] = []
-    if skill_updates.executor:
-        enabled_roles.append("executor")
-    if skill_updates.planner:
-        enabled_roles.append("planner")
-    if skill_updates.mediator:
-        enabled_roles.append("mediator")
-    return tuple(enabled_roles)
-
 
 async def get_executor_proposal_feedback(
     *,

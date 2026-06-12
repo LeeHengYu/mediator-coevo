@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -29,13 +29,6 @@ RECORD_COLUMNS = [
     "expected_reward_range",
     "verifier_type",
 ]
-
-
-class _TaskMetadata(TypedDict):
-    task_category: str | None
-    task_difficulty: str | None
-    expected_reward_range: tuple[float, float] | None
-    verifier_type: str | None
 
 
 class BootstrapConfidenceInterval(BaseModel):
@@ -135,9 +128,11 @@ def build_score_summary(
         total_runs=total_runs,
         scored_count=total_scored,
         unscored_count=total_runs - total_scored,
-        env_failure_count=_env_failure_count(frame),
+        env_failure_count=int(frame["is_env_failure"].sum()) if not frame.empty else 0,
         mean_reward=_series_mean(scored_rewards),
-        median_reward=_series_median(scored_rewards),
+        median_reward=(
+            float(scored_rewards.median()) if not scored_rewards.empty else None
+        ),
         macro_mean_reward=_series_mean(task_means),
         bootstrap_ci=_bootstrap_mean_ci(
             scored_rewards,
@@ -196,6 +191,7 @@ def _build_task_summaries(
         scored_count = int(stats["scored_count"])
         total_runs = int(stats["total_runs"])
         scored_share = scored_count / total_scored if total_scored else 0.0
+        expected_reward_range = _first_present(task_frame, "expected_reward_range")
 
         summaries.append(
             TaskScoreSummary(
@@ -213,7 +209,14 @@ def _build_task_summaries(
                     confidence_level=confidence_level,
                 ),
                 scored_share=scored_share,
-                **_first_task_metadata(task_frame),
+                task_category=_first_string(task_frame, "task_category"),
+                task_difficulty=_first_string(task_frame, "task_difficulty"),
+                expected_reward_range=(
+                    expected_reward_range
+                    if isinstance(expected_reward_range, tuple)
+                    else None
+                ),
+                verifier_type=_first_string(task_frame, "verifier_type"),
             )
         )
     return summaries
@@ -224,7 +227,11 @@ def _records_frame(records: list[IterationRecord]) -> pd.DataFrame:
     for record in records:
         if record.task_id == COEVOLUTION_TASK_ID:
             continue
-        status = _record_status(record)
+        status = (
+            record.execution_trace.status
+            if record.execution_trace is not None
+            else None
+        )
         reward = record.reward
         is_env_failure = status in ENV_FAILURE_STATUSES
         if reward is not None and not is_env_failure:
@@ -261,26 +268,10 @@ def _scored_rewards(frame: pd.DataFrame) -> pd.Series:
     return frame.loc[frame["is_scored"], "scored_reward"].dropna().astype(float)
 
 
-def _env_failure_count(frame: pd.DataFrame) -> int:
-    return int(frame["is_env_failure"].sum()) if not frame.empty else 0
-
-
-def _record_status(record: IterationRecord) -> str | None:
-    if record.execution_trace is None:
-        return None
-    return record.execution_trace.status
-
-
 def _series_mean(values: pd.Series) -> float | None:
     if values.empty:
         return None
     return float(values.mean())
-
-
-def _series_median(values: pd.Series) -> float | None:
-    if values.empty:
-        return None
-    return float(values.median())
 
 
 def _bootstrap_mean_ci(
@@ -324,25 +315,9 @@ def _bootstrap_mean_ci(
     )
 
 
-def _first_task_metadata(frame: pd.DataFrame) -> _TaskMetadata:
-    return {
-        "task_category": _first_string(frame, "task_category"),
-        "task_difficulty": _first_string(frame, "task_difficulty"),
-        "expected_reward_range": _first_reward_range(frame),
-        "verifier_type": _first_string(frame, "verifier_type"),
-    }
-
-
 def _first_string(frame: pd.DataFrame, column: str) -> str | None:
     value = _first_present(frame, column)
     if isinstance(value, str):
-        return value
-    return None
-
-
-def _first_reward_range(frame: pd.DataFrame) -> tuple[float, float] | None:
-    value = _first_present(frame, "expected_reward_range")
-    if isinstance(value, tuple):
         return value
     return None
 

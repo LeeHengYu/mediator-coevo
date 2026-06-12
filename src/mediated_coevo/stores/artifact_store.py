@@ -168,7 +168,16 @@ class ArtifactStore:
             overwrite=overwrite,
             exists_error_prefix="Skill update",
         )
-        diff_text = _skill_update_diff(update)
+        old_lines = update.old_content.splitlines(keepends=True)
+        new_lines = update.new_content.splitlines(keepends=True)
+        diff_text = "".join(
+            difflib.unified_diff(
+                old_lines,
+                new_lines,
+                fromfile=f"{update.skill_id}/SKILL.md@old",
+                tofile=f"{update.skill_id}/SKILL.md@new",
+            )
+        )
         written_diff_path = None
         if diff_text:
             if diff_path.exists() and not overwrite:
@@ -258,15 +267,3 @@ class ArtifactStore:
                 )
             summaries.append(summary)
         return summaries
-
-
-def _skill_update_diff(update: SkillUpdate) -> str:
-    old_lines = update.old_content.splitlines(keepends=True)
-    new_lines = update.new_content.splitlines(keepends=True)
-    diff = difflib.unified_diff(
-        old_lines,
-        new_lines,
-        fromfile=f"{update.skill_id}/SKILL.md@old",
-        tofile=f"{update.skill_id}/SKILL.md@new",
-    )
-    return "".join(diff)

@@ -30,28 +30,30 @@ class ExecutorEnvelope:
 
     def render(self) -> str:
         """Return a stable Markdown envelope for executor runtimes."""
+        task_instruction = (
+            (self.task_instruction or "").strip() or "(no task instruction supplied)"
+        )
+        executor_policy = (
+            (self.executor_policy or "").strip() or "(no executor policy supplied)"
+        )
+        task_resources = (
+            "\n\n".join(
+                block.strip()
+                for block in self.task_resources
+                if block.strip()
+            )
+            or "(no task resources supplied)"
+        )
+        verifier_contract = (
+            (self.verifier_contract or "").strip()
+            or "(no verifier contract supplied)"
+        )
         return "\n\n".join(
             [
-                _render_section(
-                    "Task Instruction",
-                    self.task_instruction,
-                    fallback="(no task instruction supplied)",
-                ),
-                _render_section(
-                    "Executor Policy",
-                    self.executor_policy,
-                    fallback="(no executor policy supplied)",
-                ),
-                _render_section(
-                    "Task Resources",
-                    _join_blocks(self.task_resources),
-                    fallback="(no task resources supplied)",
-                ),
-                _render_section(
-                    "Verifier Contract",
-                    self.verifier_contract,
-                    fallback="(no verifier contract supplied)",
-                ),
+                f"# Task Instruction\n\n{task_instruction}",
+                f"# Executor Policy\n\n{executor_policy}",
+                f"# Task Resources\n\n{task_resources}",
+                f"# Verifier Contract\n\n{verifier_contract}",
             ]
         )
 
@@ -99,10 +101,3 @@ def executor_policy_metadata(
     }
 
 
-def _render_section(title: str, content: str | None, *, fallback: str) -> str:
-    body = (content or "").strip() or fallback
-    return f"# {title}\n\n{body}"
-
-
-def _join_blocks(blocks: Iterable[str]) -> str:
-    return "\n\n".join(block.strip() for block in blocks if block.strip())

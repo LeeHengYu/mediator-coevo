@@ -146,16 +146,50 @@ def compare_context_budget_runs(
     ]
     run_a = _run_summary(run_a_dir, rows_a, records_a)
     run_b = _run_summary(run_b_dir, rows_b, records_b)
-    token_delta_percent = _token_delta_percent(
-        run_a.token_means,
-        run_b.token_means,
-        tolerance=tolerance,
-    )
-    status = _comparability_status(
-        setup_mismatches=setup_mismatches,
-        budget_differences=budget_differences,
-        artifact_failures=artifact_failures,
-    )
+    token_delta_percent: dict[str, float | None] = {}
+    for field in CONTEXT_TOKEN_FIELDS:
+        value_a = run_a.token_means.get(field)
+        value_b = run_b.token_means.get(field)
+        if value_a is None or value_b is None:
+            token_delta_percent[field] = None
+            continue
+        if value_a == 0:
+            token_delta_percent[field] = (
+                0.0 if abs(value_b) <= tolerance else None
+            )
+            continue
+        token_delta_percent[field] = (value_b - value_a) / value_a
+    if setup_mismatches or artifact_failures:
+        status: Literal["pass", "warning", "fail"] = "fail"
+    elif budget_differences:
+        status = "warning"
+    else:
+        status = "pass"
+    if setup_mismatches:
+        recommended_interpretation = (
+            "Do not interpret reward or token differences as a budget effect until "
+            "non-budget setup mismatches are removed."
+        )
+    elif status == "fail":
+        recommended_interpretation = (
+            "Fix diffusion provenance or citation failures before interpreting "
+            "diffusion-context effects."
+        )
+    elif budget_differences:
+        paths = ", ".join(difference.path for difference in budget_differences)
+        recommended_interpretation = (
+            "Runs are comparable except budget fields "
+            f"({paths}); interpret token deltas as budget-sensitivity evidence."
+        )
+    elif any(delta not in (None, 0.0) for delta in token_delta_percent.values()):
+        recommended_interpretation = (
+            "Runs have matching setup; observed token deltas reflect realized "
+            "prior-context use rather than declared setup differences."
+        )
+    else:
+        recommended_interpretation = (
+            "Runs have matching setup and no observed prior-context token delta."
+        )
     return ContextBudgetComparison(
         comparability_status=status,
         run_a=run_a,
@@ -164,12 +198,7 @@ def compare_context_budget_runs(
         setup_mismatches=setup_mismatches,
         budget_differences=budget_differences,
         artifact_validity_failures=artifact_failures,
-        recommended_interpretation=_recommended_interpretation(
-            status=status,
-            setup_mismatches=setup_mismatches,
-            budget_differences=budget_differences,
-            token_delta_percent=token_delta_percent,
-        ),
+        recommended_interpretation=recommended_interpretation,
     )
 
 
@@ -280,6 +309,9 @@ def _run_summary(
 ) -> ContextBudgetRunSummary:
     compacted_ids = string_list_values(rows, "compacted_diffusion_artifact_ids")
     dropped_ids = string_list_values(rows, "dropped_for_budget_artifact_ids")
+    token_values = {
+        field: _numeric_values(rows, field) for field in CONTEXT_TOKEN_FIELDS
+    }
     return ContextBudgetRunSummary(
         experiment_dir=str(run_dir),
         metric_rows=len(rows),
@@ -298,12 +330,10 @@ def _run_summary(
             }
         ),
         token_means={
-            field: _numeric_mean(_numeric_values(rows, field))
-            for field in CONTEXT_TOKEN_FIELDS
+            field: (sum(values) / len(values) if values else None)
+            for field, values in token_values.items()
         },
-        token_totals={
-            field: sum(_numeric_values(rows, field)) for field in CONTEXT_TOKEN_FIELDS
-        },
+        token_totals={field: sum(values) for field, values in token_values.items()},
         context_budget_violation_count=sum(
             1 for row in rows if row.get("context_budget_violation") is True
         ),
@@ -323,72 +353,3 @@ def _numeric_values(rows: list[dict[str, Any]], key: str) -> list[float]:
         values.append(float(value))
     return values
 
-
-def _numeric_mean(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-
-def _token_delta_percent(
-    run_a_means: Mapping[str, float | None],
-    run_b_means: Mapping[str, float | None],
-    *,
-    tolerance: float,
-) -> dict[str, float | None]:
-    deltas: dict[str, float | None] = {}
-    for field in CONTEXT_TOKEN_FIELDS:
-        value_a = run_a_means.get(field)
-        value_b = run_b_means.get(field)
-        if value_a is None or value_b is None:
-            deltas[field] = None
-            continue
-        if value_a == 0:
-            deltas[field] = 0.0 if abs(value_b) <= tolerance else None
-            continue
-        deltas[field] = (value_b - value_a) / value_a
-    return deltas
-
-
-def _comparability_status(
-    *,
-    setup_mismatches: list[ConfigDifference],
-    budget_differences: list[ConfigDifference],
-    artifact_failures: list[ArtifactValidityFailure],
-) -> Literal["pass", "warning", "fail"]:
-    if setup_mismatches or artifact_failures:
-        return "fail"
-    if budget_differences:
-        return "warning"
-    return "pass"
-
-
-def _recommended_interpretation(
-    *,
-    status: Literal["pass", "warning", "fail"],
-    setup_mismatches: list[ConfigDifference],
-    budget_differences: list[ConfigDifference],
-    token_delta_percent: Mapping[str, float | None],
-) -> str:
-    if setup_mismatches:
-        return (
-            "Do not interpret reward or token differences as a budget effect until "
-            "non-budget setup mismatches are removed."
-        )
-    if status == "fail":
-        return (
-            "Fix diffusion provenance or citation failures before interpreting "
-            "diffusion-context effects."
-        )
-    if budget_differences:
-        paths = ", ".join(difference.path for difference in budget_differences)
-        return (
-            "Runs are comparable except budget fields "
-            f"({paths}); interpret token deltas as budget-sensitivity evidence."
-        )
-    if any(delta not in (None, 0.0) for delta in token_delta_percent.values()):
-        return (
-            "Runs have matching setup; observed token deltas reflect realized "
-            "prior-context use rather than declared setup differences."
-        )
-    return "Runs have matching setup and no observed prior-context token delta."

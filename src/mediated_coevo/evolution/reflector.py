@@ -723,18 +723,14 @@ def _format_rejected_reflection_history(
                 task_ids=task_ids,
                 reason=item.reason,
                 validation_reason=item.validation_reason,
-                validation_mean_delta=_format_optional_delta(
-                    item.validation_mean_delta
+                validation_mean_delta=(
+                    f"{item.validation_mean_delta:+.3f}"
+                    if item.validation_mean_delta is not None
+                    else "n/a"
                 ),
             )
         )
     return "\n".join(lines)
-
-
-def _format_optional_delta(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:+.3f}"
 
 
 def _format_reward_context(reward: float, relative_reward: float) -> str:

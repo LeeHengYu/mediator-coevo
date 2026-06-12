@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TypeVar
-
-from pydantic import BaseModel
 
 from mediated_coevo.diffusion.models import (
     DiffusedRecord,
@@ -22,8 +19,6 @@ from mediated_coevo.stores.json_store import (
 )
 
 logger = logging.getLogger(__name__)
-
-_TFileModel = TypeVar("_TFileModel", DiffusionArtifact, TaskGraphSnapshot)
 
 
 class DiffusionStore:
@@ -48,7 +43,14 @@ class DiffusionStore:
     ) -> Path:
         """Persist one diffusion artifact as a JSON file."""
         path = self._artifacts_dir / f"{artifact.artifact_id}.json"
-        return self._write_model(path, artifact, overwrite=overwrite)
+        write_model(
+            path,
+            artifact,
+            overwrite=overwrite,
+            exists_error_prefix="Diffusion model",
+        )
+        logger.debug("Stored diffusion model: %s", path)
+        return path
 
     def store_graph_snapshot(
         self,
@@ -58,7 +60,14 @@ class DiffusionStore:
     ) -> Path:
         """Persist one graph snapshot as a JSON file."""
         path = self._graph_snapshots_dir / f"{snapshot.snapshot_id}.json"
-        return self._write_model(path, snapshot, overwrite=overwrite)
+        write_model(
+            path,
+            snapshot,
+            overwrite=overwrite,
+            exists_error_prefix="Diffusion model",
+        )
+        logger.debug("Stored diffusion model: %s", path)
+        return path
 
     def append_diffused_record(self, record: DiffusedRecord) -> Path:
         """Append one unified diffusion audit record."""
@@ -82,9 +91,10 @@ class DiffusionStore:
         before_source_iteration: int | None = None,
     ) -> list[DiffusionArtifact]:
         """Query artifacts, most recent first."""
-        artifacts = self._load_directory_models(
+        artifacts = load_directory_models(
             self._artifacts_dir,
             DiffusionArtifact,
+            logger=logger,
         )
         filtered = [
             artifact
@@ -115,9 +125,10 @@ class DiffusionStore:
         before_iteration: int | None = None,
     ) -> list[TaskGraphSnapshot]:
         """Query graph snapshots, most recent first."""
-        snapshots = self._load_directory_models(
+        snapshots = load_directory_models(
             self._graph_snapshots_dir,
             TaskGraphSnapshot,
+            logger=logger,
         )
         filtered = [
             snapshot
@@ -168,26 +179,3 @@ class DiffusionStore:
         if recent is None:
             return filtered
         return filtered[:recent]
-
-    def _write_model(
-        self,
-        path: Path,
-        model: BaseModel,
-        *,
-        overwrite: bool,
-    ) -> Path:
-        write_model(
-            path,
-            model,
-            overwrite=overwrite,
-            exists_error_prefix="Diffusion model",
-        )
-        logger.debug("Stored diffusion model: %s", path)
-        return path
-
-    def _load_directory_models(
-        self,
-        directory: Path,
-        model_cls: type[_TFileModel],
-    ) -> list[_TFileModel]:
-        return load_directory_models(directory, model_cls, logger=logger)

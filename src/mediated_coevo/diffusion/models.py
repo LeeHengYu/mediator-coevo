@@ -10,10 +10,6 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 
-def _record_id() -> str:
-    return uuid4().hex
-
-
 class DiffusionArtifactType(str, Enum):
     """Planner-safe artifact categories allowed to diffuse across tasks."""
 
@@ -44,7 +40,7 @@ class TaskGraphEdgeRecord(BaseModel):
 class DiffusionArtifact(BaseModel):
     """A planner-visible artifact emitted from a source task."""
 
-    artifact_id: str = Field(default_factory=_record_id)
+    artifact_id: str = Field(default_factory=lambda: uuid4().hex)
     source_task_id: str
     source_iteration: int = Field(ge=0)
     source_run_id: str | None = None
@@ -64,7 +60,7 @@ class DiffusionArtifact(BaseModel):
 class TaskGraphSnapshot(BaseModel):
     """Time-safe task graph state used during candidate selection."""
 
-    snapshot_id: str = Field(default_factory=_record_id)
+    snapshot_id: str = Field(default_factory=lambda: uuid4().hex)
     run_id: str
     iteration: int = Field(ge=0)
     task_ids: list[str] = Field(default_factory=list)
@@ -79,7 +75,7 @@ class TaskGraphSnapshot(BaseModel):
 class DiffusedRecord(BaseModel):
     """Unified audit record for one artifact routed toward one target task."""
 
-    record_id: str = Field(default_factory=_record_id)
+    record_id: str = Field(default_factory=lambda: uuid4().hex)
     artifact_id: str
     source_task_id: str
     source_iteration: int = Field(ge=0)

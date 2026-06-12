@@ -424,22 +424,18 @@ async def _judge_candidate(
             condition_name=config.experiment.condition_name,
         )
         payload = parse_json_object(result["content"])
-        _reject_top_level_axis_scores(payload)
+        top_level_axis_keys = sorted(JUDGE_AXIS_SCORE_KEYS.intersection(payload))
+        if top_level_axis_keys:
+            raise ValueError(
+                "judge_returned_top_level_axis_scores: "
+                + ", ".join(top_level_axis_keys)
+            )
         return JudgeLLMResponse.model_validate(payload)
     except Exception as exc:
         raise JudgeRewardAnnotationError(
             f"invalid judge response for {candidate.task_id} "
             f"iteration {candidate.iteration}: {exc}"
         ) from exc
-
-
-def _reject_top_level_axis_scores(payload: dict[str, Any]) -> None:
-    top_level_axis_keys = sorted(JUDGE_AXIS_SCORE_KEYS.intersection(payload))
-    if top_level_axis_keys:
-        raise ValueError(
-            "judge_returned_top_level_axis_scores: "
-            + ", ".join(top_level_axis_keys)
-        )
 
 
 def _candidate_prompt(candidate: _JudgeCandidate) -> str:
@@ -494,12 +490,27 @@ def _candidates_from_metrics(
         if raw_reward is None:
             continue
         trace_path = _resolve_trace_path(data_dir, row)
-        trace = _load_trace(trace_path) if trace_path is not None else None
+        trace = (
+            ExecutionTrace.model_validate_json(trace_path.read_text())
+            if trace_path is not None and trace_path.exists()
+            else None
+        )
         verifier_status = _optional_str(row.get("verifier_status"))
         if trace is not None and trace.status != "ok":
             continue
-        if trace is None and verifier_status in {"env_failure", "parse_error", "harbor_failed"}:
+        if trace is None and verifier_status in {
+            "env_failure",
+            "parse_error",
+            "harbor_failed",
+        }:
             continue
+        raw_reward_range = row.get("expected_reward_range")
+        expected_reward_range = None
+        if isinstance(raw_reward_range, (list, tuple)) and len(raw_reward_range) == 2:
+            low = as_optional_float(raw_reward_range[0])
+            high = as_optional_float(raw_reward_range[1])
+            if low is not None and high is not None:
+                expected_reward_range = (low, high)
 
         candidates.append(
             _JudgeCandidate(
@@ -512,7 +523,7 @@ def _candidates_from_metrics(
                 total_tokens=int(as_optional_float(row.get("total_tokens")) or 0),
                 task_category=_optional_str(row.get("task_category")),
                 task_difficulty=_optional_str(row.get("task_difficulty")),
-                expected_reward_range=_reward_range(row.get("expected_reward_range")),
+                expected_reward_range=expected_reward_range,
                 verifier_type=_optional_str(row.get("verifier_type")),
                 trace=trace,
                 trace_path=trace_path,
@@ -580,33 +591,27 @@ def _write_judge_summary(
         return
     summary = ExperimentScoreSummary.model_validate_json(summary_path.read_text())
     summary.judge_reward_summary = build_score_summary(
-        _records_from_judge_rewards(judge_records)
+        [
+            IterationRecord(
+                iteration=record.iteration,
+                task_id=record.task_id,
+                reward=record.judge_reward,
+                total_tokens=record.total_tokens,
+                execution_trace=ExecutionTrace(
+                    task_id=record.task_id,
+                    iteration=record.iteration,
+                    reward=record.judge_reward,
+                    status="ok",
+                ),
+                task_category=record.task_category,
+                task_difficulty=record.task_difficulty,
+                expected_reward_range=record.expected_reward_range,
+                verifier_type=record.verifier_type,
+            )
+            for record in judge_records
+        ]
     )
     write_score_summary(summary, summary_path)
-
-
-def _records_from_judge_rewards(
-    judge_records: list[JudgeRewardRecord],
-) -> list[IterationRecord]:
-    return [
-        IterationRecord(
-            iteration=record.iteration,
-            task_id=record.task_id,
-            reward=record.judge_reward,
-            total_tokens=record.total_tokens,
-            execution_trace=ExecutionTrace(
-                task_id=record.task_id,
-                iteration=record.iteration,
-                reward=record.judge_reward,
-                status="ok",
-            ),
-            task_category=record.task_category,
-            task_difficulty=record.task_difficulty,
-            expected_reward_range=record.expected_reward_range,
-            verifier_type=record.verifier_type,
-        )
-        for record in judge_records
-    ]
 
 
 def _annotate_history_entries(
@@ -654,12 +659,6 @@ def _resolve_trace_path(data_dir: Path, row: dict[str, Any]) -> Path | None:
     return None
 
 
-def _load_trace(path: Path | None) -> ExecutionTrace | None:
-    if path is None or not path.exists():
-        return None
-    return ExecutionTrace.model_validate_json(path.read_text())
-
-
 def _relative_path(path: Path | None, base_dir: Path | None) -> str | None:
     if path is None:
         return None
@@ -669,16 +668,6 @@ def _relative_path(path: Path | None, base_dir: Path | None) -> str | None:
         return str(path.relative_to(base_dir))
     except ValueError:
         return str(path)
-
-
-def _reward_range(value: object) -> tuple[float, float] | None:
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        return None
-    low = as_optional_float(value[0])
-    high = as_optional_float(value[1])
-    if low is None or high is None:
-        return None
-    return (low, high)
 
 
 def _optional_str(value: object) -> str | None:

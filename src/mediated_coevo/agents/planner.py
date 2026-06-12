@@ -120,10 +120,15 @@ class PlannerAgent(BaseAgent):
             )
 
         if self._skill_context:
+            skill_context_description = (
+                PromptText.EXECUTOR_SKILL_EDITABLE_DESCRIPTION
+                if self._executor_skill_updates_enabled()
+                else PromptText.EXECUTOR_SKILL_READ_ONLY_DESCRIPTION
+            )
             self._append_budgeted_system_context(
                 messages,
                 heading=PromptText.EXECUTOR_ACTIVE_SKILLS_HEADING,
-                description=self._executor_skill_context_description(),
+                description=skill_context_description,
                 content=self._skill_context,
             )
 
@@ -184,11 +189,6 @@ class PlannerAgent(BaseAgent):
                 ]
             )
         return select_markdown_sections(self._skill_refiner, plan_sections)
-
-    def _executor_skill_context_description(self) -> str:
-        if self._executor_skill_updates_enabled():
-            return PromptText.EXECUTOR_SKILL_EDITABLE_DESCRIPTION
-        return PromptText.EXECUTOR_SKILL_READ_ONLY_DESCRIPTION
 
     def _executor_skill_updates_enabled(self) -> bool:
         return self._skill_updates is None or self._skill_updates.executor

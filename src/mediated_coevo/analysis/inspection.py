@@ -13,21 +13,6 @@ from mediated_coevo.core.utils import string_list_values
 from mediated_coevo.diffusion import DiffusionStore
 
 
-def _load_score_summary(summary_path: Path) -> ExperimentScoreSummary:
-    return ExperimentScoreSummary.model_validate_json(summary_path.read_text())
-
-
-def _artifact_dirs(experiment_dir: Path) -> list[str]:
-    artifacts_dir = experiment_dir / "artifacts"
-    if not artifacts_dir.exists():
-        return []
-    return [
-        str(path)
-        for path in sorted(artifacts_dir.iterdir(), key=lambda item: item.name)
-        if path.is_dir()
-    ]
-
-
 def _single_or_mixed(rows: list[dict[str, Any]], key: str) -> Any:
     values = [row[key] for row in rows if key in row]
     if not values:
@@ -210,7 +195,9 @@ def _inspection_payload(experiment_dir: Path) -> dict[str, Any]:
             "metrics_path": str(metrics_path) if metrics_path.exists() else None,
         }
         if summary_path.exists():
-            row["summary"] = _load_score_summary(summary_path).model_dump(mode="json")
+            row["summary"] = ExperimentScoreSummary.model_validate_json(
+                summary_path.read_text()
+            ).model_dump(mode="json")
         else:
             row["warning"] = "summary.json is missing; inspect metrics.jsonl directly."
         if diffusion_payload := _diffusion_inspection_payload(row_dir):
@@ -222,14 +209,26 @@ def _inspection_payload(experiment_dir: Path) -> dict[str, Any]:
     summary_path = experiment_dir / "summary.json"
     metrics_path = experiment_dir / "metrics.jsonl"
     diffusion_payload = _diffusion_inspection_payload(experiment_dir)
+    artifacts_dir = experiment_dir / "artifacts"
+    artifact_dirs = (
+        [
+            str(path)
+            for path in sorted(artifacts_dir.iterdir(), key=lambda item: item.name)
+            if path.is_dir()
+        ]
+        if artifacts_dir.exists()
+        else []
+    )
     if summary_path.exists():
         payload = {
             "kind": "single",
             "experiment_dir": str(experiment_dir),
             "summary_path": str(summary_path),
             "metrics_path": str(metrics_path) if metrics_path.exists() else None,
-            "artifact_dirs": _artifact_dirs(experiment_dir),
-            "summary": _load_score_summary(summary_path).model_dump(mode="json"),
+            "artifact_dirs": artifact_dirs,
+            "summary": ExperimentScoreSummary.model_validate_json(
+                summary_path.read_text()
+            ).model_dump(mode="json"),
         }
         if diffusion_payload is not None:
             payload["diffusion"] = diffusion_payload
@@ -240,7 +239,7 @@ def _inspection_payload(experiment_dir: Path) -> dict[str, Any]:
             "experiment_dir": str(experiment_dir),
             "summary_path": None,
             "metrics_path": str(metrics_path),
-            "artifact_dirs": _artifact_dirs(experiment_dir),
+            "artifact_dirs": artifact_dirs,
             "warning": "summary.json is missing; inspect metrics.jsonl directly.",
         }
         if diffusion_payload is not None:

@@ -164,14 +164,14 @@ class SkillFlowRepository:
             return None
         if not self.sync.remote_task_cache_path.is_file():
             return None
-        return sorted(
-            {
-                task_id
-                for line in self.sync.remote_task_cache_path.read_text().splitlines()
-                for task_id in [_remote_task_id_from_cache_line(line)]
-                if task_id is not None
-            }
-        )
+        task_ids: set[str] = set()
+        for line in self.sync.remote_task_cache_path.read_text().splitlines():
+            normalized = line.strip().strip('"').strip("'")
+            if not normalized or normalized.startswith("#"):
+                continue
+            if "/" in normalized and _is_safe_task_id(normalized):
+                task_ids.add(normalized)
+        return sorted(task_ids)
 
     def _list_remote_task_ids_from_hf(self) -> list[str]:
         command = [
@@ -187,15 +187,17 @@ class SkillFlowRepository:
             command,
             failure_message="SkillFlow task list failed",
         )
-        task_ids = sorted(
-            {
-                task_id
-                for line in completed.stdout.splitlines()
-                for task_id in [_remote_task_id_from_file_line(line)]
-                if task_id is not None
-            }
-        )
-        return task_ids
+        task_ids: set[str] = set()
+        marker = f"{HF_TEST_TASKS_ROOT}/"
+        for line in completed.stdout.splitlines():
+            for token in line.split():
+                normalized = token.strip().strip('"').strip("'")
+                if marker not in normalized or not normalized.endswith("/task.toml"):
+                    continue
+                task_id = normalized.split(marker, 1)[1].removesuffix("/task.toml")
+                if "/" in task_id and _is_safe_task_id(task_id):
+                    task_ids.add(task_id)
+        return sorted(task_ids)
 
     def sync_tasks(
         self,
@@ -219,7 +221,19 @@ class SkillFlowRepository:
                 "--repo-type",
                 self.sync.repo_type,
             ]
-            for include_pattern in _download_include_patterns(selected_task_ids):
+            if selected_task_ids is None:
+                include_patterns = [f"{HF_TEST_TASKS_ROOT}/**"]
+            else:
+                include_patterns = []
+                for task_id in selected_task_ids:
+                    family_id = task_id.split("/", 1)[0]
+                    include_patterns.append(f"{HF_TEST_TASKS_ROOT}/{task_id}/**")
+                    include_patterns.append(
+                        f"{HF_TEST_TASKS_ROOT}/{family_id}/"
+                        f"{HF_FAMILY_RANKING_FILENAME}"
+                    )
+                include_patterns = _dedupe(include_patterns)
+            for include_pattern in include_patterns:
                 command.extend(["--include", include_pattern])
             command.extend(["--local-dir", str(staging_dir)])
             self._run_hf_command(
@@ -269,7 +283,7 @@ class SkillFlowRepository:
         del injected_skill_name
         run_dir = (
             destination_root
-            / _safe_artifact_name(task.task_id)
+            / task.task_id.replace("/", "_").replace("\\", "_")
             / f"run-{uuid.uuid4().hex[:8]}"
         )
         run_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -546,7 +560,29 @@ class SkillFlowTraceParser:
                 run_id=as_nonempty_string(job_result_json.get("id")),
                 harbor_metadata=_harbor_metadata(trial_result_json),
             )
-        reward = _parse_reward(job_result_json, trial_result_json, self.run_result)
+        reward_values: list[Any] = []
+        stats = as_mapping(job_result_json.get("stats"))
+        evals = as_mapping(stats.get("evals"))
+        for eval_result in evals.values():
+            metrics = as_mapping(eval_result).get("metrics")
+            if isinstance(metrics, list):
+                for metric in metrics:
+                    reward_values.append(as_mapping(metric).get("mean"))
+        reward_values.append(trial_result_json.get("reward"))
+        verifier_result = as_mapping(trial_result_json.get("verifier_result"))
+        reward_values.append(verifier_result.get("reward"))
+        reward_values.append(as_mapping(verifier_result.get("rewards")).get("reward"))
+        reward_path = self.run_result.trial_dir / "verifier" / "reward.txt"
+        if reward_path.exists():
+            reward_values.append(reward_path.read_text().strip())
+
+        reward = None
+        for value in reward_values:
+            try:
+                reward = float(value)
+            except (TypeError, ValueError):
+                continue
+            break
         if reward is None:
             return ExecutionTrace(
                 task_id=self.task_id,
@@ -565,6 +601,30 @@ class SkillFlowTraceParser:
             )
 
         agent_result = as_mapping(trial_result_json.get("agent_result"))
+        try:
+            input_tokens = int(agent_result.get("n_input_tokens", 0))
+        except (TypeError, ValueError):
+            input_tokens = 0
+        try:
+            output_tokens = int(agent_result.get("n_output_tokens", 0))
+        except (TypeError, ValueError):
+            output_tokens = 0
+        if evals:
+            reward_source = "job_stats"
+        elif "reward" in trial_result_json:
+            reward_source = "trial_result"
+        elif verifier_result.get("reward") is not None:
+            reward_source = "trial_verifier_result"
+        elif as_mapping(verifier_result.get("rewards")).get("reward") is not None:
+            reward_source = "trial_verifier_rewards"
+        else:
+            reward_source = "verifier_reward_file"
+        ctrf_path = self.run_result.trial_dir / "verifier" / "ctrf.json"
+        test_results = (
+            _load_json_or_empty(ctrf_path)
+            if ctrf_path.exists()
+            else None
+        )
         return ExecutionTrace(
             task_id=self.task_id,
             iteration=self.iteration,
@@ -580,13 +640,13 @@ class SkillFlowTraceParser:
             harbor_metadata={
                 **_harbor_metadata(trial_result_json),
                 "verifier_type": SKILLFLOW_VERIFIER_TYPE,
-                "reward_source": _reward_source(job_result_json, trial_result_json),
+                "reward_source": reward_source,
             },
             token_usage=TokenUsage(
-                input_tokens=_safe_int(agent_result.get("n_input_tokens", 0)),
-                output_tokens=_safe_int(agent_result.get("n_output_tokens", 0)),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             ),
-            test_results=_load_ctrf_summary(self.run_result.trial_dir),
+            test_results=test_results,
         )
 
 
@@ -752,9 +812,23 @@ def _skillflow_verifier_contract(task: SkillFlowTask) -> str:
         "Run the provided tests or verifier command when practical before finalizing.",
     ]
     if metadata:
-        lines.append(f"Task metadata: {_format_mapping(metadata)}.")
+        metadata_parts: list[str] = []
+        for key, value in sorted(metadata.items()):
+            if isinstance(value, list):
+                rendered_value = "[" + ", ".join(str(item) for item in value) + "]"
+            else:
+                rendered_value = str(value)
+            metadata_parts.append(f"{key}={rendered_value}")
+        lines.append(f"Task metadata: {', '.join(metadata_parts)}.")
     if verifier:
-        lines.append(f"Verifier config: {_format_mapping(verifier)}.")
+        verifier_parts: list[str] = []
+        for key, value in sorted(verifier.items()):
+            if isinstance(value, list):
+                rendered_value = "[" + ", ".join(str(item) for item in value) + "]"
+            else:
+                rendered_value = str(value)
+            verifier_parts.append(f"{key}={rendered_value}")
+        lines.append(f"Verifier config: {', '.join(verifier_parts)}.")
     return "\n".join(lines)
 
 
@@ -788,40 +862,6 @@ def _validated_remote_task_ids(task_ids: list[str] | None) -> list[str] | None:
     return selected_task_ids
 
 
-def _download_include_patterns(task_ids: list[str] | None) -> list[str]:
-    if task_ids is None:
-        return [f"{HF_TEST_TASKS_ROOT}/**"]
-    patterns: list[str] = []
-    for task_id in task_ids:
-        family_id = task_id.split("/", 1)[0]
-        patterns.append(f"{HF_TEST_TASKS_ROOT}/{task_id}/**")
-        patterns.append(
-            f"{HF_TEST_TASKS_ROOT}/{family_id}/{HF_FAMILY_RANKING_FILENAME}"
-        )
-    return _dedupe(patterns)
-
-
-def _remote_task_id_from_file_line(line: str) -> str | None:
-    for token in line.split():
-        normalized = token.strip().strip('"').strip("'")
-        marker = f"{HF_TEST_TASKS_ROOT}/"
-        if marker not in normalized or not normalized.endswith("/task.toml"):
-            continue
-        task_id = normalized.split(marker, 1)[1].removesuffix("/task.toml")
-        if "/" in task_id and _is_safe_task_id(task_id):
-            return task_id
-    return None
-
-
-def _remote_task_id_from_cache_line(line: str) -> str | None:
-    normalized = line.strip().strip('"').strip("'")
-    if not normalized or normalized.startswith("#"):
-        return None
-    if "/" in normalized and _is_safe_task_id(normalized):
-        return normalized
-    return None
-
-
 def _merge_downloaded_test_tasks(*, source_root: Path, destination: Path) -> None:
     if not source_root.exists():
         raise SkillFlowSyncError(
@@ -837,10 +877,6 @@ def _merge_downloaded_test_tasks(*, source_root: Path, destination: Path) -> Non
             shutil.copy2(source_path, target_path)
 
 
-def _safe_artifact_name(task_id: str) -> str:
-    return task_id.replace("/", "_").replace("\\", "_")
-
-
 def _dedupe(task_ids: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     unique: list[str] = []
@@ -850,19 +886,6 @@ def _dedupe(task_ids: Iterable[str]) -> list[str]:
             unique.append(cleaned)
             seen.add(cleaned)
     return unique
-
-
-def _format_mapping(values: Mapping[str, Any]) -> str:
-    return ", ".join(
-        f"{key}={_format_metadata_value(value)}"
-        for key, value in sorted(values.items())
-    )
-
-
-def _format_metadata_value(value: Any) -> str:
-    if isinstance(value, list):
-        return "[" + ", ".join(str(item) for item in value) + "]"
-    return str(value)
 
 
 def _latest_path(paths: Iterable[Path]) -> Path | None:
@@ -936,7 +959,21 @@ def harbor_missing_prebuilt_image_message(
     task_dir: Path,
 ) -> str:
     """Return an actionable error for missing prebuilt Harbor images."""
-    image_name = _missing_prebuilt_image_name(run_result)
+    trial_result_json = {}
+    if run_result.trial_dir is not None:
+        trial_result_json = _load_json_or_empty(run_result.trial_dir / "result.json")
+    exception_info = as_mapping(trial_result_json.get("exception_info"))
+    image_name = None
+    for text in (
+        str(exception_info.get("exception_message") or ""),
+        str(exception_info.get("exception_traceback") or ""),
+        run_result.stdout,
+        run_result.stderr,
+    ):
+        match = _MISSING_PREBUILT_IMAGE_RE.search(text)
+        if match is not None:
+            image_name = match.group("image").rstrip(",.")
+            break
     image_text = f" `{image_name}`" if image_name is not None else ""
     return (
         f"Prebuilt Harbor image{image_text} is missing for SkillFlow task workspace "
@@ -957,85 +994,6 @@ _MISSING_PREBUILT_IMAGE_RE = re.compile(
 )
 
 
-def _missing_prebuilt_image_name(run_result: HarborRunResult) -> str | None:
-    trial_result_json = {}
-    if run_result.trial_dir is not None:
-        trial_result_json = _load_json_or_empty(run_result.trial_dir / "result.json")
-    exception_info = as_mapping(trial_result_json.get("exception_info"))
-    parts = [
-        str(exception_info.get("exception_message") or ""),
-        str(exception_info.get("exception_traceback") or ""),
-        run_result.stdout,
-        run_result.stderr,
-    ]
-    for text in parts:
-        match = _MISSING_PREBUILT_IMAGE_RE.search(text)
-        if match is not None:
-            return match.group("image").rstrip(",.")
-    return None
-
-
-def _parse_reward(
-    job_result_json: dict[str, Any],
-    trial_result_json: dict[str, Any],
-    run_result: HarborRunResult,
-) -> float | None:
-    for value in _candidate_reward_values(
-        job_result_json,
-        trial_result_json,
-        run_result,
-    ):
-        parsed = _safe_float(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _candidate_reward_values(
-    job_result_json: dict[str, Any],
-    trial_result_json: dict[str, Any],
-    run_result: HarborRunResult,
-) -> Iterable[Any]:
-    stats = as_mapping(job_result_json.get("stats"))
-    evals = as_mapping(stats.get("evals"))
-    for eval_result in evals.values():
-        metrics = as_mapping(eval_result).get("metrics")
-        if isinstance(metrics, list):
-            for metric in metrics:
-                yield as_mapping(metric).get("mean")
-    yield trial_result_json.get("reward")
-    verifier_result = as_mapping(trial_result_json.get("verifier_result"))
-    yield verifier_result.get("reward")
-    yield as_mapping(verifier_result.get("rewards")).get("reward")
-    if run_result.trial_dir is not None:
-        reward_path = run_result.trial_dir / "verifier" / "reward.txt"
-        if reward_path.exists():
-            yield reward_path.read_text().strip()
-
-
-def _reward_source(
-    job_result_json: dict[str, Any],
-    trial_result_json: dict[str, Any],
-) -> str:
-    if as_mapping(as_mapping(job_result_json.get("stats")).get("evals")):
-        return "job_stats"
-    if "reward" in trial_result_json:
-        return "trial_result"
-    verifier_result = as_mapping(trial_result_json.get("verifier_result"))
-    if verifier_result.get("reward") is not None:
-        return "trial_verifier_result"
-    if as_mapping(verifier_result.get("rewards")).get("reward") is not None:
-        return "trial_verifier_rewards"
-    return "verifier_reward_file"
-
-
-def _load_ctrf_summary(trial_dir: Path) -> dict[str, Any] | None:
-    ctrf_path = trial_dir / "verifier" / "ctrf.json"
-    if not ctrf_path.exists():
-        return None
-    return _load_json_or_empty(ctrf_path)
-
-
 def _harbor_metadata(result_json: dict[str, Any]) -> dict[str, str]:
     metadata: dict[str, str] = {}
     agent_info = as_mapping(result_json.get("agent_info"))
@@ -1052,20 +1010,6 @@ def _harbor_metadata(result_json: dict[str, Any]) -> dict[str, str]:
         if value is not None:
             metadata[f"agent_result.{key}"] = str(value)
     return metadata
-
-
-def _safe_int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:

@@ -148,15 +148,14 @@ async def render_diffusion_subscriptions(
                 judge_reward=subscription.artifact.judge_reward,
                 success=_artifact_success(subscription.artifact),
                 regression=_artifact_regression(subscription.artifact),
-                metadata=_record_metadata(
-                    subscription.artifact,
-                    {
-                        **subscription.metadata,
-                        "diffusion_channel": subscription.context_channel,
-                        "max_context_tokens": max_context_tokens,
-                        "compaction_attempted": compact_artifact_content is not None,
-                    },
-                ),
+                metadata={
+                    "artifact_type": subscription.artifact.artifact_type.value,
+                    "risk_level": subscription.artifact.risk_level.value,
+                    **subscription.metadata,
+                    "diffusion_channel": subscription.context_channel,
+                    "max_context_tokens": max_context_tokens,
+                    "compaction_attempted": compact_artifact_content is not None,
+                },
             )
         )
         dropped_artifact_ids.append(subscription.artifact.artifact_id)
@@ -230,14 +229,13 @@ def _append_rendered_record(
             judge_reward=subscription.artifact.judge_reward,
             success=_artifact_success(subscription.artifact),
             regression=_artifact_regression(subscription.artifact),
-            metadata=_record_metadata(
-                subscription.artifact,
-                {
-                    **subscription.metadata,
-                    "diffusion_channel": subscription.context_channel,
-                    **(metadata or {}),
-                },
-            ),
+            metadata={
+                "artifact_type": subscription.artifact.artifact_type.value,
+                "risk_level": subscription.artifact.risk_level.value,
+                **subscription.metadata,
+                "diffusion_channel": subscription.context_channel,
+                **(metadata or {}),
+            },
         )
     )
 
@@ -344,19 +342,6 @@ def _channel_sections(rendered_sections: list[tuple[str, str]]) -> list[str]:
             )
         )
     return sections
-
-
-def _record_metadata(
-    artifact: DiffusionArtifact,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    record_metadata: dict[str, Any] = {
-        "artifact_type": artifact.artifact_type.value,
-        "risk_level": artifact.risk_level.value,
-    }
-    if metadata is not None:
-        record_metadata.update(metadata)
-    return record_metadata
 
 
 def _render_artifact_block(

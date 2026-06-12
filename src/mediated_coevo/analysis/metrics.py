@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.models.skill import SkillUpdate
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.runtime.token_budget import TokenBudgetEvent
 
@@ -13,12 +12,43 @@ from mediated_coevo.runtime.token_budget import TokenBudgetEvent
 def metric_row(record: IterationRecord) -> dict[str, Any]:
     """Return a compact metrics row without bulky artifacts or prompts."""
     trace = record.execution_trace
-    token_usage_by_agent = _token_usage_by_agent(record)
+    token_usage_by_agent: dict[str, dict[str, int]] = {}
+    if trace is not None:
+        _add_token_usage(
+            token_usage_by_agent,
+            "executor",
+            prompt_tokens=trace.token_usage.input_tokens,
+            completion_tokens=trace.token_usage.output_tokens,
+        )
+    for event in record.llm_token_events:
+        _add_token_usage(
+            token_usage_by_agent,
+            event.label.split(".", 1)[0] if event.label else "llm",
+            prompt_tokens=event.prompt_tokens,
+            completion_tokens=event.completion_tokens,
+        )
+
     skill_updates = []
     if record.skill_update:
         skill_updates.append(record.skill_update)
     skill_updates.extend(record.skill_updates)
-    skill_update_summaries = [_skill_update_summary(update) for update in skill_updates]
+    skill_update_summaries = [
+        {
+            "skill_id": update.skill_id,
+            "task_id": update.task_id,
+            "iteration": update.iteration,
+            "old_skill_hash": update.old_skill_hash,
+            "new_skill_hash": update.new_skill_hash,
+            "skill_version": update.skill_version,
+            "reasoning": update.reasoning,
+            "provenance": (
+                update.provenance.model_dump(mode="json")
+                if update.provenance is not None
+                else None
+            ),
+        }
+        for update in skill_updates
+    ]
     success = record.success
     verifier_status = record.verifier_status
     harbor_job_path = None
@@ -146,37 +176,17 @@ def token_totals_by_agent(
 ) -> dict[str, int]:
     """Return compact token totals grouped by component."""
     totals: dict[str, int] = {}
+    executor_tokens = 0
     if trace:
         executor_tokens = (
             trace.token_usage.input_tokens + trace.token_usage.output_tokens
         )
-        if executor_tokens:
-            totals["executor"] = executor_tokens
+    if executor_tokens:
+        totals["executor"] = executor_tokens
     for event in llm_token_events:
-        agent = _agent_from_event_label(event.label)
+        agent = event.label.split(".", 1)[0] if event.label else "llm"
         totals[agent] = totals.get(agent, 0) + event.total_tokens
     return totals
-
-
-def _token_usage_by_agent(record: IterationRecord) -> dict[str, dict[str, int]]:
-    """Return prompt/completion/total token counts grouped by agent."""
-    usage_by_agent: dict[str, dict[str, int]] = {}
-    if record.execution_trace is not None:
-        _add_token_usage(
-            usage_by_agent,
-            "executor",
-            prompt_tokens=record.execution_trace.token_usage.input_tokens,
-            completion_tokens=record.execution_trace.token_usage.output_tokens,
-        )
-
-    for event in record.llm_token_events:
-        _add_token_usage(
-            usage_by_agent,
-            _agent_from_event_label(event.label),
-            prompt_tokens=event.prompt_tokens,
-            completion_tokens=event.completion_tokens,
-        )
-    return usage_by_agent
 
 
 def _add_token_usage(
@@ -193,25 +203,3 @@ def _add_token_usage(
     usage["prompt_tokens"] += prompt_tokens
     usage["completion_tokens"] += completion_tokens
     usage["total_tokens"] += prompt_tokens + completion_tokens
-
-
-def _agent_from_event_label(label: str) -> str:
-    return label.split(".", 1)[0] if label else "llm"
-
-
-def _skill_update_summary(update: SkillUpdate) -> dict[str, Any]:
-    """Return skill update metadata without duplicating full skill contents."""
-    return {
-        "skill_id": update.skill_id,
-        "task_id": update.task_id,
-        "iteration": update.iteration,
-        "old_skill_hash": update.old_skill_hash,
-        "new_skill_hash": update.new_skill_hash,
-        "skill_version": update.skill_version,
-        "reasoning": update.reasoning,
-        "provenance": (
-            update.provenance.model_dump(mode="json")
-            if update.provenance is not None
-            else None
-        ),
-    }

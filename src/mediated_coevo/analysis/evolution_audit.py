@@ -370,7 +370,7 @@ def _iteration_reward_audits(
                 iteration=iteration,
                 total_runs=total_runs_by_iteration[iteration],
                 scored_count=len(rewards),
-                mean_reward=_mean(rewards),
+                mean_reward=_required_mean(rewards) if rewards else None,
                 task_mean_rewards=task_mean_rewards,
             )
         )
@@ -593,6 +593,12 @@ def _rejected_reflection_audits(
             continue
 
         validation = _mapping_or_none(row.get("validation"))
+        raw_task_ids = row.get("task_ids")
+        task_ids = (
+            [_as_str(item) for item in raw_task_ids]
+            if isinstance(raw_task_ids, list)
+            else []
+        )
         rejected_reflections.append(
             RejectedReflectionAudit(
                 rejection_id=rejection_id,
@@ -600,7 +606,7 @@ def _rejected_reflection_audits(
                 iteration=iteration,
                 skill_id=skill_id,
                 agent_role=agent_role,
-                task_ids=_str_list(row.get("task_ids")),
+                task_ids=task_ids,
                 reason=_as_str(row.get("reason")),
                 selected_candidate_id=_as_str_or_none(
                     row.get("selected_candidate_id")
@@ -663,12 +669,13 @@ def _mediator_report_effect_audits(
             continue
 
         reward_source = _as_str_or_none(metadata.get("reward_source"))
-        previous_iteration = _previous_task_iteration(
-            sorted_iterations,
-            by_iteration,
-            task_id=task_id,
-            before_iteration=outcome_iteration,
-        )
+        previous_iterations = [
+            iteration
+            for iteration in sorted_iterations
+            if iteration < outcome_iteration
+            and task_id in by_iteration[iteration].task_mean_rewards
+        ]
+        previous_iteration = previous_iterations[-1] if previous_iterations else None
         previous_reward = None
         previous_reward_source = None
         if previous_iteration is not None:
@@ -680,6 +687,8 @@ def _mediator_report_effect_audits(
                 previous_reward = previous_summary.task_mean_rewards.get(task_id)
                 previous_reward_source = "metrics" if previous_reward is not None else None
 
+        payload = _mapping_or_none(row.get("payload"))
+        headline = _as_str(payload.get("headline")) if payload is not None else ""
         effects.append(
             MediatorReportEffectAudit(
                 entry_id=entry_id,
@@ -694,7 +703,7 @@ def _mediator_report_effect_audits(
                 reward_source=reward_source,
                 verifier_reward=_as_float(metadata.get("verifier_reward")),
                 judge_reward=_as_float(metadata.get("judge_reward")),
-                headline=_mediator_headline(row),
+                headline=headline,
             )
         )
     return effects
@@ -712,31 +721,6 @@ def _judge_rewards_by_task_iteration(
             continue
         rewards[(task_id, iteration)] = judge_reward
     return rewards
-
-
-def _previous_task_iteration(
-    sorted_iterations: list[int],
-    by_iteration: Mapping[int, IterationRewardAudit],
-    *,
-    task_id: str,
-    before_iteration: int,
-) -> int | None:
-    previous_iterations = [
-        iteration
-        for iteration in sorted_iterations
-        if iteration < before_iteration
-        and task_id in by_iteration[iteration].task_mean_rewards
-    ]
-    if not previous_iterations:
-        return None
-    return previous_iterations[-1]
-
-
-def _mediator_headline(row: Mapping[str, Any]) -> str:
-    payload = _mapping_or_none(row.get("payload"))
-    if payload is None:
-        return ""
-    return _as_str(payload.get("headline"))
 
 
 def _skill_update_audit(
@@ -759,7 +743,12 @@ def _skill_update_audit(
     )
     task_id = _first_str(raw_update.get("task_id"), row_task_id, default="")
 
-    validation_task_ids = _str_list(validation.get("task_ids")) if validation else []
+    raw_validation_task_ids = validation.get("task_ids") if validation else None
+    validation_task_ids = (
+        [_as_str(item) for item in raw_validation_task_ids]
+        if isinstance(raw_validation_task_ids, list)
+        else []
+    )
     validation_task_results = validation.get("task_results") if validation else None
     validation_task_count = (
         len(validation_task_results) if isinstance(validation_task_results, list) else 0
@@ -844,11 +833,41 @@ def _evolution_warnings(
 
     for update in skill_updates:
         if not update.has_validation:
-            warnings.append(_missing_validation_warning(update))
+            warnings.append(
+                EvolutionAuditWarning(
+                    kind="missing_validation",
+                    iteration=update.iteration,
+                    skill_id=update.skill_id,
+                    message=(
+                        f"{update.skill_id} update committed without validation "
+                        f"provenance at iteration {update.iteration}."
+                    ),
+                )
+            )
         elif update.validation_reason == "validation_disabled":
-            warnings.append(_disabled_validation_warning(update))
+            warnings.append(
+                EvolutionAuditWarning(
+                    kind="validation_disabled",
+                    iteration=update.iteration,
+                    skill_id=update.skill_id,
+                    message=(
+                        f"{update.skill_id} update validation was recorded as "
+                        f"disabled at iteration {update.iteration}."
+                    ),
+                )
+            )
         elif update.validation_decision == "rejected":
-            warnings.append(_rejected_validation_warning(update))
+            warnings.append(
+                EvolutionAuditWarning(
+                    kind="committed_rejected_validation",
+                    iteration=update.iteration,
+                    skill_id=update.skill_id,
+                    message=(
+                        f"{update.skill_id} update has rejected validation "
+                        f"provenance at iteration {update.iteration}."
+                    ),
+                )
+            )
 
         current = by_iteration.get(update.iteration)
         if current is None or current.mean_reward is None:
@@ -880,42 +899,6 @@ def _evolution_warnings(
             if warning is not None:
                 warnings.append(warning)
     return warnings
-
-
-def _missing_validation_warning(update: SkillUpdateAudit) -> EvolutionAuditWarning:
-    return EvolutionAuditWarning(
-        kind="missing_validation",
-        iteration=update.iteration,
-        skill_id=update.skill_id,
-        message=(
-            f"{update.skill_id} update committed without validation provenance "
-            f"at iteration {update.iteration}."
-        ),
-    )
-
-
-def _disabled_validation_warning(update: SkillUpdateAudit) -> EvolutionAuditWarning:
-    return EvolutionAuditWarning(
-        kind="validation_disabled",
-        iteration=update.iteration,
-        skill_id=update.skill_id,
-        message=(
-            f"{update.skill_id} update validation was recorded as disabled "
-            f"at iteration {update.iteration}."
-        ),
-    )
-
-
-def _rejected_validation_warning(update: SkillUpdateAudit) -> EvolutionAuditWarning:
-    return EvolutionAuditWarning(
-        kind="committed_rejected_validation",
-        iteration=update.iteration,
-        skill_id=update.skill_id,
-        message=(
-            f"{update.skill_id} update has rejected validation provenance "
-            f"at iteration {update.iteration}."
-        ),
-    )
 
 
 def _regression_warning(
@@ -974,12 +957,6 @@ def _scored_reward(row: Mapping[str, Any]) -> float | None:
     return reward
 
 
-def _mean(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return _required_mean(values)
-
-
 def _required_mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
@@ -994,12 +971,6 @@ def _mapping_or_none(value: Any) -> Mapping[str, Any] | None:
     if isinstance(value, Mapping):
         return value
     return None
-
-
-def _str_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [_as_str(item) for item in value]
 
 
 def _first_str(*values: Any, default: str) -> str:

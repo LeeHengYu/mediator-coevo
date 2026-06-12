@@ -101,7 +101,12 @@ def build_iteration_record(
     if planner_entry_id:
         history_entry_ids["planner"] = planner_entry_id
 
-    advisor_provenance = _advisor_provenance(skill_update)
+    advisor_provenance = (
+        skill_update.provenance
+        if skill_update
+        and isinstance(skill_update.provenance, AdvisorBatchProvenance)
+        else None
+    )
     proposal_ids = (
         [ref.proposal_id for ref in advisor_provenance.proposal_refs]
         if advisor_provenance
@@ -200,7 +205,16 @@ def task_metadata_fields(
     verifier = as_mapping(task_config.get("verifier")) if task_config else {}
     category = as_nonempty_string(metadata.get("category"))
     difficulty = as_nonempty_string(metadata.get("difficulty"))
-    expected_reward_range = _reward_range_value(metadata.get("expected_reward_range"))
+    raw_reward_range = metadata.get("expected_reward_range")
+    expected_reward_range = None
+    if isinstance(raw_reward_range, (list, tuple)) and len(raw_reward_range) == 2:
+        try:
+            expected_reward_range = (
+                float(raw_reward_range[0]),
+                float(raw_reward_range[1]),
+            )
+        except (TypeError, ValueError):
+            expected_reward_range = None
     verifier_type = as_nonempty_string(verifier.get("type"))
 
     if task_config:
@@ -344,25 +358,3 @@ def delta_reward(
         return None
     return trace.reward - previous_reward
 
-
-def _advisor_provenance(
-    skill_update: SkillUpdate | None,
-) -> AdvisorBatchProvenance | None:
-    if not skill_update or not isinstance(
-        skill_update.provenance,
-        AdvisorBatchProvenance,
-    ):
-        return None
-    return skill_update.provenance
-
-
-def _reward_range_value(value: object) -> tuple[float, float] | None:
-    """Parse a two-number expected reward range if present."""
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        return None
-    try:
-        low = float(value[0])
-        high = float(value[1])
-    except (TypeError, ValueError):
-        return None
-    return (low, high)

@@ -349,7 +349,13 @@ def compute_pairwise_similarity(
 ) -> list[PairSimilarity]:
     """Compute weighted directed SkillFlow edge candidates."""
     pairs: list[PairSimilarity] = []
-    for task_ids in _task_ids_by_family(features).values():
+    family_task_ids: dict[str, list[str]] = {}
+    for task_id in sorted(features):
+        family_id = features[task_id].profile.family_id
+        if family_id:
+            family_task_ids.setdefault(family_id, []).append(task_id)
+
+    for task_ids in family_task_ids.values():
         for source, target in itertools.permutations(task_ids, 2):
             source_features = features[source]
             target_features = features[target]
@@ -361,17 +367,6 @@ def compute_pairwise_similarity(
             if pair is not None:
                 pairs.append(pair)
     return pairs
-
-
-def _task_ids_by_family(
-    features: dict[str, _ProfileFeatures],
-) -> dict[str, list[str]]:
-    family_task_ids: dict[str, list[str]] = {}
-    for task_id in sorted(features):
-        family_id = features[task_id].profile.family_id
-        if family_id:
-            family_task_ids.setdefault(family_id, []).append(task_id)
-    return family_task_ids
 
 
 def percentile_threshold(values: list[float], percentile: float) -> float:
@@ -470,9 +465,18 @@ def _load_task_feature(
     task_config = tomllib.loads((task_dir / "task.toml").read_text())
     metadata = task_config.get("metadata", {})
     instruction = (task_dir / "instruction.md").read_text(errors="ignore")
-    test_text = _read_optional(task_dir / "tests" / "test_outputs.py")
-    skill_names = _skill_names(task_dir)
-    environment_files = _environment_files(task_dir)
+    test_output_path = task_dir / "tests" / "test_outputs.py"
+    test_text = (
+        test_output_path.read_text(errors="ignore") if test_output_path.exists() else ""
+    )
+    skills_dir = task_dir / "environment" / "skills"
+    skill_names = sorted(path.parent.name for path in skills_dir.glob("*/SKILL.md"))
+    environment_dir = task_dir / "environment"
+    environment_files = (
+        sorted(path.name for path in environment_dir.iterdir() if path.is_file())
+        if environment_dir.exists()
+        else []
+    )
     category = str(metadata.get("category", "")).strip()
     tags = [str(tag).strip() for tag in metadata.get("tags", [])]
 
@@ -480,8 +484,21 @@ def _load_task_feature(
     tag_terms = _expand_terms(tags)
     skill_terms = _expand_terms(skill_names)
     instruction_terms = _tokens(instruction)
-    output_terms = _infer_output_types(instruction, test_text, environment_files)
-    io_terms = output_terms | _file_extension_terms(environment_files)
+    output_haystack = "\n".join(
+        [instruction, test_text, *environment_files]
+    ).lower()
+    output_terms = {
+        output_type
+        for output_type, markers in OUTPUT_MARKERS.items()
+        if any(marker in output_haystack for marker in markers)
+    }
+    extension_terms = {
+        suffix.removeprefix(".").lower()
+        for filename in environment_files
+        for suffix in [Path(filename).suffix]
+        if suffix
+    }
+    io_terms = output_terms | extension_terms
     domain_terms = sorted(
         (
             category_terms
@@ -493,16 +510,28 @@ def _load_task_feature(
         )
         & DOMAIN_TERMS
     )
-    capability_terms = _infer_capabilities(
+    capability_source_terms = (
         category_terms | tag_terms | skill_terms | instruction_terms | io_terms
     )
-    family_id = _family_id(
-        tasks_root=tasks_root,
-        task_dir=task_dir,
-        task_id=task_id,
-        metadata=metadata,
-        rank_info=rank_info,
-    )
+    capability_terms = {
+        capability
+        for capability, markers in CAPABILITY_MARKERS.items()
+        if capability_source_terms & markers
+    }
+    if rank_info is not None:
+        family_id = rank_info.family_id
+    else:
+        family_id = str(metadata.get("family", "")).strip()
+        if not family_id:
+            try:
+                relative_parent = task_dir.parent.relative_to(tasks_root)
+            except ValueError:
+                family_id = ""
+            else:
+                if relative_parent.parts:
+                    family_id = relative_parent.as_posix()
+                elif "/" in task_id:
+                    family_id = task_id.split("/", 1)[0]
 
     profile = TaskSimilarityProfile(
         task_id=task_id,
@@ -541,18 +570,17 @@ def _score_directed_edge(
     target = target_features.profile
     if not source.family_id or source.family_id != target.family_id:
         return None
-    rank_gap: int | None = None
-    rank_affinity = 0.0
 
     if source.rank is None or target.rank is None:
         return None
     rank_gap = target.rank - source.rank
     if rank_gap <= 0:
         return None
-    rank_affinity = _rank_affinity(
-        rank_gap=rank_gap,
-        family_size=source.family_size or target.family_size or 0,
-    )
+    family_size = source.family_size or target.family_size or 0
+    if family_size <= 2:
+        rank_affinity = 1.0
+    else:
+        rank_affinity = max(0.0, 1.0 - ((rank_gap - 1) / (family_size - 2)))
     score = (
         score_weights.same_family_base
         + score_weights.rank_affinity * rank_affinity
@@ -581,12 +609,6 @@ def _score_directed_edge(
             "rank_affinity": round(rank_affinity, 6),
         },
     )
-
-
-def _rank_affinity(*, rank_gap: int, family_size: int) -> float:
-    if family_size <= 2:
-        return 1.0
-    return max(0.0, 1.0 - ((rank_gap - 1) / (family_size - 2)))
 
 
 def _component_scores(
@@ -632,48 +654,6 @@ def _shared_evidence(
     }
 
 
-def _skill_names(task_dir: Path) -> list[str]:
-    skills_dir = task_dir / "environment" / "skills"
-    return sorted(path.parent.name for path in skills_dir.glob("*/SKILL.md"))
-
-
-def _environment_files(task_dir: Path) -> list[str]:
-    environment_dir = task_dir / "environment"
-    if not environment_dir.exists():
-        return []
-    return sorted(path.name for path in environment_dir.iterdir() if path.is_file())
-
-
-def _file_extension_terms(filenames: list[str]) -> set[str]:
-    return {
-        suffix.removeprefix(".").lower()
-        for filename in filenames
-        for suffix in [Path(filename).suffix]
-        if suffix
-    }
-
-
-def _infer_output_types(
-    instruction: str,
-    test_text: str,
-    environment_files: list[str],
-) -> set[str]:
-    haystack = "\n".join([instruction, test_text, *environment_files]).lower()
-    return {
-        output_type
-        for output_type, markers in OUTPUT_MARKERS.items()
-        if any(marker in haystack for marker in markers)
-    }
-
-
-def _infer_capabilities(terms: set[str]) -> set[str]:
-    return {
-        capability
-        for capability, markers in CAPABILITY_MARKERS.items()
-        if terms & markers
-    }
-
-
 def _expand_terms(values: list[str]) -> set[str]:
     terms: set[str] = set()
     for value in values:
@@ -701,12 +681,6 @@ def _jaccard(source: set[str], target: set[str]) -> float:
 
 def _normalize(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-
-
-def _read_optional(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(errors="ignore")
 
 
 def _iter_task_dirs(tasks_root: Path) -> list[Path]:
@@ -769,30 +743,6 @@ def _load_family_rankings(tasks_root: Path) -> dict[str, _RankInfo]:
                 family_size=family_size,
             )
     return rankings
-
-
-def _family_id(
-    *,
-    tasks_root: Path,
-    task_dir: Path,
-    task_id: str,
-    metadata: dict[str, Any],
-    rank_info: _RankInfo | None,
-) -> str:
-    if rank_info is not None:
-        return rank_info.family_id
-    family = str(metadata.get("family", "")).strip()
-    if family:
-        return family
-    try:
-        relative_parent = task_dir.parent.relative_to(tasks_root)
-    except ValueError:
-        return ""
-    if relative_parent.parts:
-        return relative_parent.as_posix()
-    if "/" in task_id:
-        return task_id.split("/", 1)[0]
-    return ""
 
 
 def _write_json(path: Path, payload: object) -> None:

@@ -162,18 +162,14 @@ class MediatorAgent(BaseAgent):
 
         runtime_paragraphs: list[str] = []
         for paragraph in section.split("\n\n"):
-            if self._is_runtime_withholding_paragraph(paragraph):
+            if (
+                "skill-evolution hazard" not in paragraph
+                and "validation evidence" not in paragraph
+            ):
                 runtime_paragraphs.append(paragraph)
         if not runtime_paragraphs:
             return None
         return "\n\n".join(runtime_paragraphs)
-
-    @staticmethod
-    def _is_runtime_withholding_paragraph(paragraph: str) -> bool:
-        return (
-            "skill-evolution hazard" not in paragraph
-            and "validation evidence" not in paragraph
-        )
 
     def _executor_skill_updates_enabled(self) -> bool:
         return self._skill_updates is None or self._skill_updates.executor

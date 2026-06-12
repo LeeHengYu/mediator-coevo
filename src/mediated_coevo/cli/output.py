@@ -8,10 +8,7 @@ from typing import Any, Protocol
 from rich.console import Console
 from rich.table import Table
 
-from mediated_coevo.analysis.reporting import (
-    BootstrapConfidenceInterval,
-    ExperimentScoreSummary,
-)
+from mediated_coevo.analysis.reporting import ExperimentScoreSummary
 from mediated_coevo.benchmarks import HERMES_AGENT_NAME
 from mediated_coevo.core.config import Config
 
@@ -44,7 +41,15 @@ def print_result_summary(
     console.print(f"  Mean reward: {_format_score(summary.mean_reward)}")
     console.print(f"  Median reward: {_format_score(summary.median_reward)}")
     console.print(f"  Macro mean reward: {_format_score(summary.macro_mean_reward)}")
-    console.print(f"  Bootstrap CI: {_format_ci(summary.bootstrap_ci)}")
+    if summary.bootstrap_ci.lower is None or summary.bootstrap_ci.upper is None:
+        bootstrap_ci = "n/a"
+    else:
+        confidence = round(summary.bootstrap_ci.confidence_level * 100)
+        bootstrap_ci = (
+            f"{confidence}% "
+            f"[{summary.bootstrap_ci.lower:.3f}, {summary.bootstrap_ci.upper:.3f}]"
+        )
+    console.print(f"  Bootstrap CI: {bootstrap_ci}")
     if summary.judge_reward_summary is not None:
         judge_summary = summary.judge_reward_summary
         console.print(
@@ -62,6 +67,18 @@ def print_result_summary(
             if task_summary.task_difficulty:
                 metadata.append(task_summary.task_difficulty)
             metadata_text = f" ({', '.join(metadata)})" if metadata else ""
+            if (
+                task_summary.bootstrap_ci.lower is None
+                or task_summary.bootstrap_ci.upper is None
+            ):
+                bootstrap_ci = "n/a"
+            else:
+                confidence = round(task_summary.bootstrap_ci.confidence_level * 100)
+                bootstrap_ci = (
+                    f"{confidence}% "
+                    f"[{task_summary.bootstrap_ci.lower:.3f}, "
+                    f"{task_summary.bootstrap_ci.upper:.3f}]"
+                )
             console.print(
                 "    "
                 f"{task_summary.task_id}{metadata_text}: "
@@ -69,7 +86,7 @@ def print_result_summary(
                 f"median={_format_score(task_summary.median_reward)} "
                 f"scored={task_summary.scored_count}/{task_summary.total_runs} "
                 f"env_failures={task_summary.env_failure_count} "
-                f"ci={_format_ci(task_summary.bootstrap_ci)}"
+                f"ci={bootstrap_ci}"
             )
     if summary.dominance_warning and summary.dominant_task_id:
         console.print(
@@ -161,18 +178,19 @@ def print_inspection_payload(payload: dict[str, Any]) -> None:
     metrics_summary = diffusion_payload.get("metrics") or {}
     paths = diffusion_payload.get("paths") or {}
     console.print("  Diffusion:")
-    console.print(
-        f"    Enabled: "
-        f"{_format_inspection_value(metrics_summary.get('diffusion_enabled'))}"
-    )
-    console.print(
-        f"    Policy: "
-        f"{_format_inspection_value(metrics_summary.get('diffusion_policy'))}"
-    )
-    console.print(
-        f"    Graph: "
-        f"{_format_inspection_value(metrics_summary.get('diffusion_graph'))}"
-    )
+    for label, key in (
+        ("Enabled", "diffusion_enabled"),
+        ("Policy", "diffusion_policy"),
+        ("Graph", "diffusion_graph"),
+    ):
+        value = metrics_summary.get(key)
+        if value is None:
+            formatted_value = "n/a"
+        elif isinstance(value, bool):
+            formatted_value = str(value).lower()
+        else:
+            formatted_value = str(value)
+        console.print(f"    {label}: {formatted_value}")
     console.print(f"    Metrics: {paths.get('metrics') or 'n/a'}")
     console.print(f"    Diffusion records: {paths.get('diffused_records') or 'n/a'}")
     console.print(f"    Graph snapshots: {paths.get('graph_snapshots_dir') or 'n/a'}")
@@ -260,7 +278,7 @@ def print_context_budget_comparison(comparison: Any) -> None:
             field,
             _format_summary_number(comparison.run_a.token_means.get(field)),
             _format_summary_number(comparison.run_b.token_means.get(field)),
-            _format_percent(delta),
+            "n/a" if delta is None else f"{delta * 100:.1f}%",
         )
     console.print(table)
 
@@ -326,30 +344,9 @@ def _format_score(value: float | None) -> str:
     return f"{value:.3f}"
 
 
-def _format_ci(interval: BootstrapConfidenceInterval) -> str:
-    if interval.lower is None or interval.upper is None:
-        return "n/a"
-    confidence = round(interval.confidence_level * 100)
-    return f"{confidence}% [{interval.lower:.3f}, {interval.upper:.3f}]"
-
-
-def _format_inspection_value(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    if isinstance(value, bool):
-        return str(value).lower()
-    return str(value)
-
-
 def _format_summary_number(value: float | None) -> str:
     if value is None:
         return "n/a"
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.3f}"
-
-
-def _format_percent(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value * 100:.1f}%"

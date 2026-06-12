@@ -140,18 +140,6 @@ class HistoryStore:
         lines = [entry.model_dump_json() for entry in self._entries]
         path.write_text("\n".join(lines) + "\n")
 
-    def _save_rejected_proposals(self) -> None:
-        """Persist rejected proposal batches to disk."""
-        path = self._history_dir / self._REJECTED_PROPOSALS_FILE
-        lines = [batch.model_dump_json() for batch in self._rejected_proposal_batches]
-        path.write_text("\n".join(lines) + "\n")
-
-    def _save_rejected_reflections(self) -> None:
-        """Persist rejected reflection batches to disk."""
-        path = self._history_dir / self._REJECTED_REFLECTIONS_FILE
-        lines = [batch.model_dump_json() for batch in self._rejected_reflection_batches]
-        path.write_text("\n".join(lines) + "\n")
-
     def add(self, entry: HistoryEntry) -> str:
         self._entries.append(entry)
         self._save()
@@ -160,13 +148,17 @@ class HistoryStore:
     def record_rejected_proposals(self, batch: RejectedProposalBatch) -> str:
         """Persist a reviewed proposal batch that was not committed."""
         self._rejected_proposal_batches.append(batch)
-        self._save_rejected_proposals()
+        path = self._history_dir / self._REJECTED_PROPOSALS_FILE
+        lines = [batch.model_dump_json() for batch in self._rejected_proposal_batches]
+        path.write_text("\n".join(lines) + "\n")
         return batch.rejection_id
 
     def record_rejected_reflection(self, batch: RejectedReflectionBatch) -> str:
         """Persist a reflected meta-skill batch that was not committed."""
         self._rejected_reflection_batches.append(batch)
-        self._save_rejected_reflections()
+        path = self._history_dir / self._REJECTED_REFLECTIONS_FILE
+        lines = [batch.model_dump_json() for batch in self._rejected_reflection_batches]
+        path.write_text("\n".join(lines) + "\n")
         return batch.rejection_id
 
     def record_signal(
@@ -238,7 +230,13 @@ class HistoryStore:
                     reward_source if isinstance(reward_source, str) else None
                 )
                 proposal.verifier_reward = trace.reward
-                proposal.judge_reward = _float_metadata(metadata.get("judge_reward"))
+                judge_reward = metadata.get("judge_reward")
+                if isinstance(judge_reward, bool):
+                    proposal.judge_reward = None
+                elif isinstance(judge_reward, (int, float)):
+                    proposal.judge_reward = float(judge_reward)
+                else:
+                    proposal.judge_reward = None
 
     def tag_outcome_by_id(
         self,
@@ -445,10 +443,3 @@ class HistoryStore:
         pool.sort(key=lambda pair: pair.relative_reward_gap, reverse=True)
         return pool[:max_pairs]
 
-
-def _float_metadata(value: object) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None

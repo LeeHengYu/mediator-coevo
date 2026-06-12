@@ -149,7 +149,15 @@ class DiffusionNetwork:
     def get_edge_records(self) -> list[TaskGraphEdgeRecord]:
         """Return all directed edge records in stable order."""
         self._require_built()
-        return _flatten_adj_list(self._adj_list)
+        edges = [
+            edge
+            for edge_records in self._adj_list.values()
+            for edge in edge_records
+        ]
+        return sorted(
+            edges,
+            key=lambda edge: (edge.source_task_id, edge.target_task_id, edge.relation),
+        )
 
     def get_edges_for(self, task_id: str) -> list[TaskGraphEdgeRecord]:
         """Return outgoing edges for one task."""
@@ -405,12 +413,3 @@ def _copy_adj_list(
 ) -> dict[str, list[TaskGraphEdgeRecord]]:
     return {task_id: list(adjacency[task_id]) for task_id in task_ids}
 
-
-def _flatten_adj_list(
-    adjacency: Mapping[str, Sequence[TaskGraphEdgeRecord]],
-) -> list[TaskGraphEdgeRecord]:
-    edges = [edge for edge_records in adjacency.values() for edge in edge_records]
-    return sorted(
-        edges,
-        key=lambda edge: (edge.source_task_id, edge.target_task_id, edge.relation),
-    )

@@ -311,9 +311,28 @@ def load_config(
 
     if overrides:
         _deep_merge(data, overrides)
-    missing_paths = _missing_required_config_paths(data)
+    missing_paths: list[str] = []
+    for path in REQUIRED_CONFIG_PATHS:
+        current: Any = data
+        for part in path:
+            if not isinstance(current, Mapping) or part not in current:
+                missing_paths.append(".".join(path))
+                break
+            current = current[part]
     if missing_paths:
-        raise ConfigLoadError(_missing_config_message(default_path, missing_paths))
+        details: list[str] = []
+        for missing_path in missing_paths:
+            cli_hint = CONFIG_CLI_HINTS.get(missing_path)
+            if cli_hint is None:
+                details.append(missing_path)
+            else:
+                details.append(f"{missing_path} ({cli_hint})")
+        joined = ", ".join(details)
+        raise ConfigLoadError(
+            f"missing required config setting(s) in {default_path}: {joined}. "
+            "Set them in default.toml or pass the matching CLI option when "
+            "available."
+        )
 
     try:
         return Config(**data)
@@ -331,30 +350,3 @@ def _deep_merge(target: dict[str, Any], source: Mapping[str, Any]) -> None:
             _deep_merge(target[key], value)
             continue
         target[key] = value
-
-
-def _missing_required_config_paths(data: Mapping[str, Any]) -> list[str]:
-    missing: list[str] = []
-    for path in REQUIRED_CONFIG_PATHS:
-        current: Any = data
-        for part in path:
-            if not isinstance(current, Mapping) or part not in current:
-                missing.append(".".join(path))
-                break
-            current = current[part]
-    return missing
-
-
-def _missing_config_message(default_path: Path, missing_paths: list[str]) -> str:
-    details = []
-    for path in missing_paths:
-        cli_hint = CONFIG_CLI_HINTS.get(path)
-        if cli_hint is None:
-            details.append(path)
-        else:
-            details.append(f"{path} ({cli_hint})")
-    joined = ", ".join(details)
-    return (
-        f"missing required config setting(s) in {default_path}: {joined}. "
-        "Set them in default.toml or pass the matching CLI option when available."
-    )

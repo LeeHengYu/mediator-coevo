@@ -129,11 +129,13 @@ def audit_candidate(
     """Return a candidate copy with deterministic audit metadata filled in."""
     reason = candidate.rejection_reason
     new_content = candidate.new_content.strip()
+    normalized_new_content = " ".join(new_content.split())
+    normalized_current_skill = " ".join(current_skill.split())
     if candidate.update_kind == "no_update":
         reason = reason or "no_update"
     elif not new_content:
         reason = reason or "empty_content"
-    elif _normalized(new_content) == _normalized(current_skill):
+    elif normalized_new_content == normalized_current_skill:
         reason = reason or "unchanged"
     elif _drops_mediator_contract(
         skill_id=skill_id,
@@ -142,10 +144,21 @@ def audit_candidate(
     ):
         reason = reason or "missing_mediator_output_contract"
 
+    audit_score = candidate.audit_score
+    if audit_score <= 0:
+        audit_score = 0.5
+        if candidate.hypothesis.strip():
+            audit_score += 0.15
+        if candidate.risk.strip():
+            audit_score += 0.10
+        if candidate.reasoning.strip():
+            audit_score += 0.10
+    audit_score = min(1.0, max(0.0, audit_score))
+
     return candidate.model_copy(
         update={
             "new_content": new_content,
-            "audit_score": _audit_score(candidate),
+            "audit_score": audit_score,
             "rejection_reason": reason,
             "selected": False,
         }
@@ -206,19 +219,6 @@ def candidate_batch_artifact_path(batch_id: str) -> str:
     return f"artifacts/candidate_batches/{batch_id}.json"
 
 
-def _audit_score(candidate: SkillUpdateCandidate) -> float:
-    score = candidate.audit_score
-    if score <= 0:
-        score = 0.5
-        if candidate.hypothesis.strip():
-            score += 0.15
-        if candidate.risk.strip():
-            score += 0.10
-        if candidate.reasoning.strip():
-            score += 0.10
-    return min(1.0, max(0.0, score))
-
-
 def _drops_mediator_contract(
     *,
     skill_id: str,
@@ -231,7 +231,3 @@ def _drops_mediator_contract(
     if not current_has_contract:
         return False
     return any(key not in new_content for key in _MEDIATOR_REQUIRED_KEYS)
-
-
-def _normalized(text: str) -> str:
-    return " ".join(text.split())
