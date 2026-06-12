@@ -1,0 +1,216 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_workbook.py → b/inspect_workbook.py
+@@ -0,0 +1,63 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path='/root/data/workbook.xlsx'
++wb=load_workbook(path, data_only=False)
++print('Sheet names:')
++for i, name in enumerate(wb.sheetnames, 1):
++    print(f'  {i}: {name}')
++
++ws=wb['Task']
++print('\nTask sheet requested cells:')
++for rng_name, cells in [
++    ('D12:D17 series codes', ws['D12:D17']),
++    ('D19:D24 series codes', ws['D19:D24']),
++    ('D26:D31 series codes', ws['D26:D31']),
++    ('H10:L10 years', [ws['H10:L10'][0]]),
++    ('H35:H40 labels', ws['H35:H40']),
++    ('H42:H47 labels', ws['H42:H47']),
++    ('H50 label', ws['H50:H50']),
++]:
++    print(f'\n{rng_name}:')
++    for row in cells:
++        for cell in row:
++            print(f'  {cell.coordinate} = {cell.value!r}')
++
++# Also inspect likely label columns around rows 35-50 for context
++print('\nTask sheet label context D:G rows 35-50:')
++for r in list(range(35,41)) + list(range(42,48)) + [50]:
++    vals=[]
++    for c in range(4,8):
++        cell=ws.cell(r,c)
++        if cell.value is not None:
++            vals.append(f'{cell.coordinate}={cell.value!r}')
++    print(f'  row {r}: ' + (', '.join(vals) if vals else '(all blank in D:G)'))
++
++wd=wb['Data']
++print('\nData sheet dimensions:', wd.max_row, wd.max_column, f'A1:{get_column_letter(wd.max_column)}{wd.max_row}')
++
++print('\nData sheet row 1 non-empty cells:')
++for c in range(1, wd.max_column+1):
++    cell=wd.cell(1,c)
++    if cell.value is not None:
++        print(f'  {cell.coordinate} = {cell.value!r}')
++
++print('\nData sheet rows 20-38 fully (all columns with data in each row):')
++for r in range(20,39):
++    entries=[]
++    for c in range(1, wd.max_column+1):
++        cell=wd.cell(r,c)
++        if cell.value is not None:
++            entries.append(f'{cell.coordinate}={cell.value!r}')
++    print(f'  Row {r}: ' + (', '.join(entries) if entries else '(no non-empty cells)'))
++
++# Search for rows with many non-empty cells to identify header row if not row 20
++print('\nData sheet candidate header rows (first 50 rows, non-empty count >= 3):')
++for r in range(1, min(50, wd.max_row)+1):
++    entries=[]
++    for c in range(1, wd.max_column+1):
++        v=wd.cell(r,c).value
++        if v is not None:
++            entries.append(f'{wd.cell(r,c).coordinate}={v!r}')
++    if len(entries)>=3:
++        print(f'  Row {r} ({len(entries)} non-empty): ' + ', '.join(entries[:20]) + (' ...' if len(entries)>20 else ''))
+  ┊ review diff
+a/write_formulas.py → b/write_formulas.py
+@@ -0,0 +1,73 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++src = '/root/data/workbook.xlsx'
++out = '/root/output/result.xlsx'
++wb = load_workbook(src, data_only=False)
++ws = wb['Task']
++
++# Layout identified from inspection:
++# Data!D21:D38 contains series codes.
++# Data!H4:L4 contains year headers.
++# Data!H21:L38 contains numeric values.
++value_range = 'Data!$H$21:$L$38'
++series_range = 'Data!$D$21:$D$38'
++year_range = 'Data!$H$4:$L$4'
++
++# 3. INDEX/MATCH lookup formulas for admissions, discharges, and capacity blocks.
++for start_row, end_row in [(12, 17), (19, 24), (26, 31)]:
++    for row in range(start_row, end_row + 1):
++        for col in range(8, 13):  # H:L
++            col_letter = get_column_letter(col)
++            ws.cell(row=row, column=col).value = (
++                f'=INDEX({value_range}, MATCH($D{row}, {series_range}, 0), '
++                f'MATCH({col_letter}$10, {year_range}, 0))'
++            )
++
++# 4. Net Patient Flow formulas H35:L40.
++for idx, row in enumerate(range(35, 41)):
++    admissions_row = 12 + idx
++    discharges_row = 19 + idx
++    capacity_row = 26 + idx
++    for col in range(8, 13):
++        col_letter = get_column_letter(col)
++        ws.cell(row=row, column=col).value = (
++            f'=({col_letter}{admissions_row}-{col_letter}{discharges_row})/{col_letter}{capacity_row}*100'
++        )
++
++# 5. Summary statistics H42:L47. Labels confirmed in E42:E47:
++# Minimum, Maximum, Median, Simple mean, 25th percentile, 75th percentile.
++summary_formulas = {
++    42: 'MIN',
++    43: 'MAX',
++    44: 'MEDIAN',
++    45: 'AVERAGE',
++}
++for col in range(8, 13):
++    col_letter = get_column_letter(col)
++    ws.cell(row=42, column=col).value = f'=MIN({col_letter}35:{col_letter}40)'
++    ws.cell(row=43, column=col).value = f'=MAX({col_letter}35:{col_letter}40)'
++    ws.cell(row=44, column=col).value = f'=MEDIAN({col_letter}35:{col_letter}40)'
++    ws.cell(row=45, column=col).value = f'=AVERAGE({col_letter}35:{col_letter}40)'
++    ws.cell(row=46, column=col).value = f'=PERCENTILE({col_letter}35:{col_letter}40, 0.25)'
++    ws.cell(row=47, column=col).value = f'=PERCENTILE({col_letter}35:{col_letter}40, 0.75)'
++
++# 6. Weighted mean H50:L50.
++for col in range(8, 13):
++    col_letter = get_column_letter(col)
++    ws.cell(row=50, column=col).value = (
++        f'=SUMPRODUCT({col_letter}35:{col_letter}40, {col_letter}26:{col_letter}31) / SUM({col_letter}26:{col_letter}31)'
++    )
++
++# Encourage recalculation by spreadsheet apps without altering worksheets/formatting.
++try:
++    wb.calculation.fullCalcOnLoad = True
++    wb.calculation.forceFullCalc = True
++except Exception:
++    pass
++
++wb.save(out)
++print(f'Saved {out}')
++print('Formula samples written before save:')
++for coord in ['H12', 'L17', 'H19', 'L24', 'H26', 'L31', 'H35', 'L40', 'H42', 'H47', 'H50', 'L50']:
++    print(f'  {coord} = {ws[coord].value}')
+  ┊ review diff
+a/validate_result.py → b/validate_result.py
+@@ -0,0 +1,68 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++import re
++
++out = '/root/output/result.xlsx'
++wb = load_workbook(out, data_only=False)
++ws = wb['Task']
++
++print('Validation samples from reopened workbook (data_only=False):')
++for coord in ['H12', 'H35', 'H42', 'H50']:
++    print(f'  {coord} = {ws[coord].value}')
++
++# Validate target ranges are all formula strings.
++target_ranges = [(12, 17), (19, 24), (26, 31), (35, 40), (42, 47), (50, 50)]
++missing = []
++not_formula = []
++for start, end in target_ranges:
++    for row in range(start, end + 1):
++        for col in range(8, 13):
++            coord = f'{get_column_letter(col)}{row}'
++            v = ws.cell(row=row, column=col).value
++            if v is None:
++                missing.append(coord)
++            elif not (isinstance(v, str) and v.startswith('=')):
++                not_formula.append((coord, v))
++
++print('\nNone cells in target ranges:', missing if missing else 'NONE')
++print('Non-formula cells in target ranges:', not_formula if not_formula else 'NONE')
++
++# Syntax/reference checks for expected formula families.
++errors = []
++lookup_re = re.compile(r'^=INDEX\(Data!\$H\$21:\$L\$38, MATCH\(\$D\d+, Data!\$D\$21:\$D\$38, 0\), MATCH\([H-L]\$10, Data!\$H\$4:\$L\$4, 0\)\)$')
++for row in list(range(12, 18)) + list(range(19, 25)) + list(range(26, 32)):
++    for col in range(8, 13):
++        coord = f'{get_column_letter(col)}{row}'
++        if not lookup_re.match(ws[coord].value or ''):
++            errors.append((coord, 'lookup formula mismatch', ws[coord].value))
++
++for idx, row in enumerate(range(35, 41)):
++    for col in range(8, 13):
++        c = get_column_letter(col)
++        expected = f'=({c}{12+idx}-{c}{19+idx})/{c}{26+idx}*100'
++        if ws.cell(row, col).value != expected:
++            errors.append((f'{c}{row}', 'net flow mismatch', ws.cell(row, col).value, expected))
++
++for col in range(8, 13):
++    c = get_column_letter(col)
++    expected_by_row = {
++        42: f'=MIN({c}35:{c}40)',
++        43: f'=MAX({c}35:{c}40)',
++        44: f'=MEDIAN({c}35:{c}40)',
++        45: f'=AVERAGE({c}35:{c}40)',
++        46: f'=PERCENTILE({c}35:{c}40, 0.25)',
++        47: f'=PERCENTILE({c}35:{c}40, 0.75)',
++        50: f'=SUMPRODUCT({c}35:{c}40, {c}26:{c}31) / SUM({c}26:{c}31)',
++    }
++    for row, expected in expected_by_row.items():
++        if ws.cell(row, col).value != expected:
++            errors.append((f'{c}{row}', 'summary/weighted mismatch', ws.cell(row, col).value, expected))
++
++print('Formula syntax/reference errors:', errors if errors else 'NONE')
++
++# Confirm no extra sheets were added.
++print('Sheet names after save:', wb.sheetnames)
++
++if missing or not_formula or errors or wb.sheetnames != ['Task', 'Data']:
++    raise SystemExit(1)
++print('\nVALIDATION PASSED')
+
+session_id: 20260612_042259_510a37
