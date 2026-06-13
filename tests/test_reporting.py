@@ -17,7 +17,7 @@ from mediated_coevo.diffusion import (
 from mediated_coevo.analysis.inspection import _inspection_payload
 from mediated_coevo.analysis.metrics import metric_row
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
+from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
 from mediated_coevo.analysis.reporting import (
     COEVOLUTION_TASK_ID,
     build_score_summary,
@@ -127,6 +127,29 @@ def test_metric_row_includes_diffusion_process_and_transfer_fields():
     assert row["source_task_ids"] == ["task-b"]
     assert row["reward_after_diffusion_context"] == 0.25
     assert row["regression_after_diffusion_context"] is True
+
+
+def test_metric_row_reports_executor_cache_read_as_audit_only():
+    record = _record("task-a", 0.25)
+    record.total_tokens = 123
+    assert record.execution_trace is not None
+    record.execution_trace.token_usage = TokenUsage(
+        input_tokens=7,
+        output_tokens=3,
+    )
+    record.execution_trace.harbor_metadata = {
+        "executor_token_source": "hermes_session",
+        "executor_session_cache_read_tokens": "303",
+    }
+
+    row = metric_row(record)
+
+    assert row["prompt_tokens_by_agent"]["executor"] == 7
+    assert row["completion_tokens_by_agent"]["executor"] == 3
+    assert row["total_tokens_by_agent"]["executor"] == 10
+    assert row["total_tokens"] == 123
+    assert row["executor_token_source"] == "hermes_session"
+    assert row["executor_cache_read_tokens"] == "303"
 
 
 def test_score_summary_excludes_coevolution_records_and_writes_json(tmp_path):

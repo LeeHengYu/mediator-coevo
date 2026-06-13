@@ -91,6 +91,18 @@ class HarborRunResult:
     stderr: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ExecutorSessionTokens:
+    """Token totals recovered from Hermes session artifacts."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    records: int = 0
+
+
 class SkillFlowRepository:
     """Resolve local SkillFlow tasks and materialize Harbor workspaces."""
 
@@ -601,14 +613,10 @@ class SkillFlowTraceParser:
             )
 
         agent_result = as_mapping(trial_result_json.get("agent_result"))
-        try:
-            input_tokens = int(agent_result.get("n_input_tokens", 0))
-        except (TypeError, ValueError):
-            input_tokens = 0
-        try:
-            output_tokens = int(agent_result.get("n_output_tokens", 0))
-        except (TypeError, ValueError):
-            output_tokens = 0
+        token_usage, token_metadata = _executor_token_usage(
+            trial_dir=self.run_result.trial_dir,
+            agent_result=agent_result,
+        )
         if evals:
             reward_source = "job_stats"
         elif "reward" in trial_result_json:
@@ -639,13 +647,11 @@ class SkillFlowTraceParser:
             harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
             harbor_metadata={
                 **_harbor_metadata(trial_result_json),
+                **token_metadata,
                 "verifier_type": SKILLFLOW_VERIFIER_TYPE,
                 "reward_source": reward_source,
             },
-            token_usage=TokenUsage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            ),
+            token_usage=token_usage,
             test_results=test_results,
         )
 
@@ -1010,6 +1016,105 @@ def _harbor_metadata(result_json: dict[str, Any]) -> dict[str, str]:
         if value is not None:
             metadata[f"agent_result.{key}"] = str(value)
     return metadata
+
+
+def _executor_token_usage(
+    *,
+    trial_dir: Path,
+    agent_result: Mapping[str, Any],
+) -> tuple[TokenUsage, dict[str, str]]:
+    result_input_tokens = _int_or_zero(agent_result.get("n_input_tokens"))
+    result_output_tokens = _int_or_zero(agent_result.get("n_output_tokens"))
+    session_tokens = _load_executor_session_tokens(
+        trial_dir / "agent" / "hermes-session.jsonl"
+    )
+    metadata: dict[str, str] = {}
+    if session_tokens.records:
+        metadata = {
+            "executor_session_input_tokens": str(session_tokens.input_tokens),
+            "executor_session_output_tokens": str(session_tokens.output_tokens),
+            "executor_session_cache_read_tokens": str(
+                session_tokens.cache_read_tokens
+            ),
+            "executor_session_cache_write_tokens": str(
+                session_tokens.cache_write_tokens
+            ),
+            "executor_session_reasoning_tokens": str(
+                session_tokens.reasoning_tokens
+            ),
+            "executor_session_records": str(session_tokens.records),
+        }
+
+    if result_input_tokens or result_output_tokens:
+        metadata["executor_token_source"] = "agent_result"
+        return (
+            TokenUsage(
+                input_tokens=result_input_tokens,
+                output_tokens=result_output_tokens,
+            ),
+            metadata,
+        )
+    if session_tokens.input_tokens or session_tokens.output_tokens:
+        metadata["executor_token_source"] = "hermes_session"
+        return (
+            TokenUsage(
+                input_tokens=session_tokens.input_tokens,
+                output_tokens=session_tokens.output_tokens,
+            ),
+            metadata,
+        )
+
+    metadata["executor_token_source"] = "agent_result_zero"
+    return TokenUsage(), metadata
+
+
+def _load_executor_session_tokens(session_path: Path) -> _ExecutorSessionTokens:
+    if not session_path.exists():
+        return _ExecutorSessionTokens()
+
+    input_tokens = 0
+    output_tokens = 0
+    cache_read_tokens = 0
+    cache_write_tokens = 0
+    reasoning_tokens = 0
+    records = 0
+    with session_path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Skipping malformed Hermes session line in %s",
+                    session_path,
+                )
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            records += 1
+            input_tokens += _int_or_zero(payload.get("input_tokens"))
+            output_tokens += _int_or_zero(payload.get("output_tokens"))
+            cache_read_tokens += _int_or_zero(payload.get("cache_read_tokens"))
+            cache_write_tokens += _int_or_zero(payload.get("cache_write_tokens"))
+            reasoning_tokens += _int_or_zero(payload.get("reasoning_tokens"))
+
+    return _ExecutorSessionTokens(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        reasoning_tokens=reasoning_tokens,
+        records=records,
+    )
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:

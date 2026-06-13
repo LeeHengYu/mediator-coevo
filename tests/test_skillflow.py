@@ -472,6 +472,79 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
     assert trace.token_usage.output_tokens == 3
 
 
+def test_trace_parser_falls_back_to_hermes_session_tokens(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "trials" / "trial-1"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "id": "job-1",
+                "stats": {
+                    "evals": {
+                        "verifier": {
+                            "metrics": [{"name": "reward", "mean": 0.5}]
+                        }
+                    }
+                },
+            }
+        )
+    )
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "id": "trial-1",
+                "agent_result": {"n_input_tokens": 0, "n_output_tokens": 0},
+            }
+        )
+    )
+    (agent_dir / "hermes-session.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "input_tokens": 11,
+                        "output_tokens": 5,
+                        "cache_read_tokens": 101,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "input_tokens": 7,
+                        "output_tokens": 3,
+                        "cache_read_tokens": 202,
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    run_result = HarborRunResult(
+        job_dir=job_dir,
+        trial_dir=trial_dir,
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    trace = parse_skillflow_execution_trace(
+        run_result=run_result,
+        task_id="demo",
+        iteration=2,
+        duration_sec=1.5,
+    )
+
+    assert trace.status == "ok"
+    assert trace.reward == 0.5
+    assert trace.token_usage.input_tokens == 18
+    assert trace.token_usage.output_tokens == 8
+    assert trace.harbor_metadata["executor_token_source"] == "hermes_session"
+    assert trace.harbor_metadata["executor_session_cache_read_tokens"] == "303"
+
+
 def test_trace_parser_treats_harbor_trial_exception_as_env_failure(
     tmp_path: Path,
 ) -> None:

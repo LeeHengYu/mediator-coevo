@@ -138,6 +138,10 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "executor_policy_hash": trace_metadata.get("executor_policy_hash"),
         "executor_policy_injected": trace_metadata.get("executor_policy_injected"),
         "executor_policy_injection": trace_metadata.get("executor_policy_injection"),
+        "executor_token_source": trace_metadata.get("executor_token_source"),
+        "executor_cache_read_tokens": trace_metadata.get(
+            "executor_session_cache_read_tokens"
+        ),
         "task_resource_count": trace_metadata.get("task_resource_count"),
         "task_resource_names": trace_metadata.get("task_resource_names"),
         "verifier_contract_kind": trace_metadata.get("verifier_contract_kind"),
