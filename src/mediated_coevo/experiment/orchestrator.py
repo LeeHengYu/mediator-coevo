@@ -547,11 +547,10 @@ class Orchestrator:
             task_id,
             current_iteration=current_iteration,
         )
-        fitted_bundle = self._fit_prior_context_bundle(condition, bundle)
+        fitted_bundle = self._fit_prior_context_bundle(bundle)
         flattened = fitted_bundle.flatten()
         if current_iteration is not None:
             self._record_prior_context_metrics(
-                condition=condition,
                 task_id=task_id,
                 current_iteration=current_iteration,
                 bundle=fitted_bundle,
@@ -629,56 +628,93 @@ class Orchestrator:
 
     def _fit_prior_context_bundle(
         self,
-        condition: ConditionName,
         bundle: PlannerPriorContextBundle,
     ) -> PlannerPriorContextBundle:
         """Fit structured prior-context sections before planner flattening."""
         from mediated_coevo.runtime.token_budget import count_text_tokens, fit_text_to_tokens
 
         model = self.planner.llm_client.model
-        total_cap = self.config.budgets.mediator_report_tokens
-        diffusion_context = bundle.diffusion_context
-        diffusion_tokens = (
-            count_text_tokens(model, diffusion_context) if diffusion_context else 0
-        )
-        remaining_for_non_diffusion = max(0, total_cap - diffusion_tokens)
+        same_cap = self.config.budgets.max_same_task_prior_tokens
+        transfer_cap = self.config.budgets.max_transfer_context_tokens
+        total_cap = self.config.budgets.max_total_prior_context_tokens
+        original_same_tokens = count_text_tokens(model, bundle.same_task_prior or "")
+        same_task_prior = None
+        if bundle.same_task_prior:
+            same_task_prior = fit_text_to_tokens(
+                model,
+                bundle.same_task_prior,
+                same_cap,
+            )
 
-        same_task_prior = bundle.same_task_prior
-        cross_task_prior = bundle.cross_task_prior
-        original_same_tokens = count_text_tokens(model, same_task_prior or "")
-        original_cross_tokens = count_text_tokens(model, cross_task_prior or "")
-        if remaining_for_non_diffusion:
-            prior_context_cap = self._prior_context_cap(condition)
-            if same_task_prior:
-                same_cap = min(prior_context_cap, remaining_for_non_diffusion)
-                same_task_prior = fit_text_to_tokens(model, same_task_prior, same_cap)
-                remaining_for_non_diffusion = max(
-                    0,
-                    remaining_for_non_diffusion
-                    - count_text_tokens(model, same_task_prior),
-                )
-            if cross_task_prior:
-                cross_cap = min(prior_context_cap, remaining_for_non_diffusion)
-                cross_task_prior = fit_text_to_tokens(model, cross_task_prior, cross_cap)
-        else:
-            same_task_prior = None
-            cross_task_prior = None
+        diffusion_context = None
+        cross_task_prior = None
+        original_transfer_tokens = 0
+        if bundle.diffusion_context:
+            original_transfer_tokens = count_text_tokens(model, bundle.diffusion_context)
+            diffusion_context = fit_text_to_tokens(
+                model,
+                bundle.diffusion_context,
+                transfer_cap,
+            )
+        elif bundle.cross_task_prior:
+            original_transfer_tokens = count_text_tokens(model, bundle.cross_task_prior)
+            cross_task_prior = fit_text_to_tokens(
+                model,
+                bundle.cross_task_prior,
+                transfer_cap,
+            )
 
         fitted_bundle = PlannerPriorContextBundle(
             same_task_prior=same_task_prior,
             cross_task_prior=cross_task_prior,
             diffusion_context=diffusion_context,
         )
+        fitted_total_tokens = count_text_tokens(model, fitted_bundle.flatten() or "")
+        while fitted_total_tokens > total_cap:
+            overflow_tokens = fitted_total_tokens - total_cap
+            if diffusion_context:
+                current_tokens = count_text_tokens(model, diffusion_context)
+                diffusion_context = fit_text_to_tokens(
+                    model,
+                    diffusion_context,
+                    max(0, current_tokens - overflow_tokens - 1),
+                )
+            elif cross_task_prior:
+                current_tokens = count_text_tokens(model, cross_task_prior)
+                cross_task_prior = fit_text_to_tokens(
+                    model,
+                    cross_task_prior,
+                    max(0, current_tokens - overflow_tokens - 1),
+                )
+            elif same_task_prior:
+                current_tokens = count_text_tokens(model, same_task_prior)
+                same_task_prior = fit_text_to_tokens(
+                    model,
+                    same_task_prior,
+                    max(0, current_tokens - overflow_tokens - 1),
+                )
+            else:
+                break
+
+            fitted_bundle = PlannerPriorContextBundle(
+                same_task_prior=same_task_prior,
+                cross_task_prior=cross_task_prior,
+                diffusion_context=diffusion_context,
+            )
+            next_total_tokens = count_text_tokens(model, fitted_bundle.flatten() or "")
+            if next_total_tokens >= fitted_total_tokens:
+                break
+            fitted_total_tokens = next_total_tokens
+
         fitted_same_tokens = count_text_tokens(model, same_task_prior or "")
-        fitted_cross_tokens = count_text_tokens(model, cross_task_prior or "")
-        fitted_total_tokens = count_text_tokens(
+        fitted_transfer_tokens = count_text_tokens(
             model,
-            fitted_bundle.flatten() or "",
+            diffusion_context or cross_task_prior or "",
         )
         budget_violation = (
             bundle.context_budget_violation
             or original_same_tokens > fitted_same_tokens
-            or original_cross_tokens > fitted_cross_tokens
+            or original_transfer_tokens > fitted_transfer_tokens
             or fitted_total_tokens > total_cap
         )
         return PlannerPriorContextBundle(
@@ -691,7 +727,6 @@ class Orchestrator:
     def _record_prior_context_metrics(
         self,
         *,
-        condition: ConditionName,
         task_id: str,
         current_iteration: int,
         bundle: PlannerPriorContextBundle,
@@ -702,25 +737,33 @@ class Orchestrator:
         model = self.planner.llm_client.model
         flattened_tokens = count_text_tokens(model, flattened or "")
         same_task_tokens = count_text_tokens(model, bundle.same_task_prior or "")
-        cross_task_tokens = count_text_tokens(model, bundle.cross_task_prior or "")
-        total_cap = self.config.budgets.mediator_report_tokens
-        prior_context_cap = self._prior_context_cap(condition)
+        transfer_context_kind = "none"
+        transfer_context = None
+        if bundle.diffusion_context:
+            transfer_context_kind = "diffusion"
+            transfer_context = bundle.diffusion_context
+        elif bundle.cross_task_prior:
+            transfer_context_kind = "cross_task_prior"
+            transfer_context = bundle.cross_task_prior
+        transfer_context_tokens = count_text_tokens(model, transfer_context or "")
+        same_cap = self.config.budgets.max_same_task_prior_tokens
+        transfer_cap = self.config.budgets.max_transfer_context_tokens
+        total_cap = self.config.budgets.max_total_prior_context_tokens
         self._prior_context_by_target[(task_id, current_iteration)] = {
             "same_task_prior_tokens": same_task_tokens,
-            "cross_task_prior_tokens": cross_task_tokens,
+            "transfer_context_kind": transfer_context_kind,
+            "transfer_context_tokens": transfer_context_tokens,
             "total_planner_prior_context_tokens": flattened_tokens,
-            "max_same_task_prior_tokens": prior_context_cap,
-            "max_cross_task_prior_tokens": prior_context_cap,
+            "max_same_task_prior_tokens": same_cap,
+            "max_transfer_context_tokens": transfer_cap,
             "max_total_prior_context_tokens": total_cap,
             "context_budget_violation": (
-                bundle.context_budget_violation or flattened_tokens > total_cap
+                bundle.context_budget_violation
+                or same_task_tokens > same_cap
+                or transfer_context_tokens > transfer_cap
+                or flattened_tokens > total_cap
             ),
         }
-
-    def _prior_context_cap(self, condition: ConditionName) -> int:
-        if condition == "full_traces":
-            return self.config.budgets.historical_summary_tokens
-        return self.config.budgets.mediator_report_tokens
 
     async def _emit_diffusion_artifacts(
         self,
@@ -797,7 +840,7 @@ class Orchestrator:
                 (task_id, current_iteration),
                 {},
             ).get("eligible_count"),
-            max_context_tokens=self.config.budgets.max_diffusion_context_tokens,
+            max_context_tokens=self.config.budgets.max_transfer_context_tokens,
             compact_artifact_content=self._compact_diffusion_artifact_content,
         )
         self._diffusion_context_by_target[(task_id, current_iteration)] = {
@@ -1096,15 +1139,16 @@ class Orchestrator:
         )
         if prior_context is not None:
             record.same_task_prior_tokens = prior_context["same_task_prior_tokens"]
-            record.cross_task_prior_tokens = prior_context["cross_task_prior_tokens"]
+            record.transfer_context_kind = prior_context["transfer_context_kind"]
+            record.transfer_context_tokens = prior_context["transfer_context_tokens"]
             record.total_planner_prior_context_tokens = prior_context[
                 "total_planner_prior_context_tokens"
             ]
             record.max_same_task_prior_tokens = prior_context[
                 "max_same_task_prior_tokens"
             ]
-            record.max_cross_task_prior_tokens = prior_context[
-                "max_cross_task_prior_tokens"
+            record.max_transfer_context_tokens = prior_context[
+                "max_transfer_context_tokens"
             ]
             record.max_total_prior_context_tokens = prior_context[
                 "max_total_prior_context_tokens"
@@ -1112,9 +1156,6 @@ class Orchestrator:
             record.context_budget_violation = prior_context[
                 "context_budget_violation"
             ]
-        record.max_diffusion_context_tokens = (
-            self.config.budgets.max_diffusion_context_tokens
-        )
         context = self._diffusion_context_by_target.get((record.task_id, record.iteration))
         if context is None:
             return
@@ -1123,7 +1164,6 @@ class Orchestrator:
         record.diffusion_artifacts_eligible = context["eligible_count"]
         record.diffusion_artifacts_selected = context["selected_count"]
         record.diffusion_artifacts_rendered = context["rendered_count"]
-        record.diffusion_context_tokens = context["context_tokens"]
         record.source_task_ids = list(context["source_task_ids"])
         record.compacted_diffusion_artifact_ids = list(
             context["compacted_artifact_ids"]

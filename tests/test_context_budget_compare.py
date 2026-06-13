@@ -16,12 +16,12 @@ from mediated_coevo.main import app
 def test_compare_context_budget_runs_reports_budget_only_warning(tmp_path: Path):
     run_a = _write_run(
         tmp_path / "run-a",
-        max_diffusion_context_tokens=4000,
+        max_transfer_context_tokens=900,
         total_planner_prior_context_tokens=100,
     )
     run_b = _write_run(
         tmp_path / "run-b",
-        max_diffusion_context_tokens=2000,
+        max_transfer_context_tokens=600,
         total_planner_prior_context_tokens=150,
     )
 
@@ -30,7 +30,7 @@ def test_compare_context_budget_runs_reports_budget_only_warning(tmp_path: Path)
     assert comparison.comparability_status == "warning"
     assert [difference.path for difference in comparison.setup_mismatches] == []
     assert [difference.path for difference in comparison.budget_differences] == [
-        "budgets.max_diffusion_context_tokens"
+        "budgets.max_transfer_context_tokens"
     ]
     assert comparison.token_delta_percent[
         "total_planner_prior_context_tokens"
@@ -86,13 +86,13 @@ def test_compare_context_budgets_cli_emits_json(tmp_path: Path):
 def _write_run(
     run_dir: Path,
     *,
-    max_diffusion_context_tokens: int = 4000,
+    max_transfer_context_tokens: int = 900,
     total_planner_prior_context_tokens: int = 100,
     record: DiffusedRecord | None = None,
 ) -> Path:
     run_dir.mkdir()
     (run_dir / "config.toml").write_text(
-        _config_toml(max_diffusion_context_tokens=max_diffusion_context_tokens)
+        _config_toml(max_transfer_context_tokens=max_transfer_context_tokens)
     )
     (run_dir / "metrics.jsonl").write_text(
         json.dumps(
@@ -100,8 +100,8 @@ def _write_run(
                 "iteration": 1,
                 "task_id": "task-a",
                 "same_task_prior_tokens": 30,
-                "cross_task_prior_tokens": 20,
-                "diffusion_context_tokens": 50,
+                "transfer_context_kind": "diffusion",
+                "transfer_context_tokens": 50,
                 "total_planner_prior_context_tokens": (
                     total_planner_prior_context_tokens
                 ),
@@ -135,7 +135,7 @@ def _write_run(
     return run_dir
 
 
-def _config_toml(*, max_diffusion_context_tokens: int) -> str:
+def _config_toml(*, max_transfer_context_tokens: int) -> str:
     return f"""
 [models]
 planner = "test-planner"
@@ -145,7 +145,8 @@ judge = "test-judge"
 
 [budgets]
 max_skill_tokens = 4000
-max_diffusion_context_tokens = {max_diffusion_context_tokens}
+max_same_task_prior_tokens = 300
+max_transfer_context_tokens = {max_transfer_context_tokens}
 trace_excerpt_tokens = 6000
 historical_summary_tokens = 3000
 mediator_report_tokens = 4000

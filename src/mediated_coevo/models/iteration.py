@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +14,8 @@ from .report import MediatorReport
 from .skill import SkillUpdate
 from .task import TaskSpec
 from .trace import ExecutionTrace
+
+TransferContextKind = Literal["diffusion", "cross_task_prior", "none"]
 
 
 class IterationRecord(BaseModel):
@@ -51,13 +54,12 @@ class IterationRecord(BaseModel):
     diffusion_artifacts_eligible: int = 0
     diffusion_artifacts_selected: int = 0
     diffusion_artifacts_rendered: int = 0
-    diffusion_context_tokens: int = 0
+    transfer_context_kind: TransferContextKind = "none"
+    transfer_context_tokens: int = 0
     same_task_prior_tokens: int = 0
-    cross_task_prior_tokens: int = 0
     total_planner_prior_context_tokens: int = 0
     max_same_task_prior_tokens: int = 0
-    max_cross_task_prior_tokens: int = 0
-    max_diffusion_context_tokens: int = 0
+    max_transfer_context_tokens: int = 0
     max_total_prior_context_tokens: int = 0
     context_budget_violation: bool = False
     compacted_diffusion_artifact_ids: list[str] = Field(default_factory=list)

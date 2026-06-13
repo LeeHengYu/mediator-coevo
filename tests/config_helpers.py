@@ -12,7 +12,8 @@ from mediated_coevo.core.config import (
 def budgets_config() -> BudgetsConfig:
     return BudgetsConfig(
         max_skill_tokens=4000,
-        max_diffusion_context_tokens=4000,
+        max_same_task_prior_tokens=300,
+        max_transfer_context_tokens=900,
         trace_excerpt_tokens=6000,
         historical_summary_tokens=3000,
         mediator_report_tokens=4000,

@@ -34,7 +34,8 @@ class ConfigLoadError(ValueError):
 
 REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("budgets", "max_skill_tokens"),
-    ("budgets", "max_diffusion_context_tokens"),
+    ("budgets", "max_same_task_prior_tokens"),
+    ("budgets", "max_transfer_context_tokens"),
     ("budgets", "trace_excerpt_tokens"),
     ("budgets", "historical_summary_tokens"),
     ("budgets", "mediator_report_tokens"),
@@ -65,7 +66,8 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
 
 CONFIG_CLI_HINTS: dict[str, str] = {
     "budgets.max_skill_tokens": "config/default.toml",
-    "budgets.max_diffusion_context_tokens": "config/default.toml",
+    "budgets.max_same_task_prior_tokens": "config/default.toml",
+    "budgets.max_transfer_context_tokens": "config/default.toml",
     "budgets.trace_excerpt_tokens": "config/default.toml",
     "budgets.historical_summary_tokens": "config/default.toml",
     "budgets.mediator_report_tokens": "config/default.toml",
@@ -133,7 +135,8 @@ class ModelsConfig(BaseModel):
 
 class BudgetsConfig(BaseModel):
     max_skill_tokens: int
-    max_diffusion_context_tokens: int
+    max_same_task_prior_tokens: int
+    max_transfer_context_tokens: int
     trace_excerpt_tokens: int
     historical_summary_tokens: int
     mediator_report_tokens: int
@@ -148,6 +151,10 @@ class BudgetsConfig(BaseModel):
     advisor_completion_tokens: int
     reflector_completion_tokens: int
     judge_completion_tokens: int
+
+    @property
+    def max_total_prior_context_tokens(self) -> int:
+        return self.max_same_task_prior_tokens + self.max_transfer_context_tokens
 
 
 class JudgeConfig(BaseModel):

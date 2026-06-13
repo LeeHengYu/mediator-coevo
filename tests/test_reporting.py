@@ -111,7 +111,8 @@ def test_metric_row_includes_diffusion_process_and_transfer_fields():
     record.diffusion_artifacts_eligible = 4
     record.diffusion_artifacts_selected = 2
     record.diffusion_artifacts_rendered = 1
-    record.diffusion_context_tokens = 37
+    record.transfer_context_kind = "diffusion"
+    record.transfer_context_tokens = 37
     record.source_task_ids = ["task-b"]
     record.reward_after_diffusion_context = 0.25
     record.regression_after_diffusion_context = True
@@ -121,7 +122,8 @@ def test_metric_row_includes_diffusion_process_and_transfer_fields():
     assert row["diffusion_artifacts_eligible"] == 4
     assert row["diffusion_artifacts_selected"] == 2
     assert row["diffusion_artifacts_rendered"] == 1
-    assert row["diffusion_context_tokens"] == 37
+    assert row["transfer_context_kind"] == "diffusion"
+    assert row["transfer_context_tokens"] == 37
     assert row["source_task_ids"] == ["task-b"]
     assert row["reward_after_diffusion_context"] == 0.25
     assert row["regression_after_diffusion_context"] is True
@@ -295,7 +297,8 @@ def test_single_run_inspection_payload_reports_diffusion_bundle(tmp_path):
                     "diffusion_policy": "top_k_similarity",
                     "diffusion_graph": "precomputed_similarity",
                     "diffusion_artifacts_rendered": 1,
-                    "diffusion_context_tokens": 20,
+                    "transfer_context_kind": "diffusion",
+                    "transfer_context_tokens": 20,
                     "source_task_ids": ["task-b"],
                     "reward_after_diffusion_context": 0.5,
                     "regression_after_diffusion_context": False,
@@ -306,7 +309,8 @@ def test_single_run_inspection_payload_reports_diffusion_bundle(tmp_path):
                     "diffusion_policy": "top_k_similarity",
                     "diffusion_graph": "precomputed_similarity",
                     "diffusion_artifacts_rendered": 1,
-                    "diffusion_context_tokens": 10,
+                    "transfer_context_kind": "diffusion",
+                    "transfer_context_tokens": 10,
                     "source_task_ids": ["task-b", "task-d"],
                     "reward_after_diffusion_context": 0.0,
                     "regression_after_diffusion_context": True,
@@ -395,9 +399,9 @@ def test_single_run_inspection_payload_reports_diffusion_bundle(tmp_path):
     assert metrics["diffusion_graph"] == "precomputed_similarity"
     context = metrics["context"]
     assert context["rows_with_rendered_context"] == 2
-    assert context["diffusion_context_tokens"]["total"] == pytest.approx(30.0)
-    assert context["diffusion_context_tokens"]["mean"] == pytest.approx(15.0)
-    assert context["diffusion_context_tokens"]["max"] == pytest.approx(20.0)
+    assert context["transfer_context_tokens"]["total"] == pytest.approx(30.0)
+    assert context["transfer_context_tokens"]["mean"] == pytest.approx(15.0)
+    assert context["transfer_context_tokens"]["max"] == pytest.approx(20.0)
     assert context["source_task_count"] == 2
     assert context["source_task_ids"] == ["task-b", "task-d"]
     assert context["reward_after_diffusion_context"]["count"] == 2
@@ -435,7 +439,8 @@ def test_inspect_command_prints_diffusion_context_summary(tmp_path):
                 "diffusion_policy": "top_k_similarity",
                 "diffusion_graph": "precomputed_similarity",
                 "diffusion_artifacts_rendered": 1,
-                "diffusion_context_tokens": 12,
+                "transfer_context_kind": "diffusion",
+                "transfer_context_tokens": 12,
                 "source_task_ids": ["task-b"],
                 "reward_after_diffusion_context": 0.0,
                 "regression_after_diffusion_context": True,
@@ -476,7 +481,7 @@ def test_inspect_command_prints_diffusion_context_summary(tmp_path):
     assert "Metrics:" in result.stdout
     assert "Diffusion records:" in result.stdout
     assert "Rows with rendered context: 1" in result.stdout
-    assert "Context tokens: total=12 mean=12 max=12" in result.stdout
+    assert "Transfer tokens: total=12 mean=12 max=12" in result.stdout
     assert "Source tasks: 1 (task-b)" in result.stdout
     assert "Reward after context: count=1 mean=0 min=0 max=0" in result.stdout
     assert "Regressions after context: 1 rate=1" in result.stdout

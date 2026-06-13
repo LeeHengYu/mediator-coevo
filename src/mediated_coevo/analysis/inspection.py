@@ -118,7 +118,7 @@ def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None
                 task_id for task_id in source_ids if isinstance(task_id, str)
             )
         sorted_source_task_ids = sorted(source_task_ids)
-        token_values = _numeric_values(rendered_rows, "diffusion_context_tokens")
+        token_values = _numeric_values(rendered_rows, "transfer_context_tokens")
         reward_values = _numeric_values(
             rendered_rows,
             "reward_after_diffusion_context",
@@ -132,11 +132,8 @@ def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None
             "same_task_prior_tokens": _numeric_summary(
                 _numeric_values(rows, "same_task_prior_tokens")
             ),
-            "cross_task_prior_tokens": _numeric_summary(
-                _numeric_values(rows, "cross_task_prior_tokens")
-            ),
-            "diffusion_context_tokens": _numeric_summary(
-                _numeric_values(rows, "diffusion_context_tokens")
+            "transfer_context_tokens": _numeric_summary(
+                _numeric_values(rows, "transfer_context_tokens")
             ),
             "total_planner_prior_context_tokens": _numeric_summary(
                 _numeric_values(rows, "total_planner_prior_context_tokens")
@@ -159,7 +156,7 @@ def _diffusion_inspection_payload(experiment_dir: Path) -> dict[str, Any] | None
             "planner_prior_context": prior_context_summary,
             "context": {
                 "rows_with_rendered_context": len(rendered_rows),
-                "diffusion_context_tokens": _numeric_summary(token_values),
+                "transfer_context_tokens": _numeric_summary(token_values),
                 "source_task_count": len(sorted_source_task_ids),
                 "source_task_ids": sorted_source_task_ids,
                 "reward_after_diffusion_context": _numeric_summary(reward_values),

@@ -15,8 +15,7 @@ from mediated_coevo.diffusion.models import DiffusedRecord
 
 CONTEXT_TOKEN_FIELDS: tuple[str, ...] = (
     "same_task_prior_tokens",
-    "cross_task_prior_tokens",
-    "diffusion_context_tokens",
+    "transfer_context_tokens",
     "total_planner_prior_context_tokens",
 )
 
@@ -46,7 +45,8 @@ COMPARABILITY_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
 
 BUDGET_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("budgets", "max_skill_tokens"),
-    ("budgets", "max_diffusion_context_tokens"),
+    ("budgets", "max_same_task_prior_tokens"),
+    ("budgets", "max_transfer_context_tokens"),
     ("budgets", "trace_excerpt_tokens"),
     ("budgets", "historical_summary_tokens"),
     ("budgets", "mediator_report_tokens"),
@@ -173,7 +173,7 @@ def compare_context_budget_runs(
     elif status == "fail":
         recommended_interpretation = (
             "Fix diffusion provenance or citation failures before interpreting "
-            "diffusion-context effects."
+            "transfer-context effects."
         )
     elif budget_differences:
         paths = ", ".join(difference.path for difference in budget_differences)
@@ -352,4 +352,3 @@ def _numeric_values(rows: list[dict[str, Any]], key: str) -> list[float]:
             continue
         values.append(float(value))
     return values
-

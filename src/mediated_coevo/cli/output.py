@@ -219,7 +219,7 @@ def print_inspection_payload(payload: dict[str, Any]) -> None:
     context_summary = metrics_summary.get("context")
     if not context_summary:
         return
-    token_summary = context_summary["diffusion_context_tokens"]
+    token_summary = context_summary["transfer_context_tokens"]
     reward_summary = context_summary["reward_after_diffusion_context"]
     regression_summary = context_summary["regression_after_diffusion_context"]
     source_task_ids = context_summary["source_task_ids"]
@@ -241,7 +241,7 @@ def print_inspection_payload(payload: dict[str, Any]) -> None:
         f"{context_summary['rows_with_rendered_context']}"
     )
     console.print(
-        "      Context tokens: "
+        "      Transfer tokens: "
         f"total={_format_summary_number(token_summary['total'])} "
         f"mean={_format_summary_number(token_summary['mean'])} "
         f"max={_format_summary_number(token_summary['max'])}"

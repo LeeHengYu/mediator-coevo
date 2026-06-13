@@ -154,11 +154,13 @@ worked or looked promising, what to avoid or re-check, and concrete verifier
 evidence. Successful runs emphasize reusable choices; failed runs emphasize
 failure modes while preserving useful partial progress.
 
-Rendered diffusion context is capped by
-`budgets.max_diffusion_context_tokens`. When a selected artifact overflows that
-cap, the renderer first compacts the artifact with the same compactor path used
-for other planner-facing context. If the compacted artifact still cannot fit, it
-is dropped from the prompt and recorded in the diffusion audit ledger.
+Rendered diffusion context shares the transfer-context slot capped by
+`budgets.max_transfer_context_tokens`, the same slot used by explicit
+cross-task prior context in non-diffusion rows. When a selected artifact
+overflows that cap, the renderer first compacts the artifact with the same
+compactor path used for other planner-facing context. If the compacted artifact
+still cannot fit, it is dropped from the prompt and recorded in the diffusion
+audit ledger.
 
 Current diffusion policy values:
 
@@ -475,10 +477,11 @@ uv run medcoevo compare-context-budgets \
   --json
 ```
 
-The command treats same-task prior tokens, cross-task prior tokens, diffusion
-tokens, and total planner prior-context tokens as observed metrics, not config
-knobs. A change to `budgets.max_diffusion_context_tokens` is an experiment setup
-difference; changes in the token fields are outcomes of that setup.
+The command treats same-task prior tokens, transfer-context tokens, and total
+planner prior-context tokens as observed metrics, not config knobs. Changes to
+`budgets.max_same_task_prior_tokens` or `budgets.max_transfer_context_tokens`
+are experiment setup differences; changes in the token fields are outcomes of
+that setup.
 
 Audit skill-update provenance, adjacent reward effects, Mediator report
 effects, committed-update ledger entries, rejected reflection evidence, diff
@@ -683,11 +686,11 @@ Diffusion observability fields in `metrics.jsonl`:
 - `graph_snapshot_id`.
 - `diffusion_artifacts_eligible`, `diffusion_artifacts_selected`, and
   `diffusion_artifacts_rendered`.
-- `same_task_prior_tokens`, `cross_task_prior_tokens`,
-  `diffusion_context_tokens`, and `total_planner_prior_context_tokens`.
-- `max_same_task_prior_tokens`, `max_cross_task_prior_tokens`,
-  `max_diffusion_context_tokens`, and `max_total_prior_context_tokens`, recorded
-  as the effective caps used for that row.
+- `same_task_prior_tokens`, `transfer_context_kind`,
+  `transfer_context_tokens`, and `total_planner_prior_context_tokens`.
+- `max_same_task_prior_tokens`, `max_transfer_context_tokens`, and
+  `max_total_prior_context_tokens`, recorded as the effective caps used for
+  that row.
 - `context_budget_violation`, `compacted_diffusion_artifact_ids`, and
   `dropped_for_budget_artifact_ids`.
 - `source_task_ids`.
@@ -705,7 +708,7 @@ config/default.toml
 The current config controls:
 
 - model IDs for Planner, Executor, Mediator, and Judge;
-- prompt, completion, and diffusion-context token budgets;
+- prompt, completion, same-task-prior, and transfer-context token budgets;
 - default iteration cadence;
 - skill update and validation defaults;
 - diffusion emission, selection, and graph-routing settings;
@@ -725,7 +728,8 @@ Current task/runtime defaults include:
 ```toml
 [budgets]
 max_skill_tokens = 4000
-max_diffusion_context_tokens = 4000
+max_same_task_prior_tokens = 300
+max_transfer_context_tokens = 900
 trace_excerpt_tokens = 6000
 historical_summary_tokens = 3000
 mediator_report_tokens = 4000

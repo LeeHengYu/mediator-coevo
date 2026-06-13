@@ -487,7 +487,7 @@ class PlannerAgent(BaseAgent):
                 section.to_budget_section()
                 for section in PlannerAgent._prior_context_sections(
                     context,
-                    max_tokens=budgets.mediator_report_tokens,
+                    max_tokens=budgets.max_total_prior_context_tokens,
                 )
             )
             sections.append(

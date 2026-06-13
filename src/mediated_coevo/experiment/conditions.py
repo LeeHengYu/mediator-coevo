@@ -151,16 +151,16 @@ async def get_prior_context(
                     BudgetSection(
                         "full_traces",
                         text,
-                        max_tokens=budgets.historical_summary_tokens,
+                        max_tokens=budgets.max_same_task_prior_tokens,
                     )
                 ],
-                budgets.historical_summary_tokens,
+                budgets.max_same_task_prior_tokens,
             )
         return text
     if condition == "shared_notes":
         if shared_notes and budgets:
             return fit_text_to_tokens(
-                model, shared_notes, budgets.historical_summary_tokens
+                model, shared_notes, budgets.max_same_task_prior_tokens
             )
         return shared_notes
     # static_mediator, learned_mediator
@@ -169,7 +169,7 @@ async def get_prior_context(
             return fit_text_to_tokens(
                 model,
                 previous_report.content,
-                budgets.mediator_report_tokens,
+                budgets.max_same_task_prior_tokens,
             )
         return previous_report.content
     return None
@@ -219,10 +219,10 @@ async def get_cross_task_prior_context(
                     BudgetSection(
                         "cross_task_full_traces",
                         text,
-                        max_tokens=budgets.historical_summary_tokens,
+                        max_tokens=budgets.max_transfer_context_tokens,
                     )
                 ],
-                budgets.historical_summary_tokens,
+                budgets.max_transfer_context_tokens,
             )
         return text
 
@@ -250,10 +250,10 @@ async def get_cross_task_prior_context(
                     BudgetSection(
                         "cross_task_reports",
                         text,
-                        max_tokens=budgets.mediator_report_tokens,
+                        max_tokens=budgets.max_transfer_context_tokens,
                     )
                 ],
-                budgets.mediator_report_tokens,
+                budgets.max_transfer_context_tokens,
             )
         return text
 

@@ -24,6 +24,7 @@ from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.agents.prompt_context import PlannerPriorContextBundle
+from mediated_coevo.runtime.token_budget import count_text_tokens
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from tests.config_helpers import (
@@ -399,6 +400,7 @@ def _orchestrator(
     orch._released_cross_task_reports_by_task = {}
     orch._staged_cross_task_reports_by_task = {}
     orch._previous_reward_by_task = {}
+    orch._prior_context_by_target = {}
     orch._diffusion_context_by_target = {}
     orch.executor_skill_gate = ExecutorSkillGate(
         config=orch.config,
@@ -669,6 +671,38 @@ async def test_diffusion_context_is_condition_independent_and_priority_routed(
     assert "diffused hint" in bundle.diffusion_context
     assert bundle.cross_task_prior is None
     assert "explicit cross-task report" not in bundle.flatten()
+
+
+def test_prior_context_fit_uses_same_and_transfer_slots(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    orch.config.budgets.max_same_task_prior_tokens = 20
+    orch.config.budgets.max_transfer_context_tokens = 30
+    bundle = PlannerPriorContextBundle(
+        same_task_prior="same task prior " * 200,
+        diffusion_context="diffused transfer " * 200,
+        cross_task_prior="cross task transfer " * 200,
+    )
+
+    fitted = orch._fit_prior_context_bundle(bundle)
+    flattened = fitted.flatten()
+    assert flattened is not None
+
+    model = orch.planner.llm_client.model
+    assert count_text_tokens(model, fitted.same_task_prior or "") <= 20
+    assert count_text_tokens(model, fitted.diffusion_context or "") <= 30
+    assert count_text_tokens(model, flattened) <= 50
+    assert fitted.cross_task_prior is None
+
+    orch._record_prior_context_metrics(
+        task_id="task-A",
+        current_iteration=1,
+        bundle=fitted,
+        flattened=flattened,
+    )
+    metrics = orch._prior_context_by_target[("task-A", 1)]
+    assert metrics["transfer_context_kind"] == "diffusion"
+    assert metrics["max_total_prior_context_tokens"] == 50
+    assert metrics["context_budget_violation"] is True
 
 
 @pytest.mark.asyncio

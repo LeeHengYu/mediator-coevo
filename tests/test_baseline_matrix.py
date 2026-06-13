@@ -425,7 +425,8 @@ def _write_minimal_config(config_dir) -> None:
 
         [budgets]
         max_skill_tokens = 4000
-        max_diffusion_context_tokens = 4000
+        max_same_task_prior_tokens = 300
+        max_transfer_context_tokens = 900
         trace_excerpt_tokens = 6000
         historical_summary_tokens = 3000
         mediator_report_tokens = 4000
@@ -475,7 +476,8 @@ def test_load_config_requires_runtime_settings_from_toml_or_overrides(tmp_path):
 
         [budgets]
         max_skill_tokens = 4000
-        max_diffusion_context_tokens = 4000
+        max_same_task_prior_tokens = 300
+        max_transfer_context_tokens = 900
         trace_excerpt_tokens = 6000
         historical_summary_tokens = 3000
         mediator_report_tokens = 4000
@@ -555,7 +557,7 @@ def test_load_config_requires_budget_settings_from_toml(tmp_path):
         """
     )
 
-    with pytest.raises(ConfigLoadError, match="budgets.max_diffusion_context_tokens"):
+    with pytest.raises(ConfigLoadError, match="budgets.max_same_task_prior_tokens"):
         load_config(config_dir)
 
 
@@ -572,7 +574,8 @@ def test_load_config_requires_diffusion_policy_from_toml_or_overrides(tmp_path):
 
         [budgets]
         max_skill_tokens = 4000
-        max_diffusion_context_tokens = 4000
+        max_same_task_prior_tokens = 300
+        max_transfer_context_tokens = 900
         trace_excerpt_tokens = 6000
         historical_summary_tokens = 3000
         mediator_report_tokens = 4000
@@ -631,7 +634,8 @@ def test_load_config_requires_diffusion_max_artifacts_from_toml_or_overrides(tmp
 
         [budgets]
         max_skill_tokens = 4000
-        max_diffusion_context_tokens = 4000
+        max_same_task_prior_tokens = 300
+        max_transfer_context_tokens = 900
         trace_excerpt_tokens = 6000
         historical_summary_tokens = 3000
         mediator_report_tokens = 4000
@@ -692,7 +696,8 @@ def test_load_config_requires_diffusion_top_k_neighbors_from_toml_or_overrides(
 
         [budgets]
         max_skill_tokens = 4000
-        max_diffusion_context_tokens = 4000
+        max_same_task_prior_tokens = 300
+        max_transfer_context_tokens = 900
         trace_excerpt_tokens = 6000
         historical_summary_tokens = 3000
         mediator_report_tokens = 4000

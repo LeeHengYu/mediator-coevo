@@ -224,7 +224,7 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
         diffusion=diffusion_config(),
     )
     config.budgets.trace_excerpt_tokens = 20
-    config.budgets.historical_summary_tokens = 30
+    config.budgets.max_same_task_prior_tokens = 30
     store = ArtifactStore(base_dir=tmp_path / "artifacts")
 
     class _Compactor:
@@ -264,7 +264,7 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
     assert context is not None
     assert (
         count_text_tokens("test-model", context)
-        <= config.budgets.historical_summary_tokens
+        <= config.budgets.max_same_task_prior_tokens
     )
 
 
@@ -281,7 +281,8 @@ def test_planner_constructed_prompt_fits_budget():
         diffusion=diffusion_config(),
     )
     config.budgets.max_skill_tokens = 30
-    config.budgets.mediator_report_tokens = 30
+    config.budgets.max_same_task_prior_tokens = 10
+    config.budgets.max_transfer_context_tokens = 20
     config.budgets.planner_context_tokens = 500
     planner = PlannerAgent(LLMClient(model="test-model"))
     planner.configure_token_budget(config.budgets, condition_name="learned_mediator")
@@ -321,7 +322,8 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
         diffusion=diffusion_config(),
     )
     config.budgets.max_skill_tokens = 30
-    config.budgets.mediator_report_tokens = 30
+    config.budgets.max_same_task_prior_tokens = 10
+    config.budgets.max_transfer_context_tokens = 20
     config.budgets.planner_context_tokens = 500
     planner = PlannerAgent(LLMClient(model="test-model"))
     planner.configure_token_budget(config.budgets, condition_name="learned_mediator")
