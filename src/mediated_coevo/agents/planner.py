@@ -485,10 +485,7 @@ class PlannerAgent(BaseAgent):
                 )
             sections.extend(
                 section.to_budget_section()
-                for section in PlannerAgent._prior_context_sections(
-                    context,
-                    max_tokens=budgets.max_total_prior_context_tokens,
-                )
+                for section in PlannerAgent._prior_context_sections(context)
             )
             sections.append(
                 PromptSection(
@@ -513,27 +510,10 @@ class PlannerAgent(BaseAgent):
     @staticmethod
     def _prior_context_sections(
         context: dict[str, Any],
-        *,
-        max_tokens: int | None = None,
     ) -> tuple[PromptSection, ...]:
         explicit_sections = context.get("prior_context_sections")
         if explicit_sections:
-            return tuple(
-                section
-                if max_tokens is None
-                else PromptSection(
-                    section.name,
-                    section.kind,
-                    section.content,
-                    required=section.required,
-                    max_tokens=(
-                        section.max_tokens
-                        if section.max_tokens is not None
-                        else max_tokens
-                    ),
-                )
-                for section in explicit_sections
-            )
+            return tuple(explicit_sections)
 
         prior_context = context.get("prior_context")
         if not prior_context:
@@ -543,7 +523,7 @@ class PlannerAgent(BaseAgent):
                 "prior_context",
                 "same_task_prior",
                 PromptText.prior_context(prior_context),
-                max_tokens=max_tokens,
+                required=True,
             ),
         )
 

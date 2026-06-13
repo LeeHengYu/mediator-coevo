@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 
 from mediated_coevo.agents.planner import PlannerAgent
-from mediated_coevo.experiment.conditions import get_prior_context
 from mediated_coevo.core.config import Config
+from mediated_coevo.evolution.compactor import compact_text_for_context
+from mediated_coevo.experiment.conditions import get_prior_context
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
@@ -21,6 +22,24 @@ from mediated_coevo.runtime.token_budget import (
 )
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 from tests.prompt_helpers import assert_contains_all, assert_omits_all, message_text
+
+
+class _RetryingContextCompactor:
+    model = "test-model"
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls: list[dict] = []
+
+    async def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "content": self.responses.pop(0),
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "model": self.model,
+            "raw": {},
+        }
 
 
 def test_token_count_falls_back_when_litellm_counter_fails(monkeypatch):
@@ -83,6 +102,42 @@ def test_token_count_requires_model_for_nonempty_inputs():
 
     with pytest.raises(TokenCountingError):
         count_message_tokens("", [{"role": "user", "content": "abcd"}])
+
+
+@pytest.mark.asyncio
+async def test_context_compactor_retries_without_head_tail_fallback():
+    llm = _RetryingContextCompactor(
+        [
+            '{"headline":"too long","evidence":"' + ("verbose " * 100) + '"}',
+            '{"headline":"still long","evidence":"' + ("verbose " * 100) + '"}',
+            '{"headline":"short","evidence":"ok"}',
+        ]
+    )
+    raw = "START " + ("middle " * 200) + " END"
+
+    compacted = await compact_text_for_context(
+        raw,
+        llm_client=llm,
+        label="test context",
+        model="test-model",
+        budget_tokens=10,
+    )
+
+    assert compacted == "short\nok"
+    assert len(llm.calls) == 3
+    assert all(raw in call["messages"][1]["content"] for call in llm.calls)
+
+
+@pytest.mark.asyncio
+async def test_context_compactor_raises_without_llm_over_budget():
+    with pytest.raises(TokenBudgetExceeded):
+        await compact_text_for_context(
+            "START " + ("middle " * 200) + " END",
+            llm_client=None,
+            label="test context",
+            model="test-model",
+            budget_tokens=10,
+        )
 
 
 def test_fit_text_to_tokens_preserves_head_and_tail():
@@ -211,7 +266,7 @@ async def test_llm_client_raises_when_usage_is_missing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
+async def test_full_trace_prior_context_uses_compactor_for_trace_excerpt(tmp_path):
     config = Config(
         models={
             "planner": "test-planner",
@@ -262,10 +317,8 @@ async def test_full_trace_prior_context_respects_configured_budget(tmp_path):
     )
 
     assert context is not None
-    assert (
-        count_text_tokens("test-model", context)
-        <= config.budgets.max_same_task_prior_tokens
-    )
+    assert "START" in context
+    assert "END" in context
 
 
 def test_planner_constructed_prompt_fits_budget():
@@ -296,7 +349,7 @@ def test_planner_constructed_prompt_fits_budget():
             "action": "plan_task",
             "task_id": "task-A",
             "base_instruction": "Fix the build.",
-            "prior_context": "prior feedback " * 300,
+            "prior_context": "prior feedback",
         }
     )
 
@@ -359,7 +412,7 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
     task_spec = await planner.plan_task(
         task_id="large-skillflow-task",
         base_instruction="START " + ("required issue text " * 5000) + " END",
-        prior_context="prior feedback " * 300,
+        prior_context="prior feedback",
         current_skills=["# executor"],
         iteration=0,
     )

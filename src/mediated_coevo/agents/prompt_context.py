@@ -53,6 +53,7 @@ class PlannerPriorContextBundle:
                     name="same_task_prior",
                     kind="same_task_prior",
                     content=self.same_task_prior,
+                    required=True,
                 )
             )
         if self.diffusion_context:
@@ -61,6 +62,7 @@ class PlannerPriorContextBundle:
                     name="diffusion_context",
                     kind="diffusion_context",
                     content=self.diffusion_context,
+                    required=True,
                 )
             )
         if self.cross_task_prior:
@@ -69,6 +71,7 @@ class PlannerPriorContextBundle:
                     name="cross_task_prior",
                     kind="cross_task_prior",
                     content=self.cross_task_prior,
+                    required=True,
                 )
             )
         return tuple(sections)

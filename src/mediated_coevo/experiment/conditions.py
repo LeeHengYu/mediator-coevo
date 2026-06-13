@@ -121,12 +121,6 @@ async def get_prior_context(
     current_iteration: int | None = None,
 ) -> str | None:
     """Return the prior-context string the planner should receive, or None."""
-    from mediated_coevo.runtime.token_budget import (
-        BudgetSection,
-        fit_text_to_tokens,
-        pack_sections,
-    )
-
     if condition == "no_feedback":
         return None
     if condition == "full_traces":
@@ -143,34 +137,11 @@ async def get_prior_context(
         )
         if not summaries:
             return None
-        text = "\n".join(summaries)
-        if budgets:
-            return pack_sections(
-                model,
-                [
-                    BudgetSection(
-                        "full_traces",
-                        text,
-                        max_tokens=budgets.max_same_task_prior_tokens,
-                    )
-                ],
-                budgets.max_same_task_prior_tokens,
-            )
-        return text
+        return "\n".join(summaries)
     if condition == "shared_notes":
-        if shared_notes and budgets:
-            return fit_text_to_tokens(
-                model, shared_notes, budgets.max_same_task_prior_tokens
-            )
         return shared_notes
     # static_mediator, learned_mediator
     if previous_report and not previous_report.withheld:
-        if budgets:
-            return fit_text_to_tokens(
-                model,
-                previous_report.content,
-                budgets.max_same_task_prior_tokens,
-            )
         return previous_report.content
     return None
 
@@ -189,8 +160,6 @@ async def get_cross_task_prior_context(
     current_iteration: int | None = None,
 ) -> str | None:
     """Return explicitly cross-task prior context for opt-in experiments."""
-    from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
-
     if condition == "full_traces":
         traces = [
             trace
@@ -211,20 +180,7 @@ async def get_cross_task_prior_context(
             budgets=budgets,
             condition_name=condition_name,
         )
-        text = "\n".join(summaries)
-        if budgets:
-            return pack_sections(
-                model,
-                [
-                    BudgetSection(
-                        "cross_task_full_traces",
-                        text,
-                        max_tokens=budgets.max_transfer_context_tokens,
-                    )
-                ],
-                budgets.max_transfer_context_tokens,
-            )
-        return text
+        return "\n".join(summaries)
 
     if condition in MEDIATOR_CONDITIONS:
         reports = [
@@ -239,23 +195,10 @@ async def get_cross_task_prior_context(
         reports.sort(
             key=lambda report: (report.iteration, report.timestamp), reverse=True
         )
-        text = "\n\n".join(
+        return "\n\n".join(
             f"source_task={report.task_id} iter={report.iteration}\n{report.content}"
             for report in reports[:recent]
         )
-        if budgets:
-            return pack_sections(
-                model,
-                [
-                    BudgetSection(
-                        "cross_task_reports",
-                        text,
-                        max_tokens=budgets.max_transfer_context_tokens,
-                    )
-                ],
-                budgets.max_transfer_context_tokens,
-            )
-        return text
 
     return None
 

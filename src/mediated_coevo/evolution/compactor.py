@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 
 from mediated_coevo.models.history_signals import MediatorSignal, PlannerSignal
 from mediated_coevo.prompt_text import PromptText
-from mediated_coevo.runtime.token_budget import count_text_tokens, fit_text_to_tokens
+from mediated_coevo.runtime.token_budget import TokenBudgetExceeded, count_text_tokens
 
 if TYPE_CHECKING:
     from mediated_coevo.llm.client import LLMClient
@@ -58,6 +58,7 @@ DIFF_EXCERPT_TAIL_LINES = 12
 
 COMPACTOR_SYSTEM_PROMPT = PromptText.COMPACTOR_SYSTEM
 CONTEXT_COMPACTOR_SYSTEM_PROMPT = PromptText.CONTEXT_COMPACTOR_SYSTEM
+CONTEXT_COMPACTOR_ATTEMPTS = 3
 
 
 async def compact_text_for_context(
@@ -70,7 +71,7 @@ async def compact_text_for_context(
     completion_tokens: int = 600,
     condition_name: str | None = None,
 ) -> str:
-    """Compact long prompt context with the existing compactor fallback rules."""
+    """Compact long prompt context without hard truncation fallbacks."""
     raw = text.strip()
     if len(raw) <= RAW_PASSTHROUGH_CHARS and (
         budget_tokens is None or count_text_tokens(model, raw) <= budget_tokens
@@ -79,59 +80,73 @@ async def compact_text_for_context(
 
     if llm_client is None:
         if budget_tokens is not None:
-            excerpt = head_tail_text(raw, TARGET_EVIDENCE_CHARS)
-            return fit_text_to_tokens(model, excerpt, budget_tokens)
-        return head_tail_text(raw, TARGET_EVIDENCE_CHARS)
+            raise TokenBudgetExceeded(
+                f"{label} requires compaction but no LLM client is configured"
+            )
+        return raw
 
-    try:
-        from mediated_coevo.core.utils import parse_json_object
+    from mediated_coevo.core.utils import parse_json_object
 
-        prompt_raw = raw
-        prompt_budget = None
-        if budget_tokens is not None:
-            prompt_raw = fit_text_to_tokens(llm_client.model, raw, budget_tokens)
-            prompt_budget = max(1, budget_tokens + 500)
+    last_error: Exception | None = None
+    last_compacted = ""
+    for attempt in range(1, CONTEXT_COMPACTOR_ATTEMPTS + 1):
+        try:
+            response = await llm_client.complete(
+                messages=[
+                    {"role": "system", "content": PromptText.CONTEXT_COMPACTOR_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": PromptText.context_compactor_user(
+                            label=label,
+                            raw_length=len(raw),
+                            prompt_raw=raw,
+                            target_evidence_chars=TARGET_EVIDENCE_CHARS,
+                            target_headline_chars=TARGET_HEADLINE_CHARS,
+                        ),
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=completion_tokens,
+                budget_label="compactor.context",
+                budget_overflow_strategy="none",
+                condition_name=condition_name,
+            )
+            parsed = parse_json_object(str(response.get("content", "")))
+            headline = str(parsed.get("headline", "")).strip()
+            evidence = str(parsed.get("evidence", "")).strip()
+            compacted = "\n".join(part for part in [headline, evidence] if part)
+            if not compacted:
+                raise ValueError("compactor returned empty content")
+            last_compacted = compacted
+            compacted_tokens = count_text_tokens(model, compacted)
+            if budget_tokens is None or compacted_tokens <= budget_tokens:
+                return compacted
+            last_error = TokenBudgetExceeded(
+                f"{label} compaction attempt {attempt} used "
+                f"{compacted_tokens} tokens, budget={budget_tokens}"
+            )
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "Context compaction attempt %s/%s failed for %s: %s",
+                attempt,
+                CONTEXT_COMPACTOR_ATTEMPTS,
+                label,
+                e,
+            )
 
-        response = await llm_client.complete(
-            messages=[
-                {"role": "system", "content": PromptText.CONTEXT_COMPACTOR_SYSTEM},
-                {
-                    "role": "user",
-                    "content": PromptText.context_compactor_user(
-                        label=label,
-                        raw_length=len(raw),
-                        prompt_raw=prompt_raw,
-                        target_evidence_chars=TARGET_EVIDENCE_CHARS,
-                        target_headline_chars=TARGET_HEADLINE_CHARS,
-                    ),
-                },
-            ],
-            temperature=0.0,
-            max_tokens=completion_tokens,
-            budget_label="compactor.context",
-            prompt_budget=prompt_budget,
-            budget_overflow_strategy="head_tail",
-            condition_name=condition_name,
-        )
-        parsed = parse_json_object(str(response.get("content", "")))
-        headline = str(parsed.get("headline", "")).strip()
-        evidence = str(parsed.get("evidence", "")).strip()
-        compacted = "\n".join(part for part in [headline, evidence] if part)
-        if compacted:
-            if budget_tokens is not None:
-                return fit_text_to_tokens(model, compacted, budget_tokens)
-            return compacted
-    except Exception as e:
+    if last_compacted:
         logger.warning(
-            "Context compaction LLM call failed for %s (%s); using fallback excerpt.",
+            "Context compaction for %s remained over budget after %s attempts; "
+            "returning the last compacted output without fallback truncation.",
             label,
-            e,
+            CONTEXT_COMPACTOR_ATTEMPTS,
         )
+        return last_compacted
 
-    if budget_tokens is not None:
-        excerpt = head_tail_text(raw, TARGET_EVIDENCE_CHARS)
-        return fit_text_to_tokens(model, excerpt, budget_tokens)
-    return head_tail_text(raw, TARGET_EVIDENCE_CHARS)
+    raise TokenBudgetExceeded(
+        f"{label} compaction failed after {CONTEXT_COMPACTOR_ATTEMPTS} attempts"
+    ) from last_error
 
 
 def deterministic_mediator_signal(

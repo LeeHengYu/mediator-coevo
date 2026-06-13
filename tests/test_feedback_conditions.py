@@ -24,7 +24,7 @@ from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.agents.prompt_context import PlannerPriorContextBundle
-from mediated_coevo.runtime.token_budget import count_text_tokens
+from mediated_coevo.runtime.token_budget import TokenBudgetExceeded, count_text_tokens
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from tests.config_helpers import (
@@ -673,8 +673,10 @@ async def test_diffusion_context_is_condition_independent_and_priority_routed(
     assert "explicit cross-task report" not in bundle.flatten()
 
 
-def test_prior_context_fit_uses_same_and_transfer_slots(tmp_path):
-    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+@pytest.mark.asyncio
+async def test_prior_context_fit_uses_same_and_transfer_slots(tmp_path):
+    llm = _LLMCompactor(content='{"headline":"compact","evidence":"context"}')
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator", llm_client=llm)
     orch.config.budgets.max_same_task_prior_tokens = 20
     orch.config.budgets.max_transfer_context_tokens = 30
     bundle = PlannerPriorContextBundle(
@@ -683,14 +685,13 @@ def test_prior_context_fit_uses_same_and_transfer_slots(tmp_path):
         cross_task_prior="cross task transfer " * 200,
     )
 
-    fitted = orch._fit_prior_context_bundle(bundle)
+    fitted = await orch._fit_prior_context_bundle(bundle)
     flattened = fitted.flatten()
     assert flattened is not None
 
     model = orch.planner.llm_client.model
     assert count_text_tokens(model, fitted.same_task_prior or "") <= 20
     assert count_text_tokens(model, fitted.diffusion_context or "") <= 30
-    assert count_text_tokens(model, flattened) <= 50
     assert fitted.cross_task_prior is None
 
     orch._record_prior_context_metrics(
@@ -703,6 +704,7 @@ def test_prior_context_fit_uses_same_and_transfer_slots(tmp_path):
     assert metrics["transfer_context_kind"] == "diffusion"
     assert metrics["max_total_prior_context_tokens"] == 50
     assert metrics["context_budget_violation"] is True
+    assert len(llm.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1450,7 +1452,7 @@ async def test_short_trace_stderr_does_not_call_llm_compactor(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_long_trace_stderr_falls_back_when_llm_compactor_fails(tmp_path):
+async def test_long_trace_stderr_raises_when_llm_compactor_fails(tmp_path):
     llm = _LLMCompactor(content="", raise_exc=RuntimeError("llm unavailable"))
     orch, _, _ = _orchestrator(tmp_path, "full_traces", llm_client=llm)
     orch.artifact_store.store_trace(
@@ -1463,17 +1465,14 @@ async def test_long_trace_stderr_falls_back_when_llm_compactor_fails(tmp_path):
         )
     )
 
-    context = await orch._build_prior_context(
-        "full_traces",
-        "task-A",
-        current_iteration=1,
-    )
+    with pytest.raises(TokenBudgetExceeded):
+        await orch._build_prior_context(
+            "full_traces",
+            "task-A",
+            current_iteration=1,
+        )
 
-    assert context is not None
-    assert "START-" in context
-    assert "-END" in context
-    assert "\n...\n" in context or "\n…\n" in context
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 3
 
 
 def test_condition_assignment_and_cli_validation_reject_unknown_names():

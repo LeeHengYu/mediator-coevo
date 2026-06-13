@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -30,6 +31,7 @@ AVOID_RECHECK_WARNING = (
     "re-check failure modes; do not copy failed choices."
 )
 DiffusionArtifactCompactor = Callable[[DiffusionArtifact, int], Awaitable[str]]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -258,9 +260,17 @@ async def _compacted_artifact_section(
     )
     if content_budget <= 0:
         return None
-    compacted_content = (
-        await compact_artifact_content(subscription.artifact, content_budget)
-    ).strip()
+    try:
+        compacted_content = (
+            await compact_artifact_content(subscription.artifact, content_budget)
+        ).strip()
+    except Exception as e:
+        logger.warning(
+            "Diffusion artifact compaction failed for %s: %s",
+            subscription.artifact.artifact_id,
+            e,
+        )
+        return None
     if not compacted_content:
         return None
     return _render_artifact_block(
