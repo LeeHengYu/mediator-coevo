@@ -1,0 +1,134 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/write_formulas.py → b/write_formulas.py
+@@ -0,0 +1,68 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++src = '/root/data/workbook.xlsx'
++out = '/root/output/result.xlsx'
++
++wb = load_workbook(src, data_only=False, keep_vba=False)
++ws = wb['Task']
++wd = wb['Data']
++
++# Actual inspected axes in Data sheet:
++# - series codes are in column D, rows 21:38
++# - year headers are in row 4, columns H:L
++# - numeric data are in H21:L38
++series_range = 'Data!$D$21:$D$38'
++header_range = 'Data!$H$4:$L$4'
++data_range = 'Data!$H$21:$L$38'
++
++print('Writing lookup formulas with axes:')
++print('  data_range  =', data_range)
++print('  series_range=', series_range)
++print('  header_range=', header_range)
++
++# Step 1: lookup formulas in the three source blocks.
++for start, end in [(12, 17), (19, 24), (26, 31)]:
++    for r in range(start, end + 1):
++        for c in range(8, 13):  # H:L
++            col = get_column_letter(c)
++            ws.cell(r, c).value = (
++                f'=INDEX({data_range}, MATCH($D{r}, {series_range}, 0), '
++                f'MATCH({col}$10, {header_range}, 0))'
++            )
++
++# Step 2: net budget buffer formulas, preserving the department row order:
++# rows 35:40 mirror rows 12:17 / 19:24 / 26:31.
++# Committed Funding = rows 12:17, Operating Spend = rows 19:24,
++# Approved Budget Base = rows 26:31.
++for out_r in range(35, 41):
++    committed_r = 12 + (out_r - 35)
++    operating_r = 19 + (out_r - 35)
++    budget_r = 26 + (out_r - 35)
++    for c in range(8, 13):
++        col = get_column_letter(c)
++        ws.cell(out_r, c).value = f'=({col}{committed_r}-{col}{operating_r})/{col}{budget_r}*100'
++
++# Step 3: summary statistics; label order on Task is:
++# 42 Minimum, 43 Maximum, 44 Median, 45 Simple mean,
++# 46 25th percentile, 47 75th percentile.
++summary_templates = {
++    42: '=MIN({col}35:{col}40)',
++    43: '=MAX({col}35:{col}40)',
++    44: '=MEDIAN({col}35:{col}40)',
++    45: '=AVERAGE({col}35:{col}40)',
++    46: '=PERCENTILE({col}35:{col}40, 0.25)',
++    47: '=PERCENTILE({col}35:{col}40, 0.75)',
++}
++for r, tmpl in summary_templates.items():
++    for c in range(8, 13):
++        col = get_column_letter(c)
++        ws.cell(r, c).value = tmpl.format(col=col)
++
++# Step 4: weighted mean using Approved Budget Base rows 26:31 as weights.
++for c in range(8, 13):
++    col = get_column_letter(c)
++    ws.cell(50, c).value = f'=SUMPRODUCT({col}35:{col}40, {col}26:{col}31) / SUM({col}26:{col}31)'
++
++wb.save(out)
++print('Saved', out)
+  ┊ review diff
+a/verify_result.py → b/verify_result.py
+@@ -0,0 +1,57 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/output/result.xlsx'
++wb = load_workbook(path, data_only=False, keep_vba=False)
++ws = wb['Task']
++
++ranges = [
++    ('lookup block 1', range(12,18), range(8,13)),
++    ('lookup block 2', range(19,25), range(8,13)),
++    ('lookup block 3', range(26,32), range(8,13)),
++    ('net budget buffer', range(35,41), range(8,13)),
++    ('summary stats', range(42,48), range(8,13)),
++    ('weighted mean', range(50,51), range(8,13)),
++]
++
++errors = []
++count = 0
++print('Formula-bearing cells in /root/output/result.xlsx')
++for label, rows, cols in ranges:
++    print('\n[' + label + ']')
++    for r in rows:
++        for c in cols:
++            cell = ws.cell(r, c)
++            val = cell.value
++            count += 1
++            print(f'{cell.coordinate}: {val!r}')
++            if val is None or val == '':
++                errors.append(f'{cell.coordinate} is empty')
++            elif not isinstance(val, str) or not val.startswith('='):
++                errors.append(f'{cell.coordinate} is not a formula string: {val!r}')
++
++# Explicit spot checks for reference shape.
++spot_expectations = {
++    'H12': '=INDEX(Data!$H$21:$L$38, MATCH($D12, Data!$D$21:$D$38, 0), MATCH(H$10, Data!$H$4:$L$4, 0))',
++    'L31': '=INDEX(Data!$H$21:$L$38, MATCH($D31, Data!$D$21:$D$38, 0), MATCH(L$10, Data!$H$4:$L$4, 0))',
++    'H35': '=(H12-H19)/H26*100',
++    'L40': '=(L17-L24)/L31*100',
++    'H42': '=MIN(H35:H40)',
++    'L47': '=PERCENTILE(L35:L40, 0.75)',
++    'H50': '=SUMPRODUCT(H35:H40, H26:H31) / SUM(H26:H31)',
++    'L50': '=SUMPRODUCT(L35:L40, L26:L31) / SUM(L26:L31)',
++}
++print('\n[spot checks]')
++for coord, expected in spot_expectations.items():
++    actual = ws[coord].value
++    print(f'{coord}: actual={actual!r} expected={expected!r}')
++    if actual != expected:
++        errors.append(f'{coord} mismatch')
++
++print(f'\nChecked {count} formula cells.')
++if errors:
++    print('ERRORS:')
++    for e in errors:
++        print('-', e)
++    raise SystemExit(1)
++print('Verification OK: every specified cell is a non-empty formula string and spot checks match.')
+
+session_id: 20260613_154542_50b7d8

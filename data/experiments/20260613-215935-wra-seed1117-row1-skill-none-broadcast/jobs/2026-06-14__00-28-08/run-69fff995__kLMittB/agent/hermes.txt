@@ -1,0 +1,200 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_workbook.py → b/inspect_workbook.py
+@@ -0,0 +1,89 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++from copy import copy
++
++path = '/root/data/workbook.xlsx'
++wb = load_workbook(path, data_only=False)
++print('Sheet names:', wb.sheetnames)
++
++def row_values(ws, row, start_col, end_col):
++    return [ws.cell(row=row, column=c).value for c in range(start_col, end_col+1)]
++
++def print_rows(ws, start_row, end_row, start_col, end_col, title):
++    print('\n' + title)
++    header = ['row'] + [get_column_letter(c) for c in range(start_col, end_col+1)]
++    print(header)
++    for r in range(start_row, end_row+1):
++        print([r] + row_values(ws, r, start_col, end_col))
++
++def print_col(ws, col, start_row, end_row, title):
++    print('\n' + title)
++    print(['row', get_column_letter(col)])
++    for r in range(start_row, end_row+1):
++        print([r, ws.cell(r, col).value])
++
++def merged_owner(ws, row, col):
++    coord = ws.cell(row, col).coordinate
++    for rng in ws.merged_cells.ranges:
++        if coord in rng:
++            return str(rng), ws.cell(rng.min_row, rng.min_col).coordinate
++    return None, coord
++
++def fill_sig(cell):
++    f = cell.fill
++    if f is None:
++        return None
++    return {
++        'type': f.fill_type,
++        'fg': f.fgColor.rgb or f.fgColor.indexed or f.fgColor.theme or f.fgColor.type,
++        'bg': f.bgColor.rgb or f.bgColor.indexed or f.bgColor.theme or f.bgColor.type,
++    }
++
++def print_merge_fill(ws, range_string):
++    print('\nMerge/fill pattern', range_string)
++    min_col = ws[range_string][0][0].column
++    max_col = ws[range_string][0][-1].column
++    min_row = ws[range_string][0][0].row
++    max_row = ws[range_string][-1][0].row
++    relevant = [str(r) for r in ws.merged_cells.ranges if not (r.max_row < min_row or r.min_row > max_row or r.max_col < min_col or r.min_col > max_col)]
++    print('merged ranges intersecting:', relevant)
++    print(['cell','value','merged_range','owner','fill'])
++    for r in range(min_row, max_row+1):
++        for c in range(min_col, max_col+1):
++            cell = ws.cell(r,c)
++            mr, owner = merged_owner(ws,r,c)
++            print([cell.coordinate, cell.value, mr, owner, fill_sig(cell)])
++
++task = wb['Task']
++data = wb['Data']
++print_rows(task, 10, 11, 1, 12, 'Task rows 10-11 A:L')
++print_col(task, 4, 12, 31, 'Task column D rows 12-31 series codes')
++print_rows(task, 35, 50, 1, 7, 'Task rows 35-50 columns A-G labels/structure')
++for rng in ['H12:L17', 'H19:L24', 'H26:L31', 'H35:L47', 'H50:L50']:
++    print_merge_fill(task, rng)
++print_rows(data, 19, 40, 1, data.max_column, 'Data rows 19-40 all used columns')
++
++# Determine likely geometry programmatically from rows 19-40.
++print('\nData dimensions:', data.max_row, data.max_column)
++for r in range(19, 41):
++    vals = row_values(data, r, 1, data.max_column)
++    nonempty = [(get_column_letter(i+1), v) for i, v in enumerate(vals) if v is not None]
++    print('Nonempty row', r, nonempty)
++
++# Find header row with years and data rows with series code-like values.
++for r in range(19, 41):
++    years = []
++    for c in range(1, data.max_column+1):
++        v = data.cell(r,c).value
++        if isinstance(v, int) and 1900 <= v <= 2100:
+… omitted 11 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/write_result.py → b/write_result.py
+@@ -0,0 +1,54 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++input_path = '/root/data/workbook.xlsx'
++output_path = '/root/output/result.xlsx'
++wb = load_workbook(input_path, data_only=False)
++ws = wb['Task']
++
++# Confirmed Data geometry:
++# Header row is Data!B4:L4 (year headers in H4:L4).
++# Series codes are in Data!D21:D38.
++# Data block rows are 21:38, columns D:L so INDEX row/col MATCHes align with series and year lookup vectors.
++data_range = 'Data!$D$21:$L$38'
++series_range = 'Data!$D$21:$D$38'
++year_range = 'Data!$D$4:$L$4'
++
++# Lookup formulas: Task blocks are verified by labels as
++# 12:17 Renewable Generation, 19:24 Grid Consumption, 26:31 Baseline Energy Demand.
++for r1, r2 in [(12, 17), (19, 24), (26, 31)]:
++    for r in range(r1, r2 + 1):
++        for c in range(8, 13):  # H:L
++            col = get_column_letter(c)
++            ws.cell(r, c).value = f'=INDEX({data_range},MATCH($D{r},{series_range},0),MATCH({col}$10,{year_range},0))'
++
++# Net Renewable Balance: (Renewable Generation - Grid Consumption) / Baseline Energy Demand * 100.
++for i, r in enumerate(range(35, 41)):
++    ren_r = 12 + i
++    grid_r = 19 + i
++    base_r = 26 + i
++    for c in range(8, 13):
++        col = get_column_letter(c)
++        ws.cell(r, c).value = f'=({col}{ren_r}-{col}{grid_r})/{col}{base_r}*100'
++
++# Summary statistics, matched to row labels E42:E47.
++summary_formulas = {
++    42: 'MIN',
++    43: 'MAX',
++    44: 'MEDIAN',
++    45: 'AVERAGE',
++}
++for c in range(8, 13):
++    col = get_column_letter(c)
++    for r, func in summary_formulas.items():
++        ws.cell(r, c).value = f'={func}({col}$35:{col}$40)'
++    ws.cell(46, c).value = f'=PERCENTILE({col}$35:{col}$40,0.25)'
++    ws.cell(47, c).value = f'=PERCENTILE({col}$35:{col}$40,0.75)'
++
++# Weighted mean of Net Renewable Balance using Baseline Energy Demand weights.
++for c in range(8, 13):
++    col = get_column_letter(c)
++    ws.cell(50, c).value = f'=SUMPRODUCT({col}$35:{col}$40,{col}$26:{col}$31)/SUM({col}$26:{col}$31)'
++
++wb.save(output_path)
++print('Saved', output_path)
+  ┊ review diff
+a/verify_result.py → b/verify_result.py
+@@ -0,0 +1,55 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/output/result.xlsx'
++wb = load_workbook(path, data_only=False)
++ws = wb['Task']
++
++ranges = ['H12:L17', 'H19:L24', 'H26:L31', 'H35:L40', 'H42:L47', 'H50:L50']
++all_ok = True
++print('Verifying formulas in', path)
++for rng in ranges:
++    print('\nRange', rng)
++    for row in ws[rng]:
++        vals = []
++        for cell in row:
++            vals.append(f'{cell.coordinate}: {cell.value}')
++            if not (isinstance(cell.value, str) and cell.value.startswith('=')):
++                all_ok = False
++                print('MISSING_OR_NONFORMULA', cell.coordinate, repr(cell.value))
++        print(' | '.join(vals))
++
++print('\nSpot checks')
++spots = ['H12','L17','H19','L24','H26','L31','H35','L40','H42','L47','H50','L50']
++for coord in spots:
++    print(coord, ws[coord].value)
++
++expected_substrings = {
++    'H12': ['Data!$D$21:$L$38','MATCH($D12','Data!$D$21:$D$38','MATCH(H$10','Data!$D$4:$L$4'],
++    'L31': ['Data!$D$21:$L$38','MATCH($D31','MATCH(L$10'],
++    'H35': ['H12-H19','/H26*100'],
++    'L40': ['L17-L24','/L31*100'],
++    'H42': ['MIN(H$35:H$40)'],
++    'H43': ['MAX(H$35:H$40)'],
++    'H44': ['MEDIAN(H$35:H$40)'],
++    'H45': ['AVERAGE(H$35:H$40)'],
++    'H46': ['PERCENTILE(H$35:H$40,0.25)'],
++    'H47': ['PERCENTILE(H$35:H$40,0.75)'],
++    'H50': ['SUMPRODUCT(H$35:H$40,H$26:H$31)/SUM(H$26:H$31)'],
++}
++for coord, parts in expected_substrings.items():
++    formula = ws[coord].value or ''
++    compact = formula.replace(' ', '')
++    for part in parts:
++        if part.replace(' ', '') not in compact:
++            all_ok = False
++            print('SPOTCHECK_FAILED', coord, 'missing', part, 'in', formula)
++
++# Also check that workbook still only contains original sheets.
++print('\nSheet names:', wb.sheetnames)
++if wb.sheetnames != ['Task', 'Data']:
++    all_ok = False
++    print('UNEXPECTED_SHEETS', wb.sheetnames)
++
++print('\nVERIFICATION', 'OK' if all_ok else 'FAILED')
++raise SystemExit(0 if all_ok else 1)
+
+session_id: 20260613_163223_e28448

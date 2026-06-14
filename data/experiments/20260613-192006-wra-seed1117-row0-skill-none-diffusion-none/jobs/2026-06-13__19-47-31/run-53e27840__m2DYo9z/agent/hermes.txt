@@ -1,0 +1,197 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_workbook.py → b/inspect_workbook.py
+@@ -0,0 +1,78 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/data/workbook.xlsx'
++wb = load_workbook(path, data_only=False)
++print('Workbook:', path)
++print('Sheet names:', wb.sheetnames)
++print('Has Task:', 'Task' in wb.sheetnames)
++print('Has Data:', 'Data' in wb.sheetnames)
++
++ws = wb['Task']
++print('\nTask! row 10 H:L year headers:')
++for col in range(8, 13):
++    print(f'  {get_column_letter(col)}10 = {ws.cell(10, col).value!r}')
++
++for start, end, name in [(12,17,'block 1 rows 12-17'), (19,24,'block 2 rows 19-24'), (26,31,'block 3 rows 26-31')]:
++    print(f'\nTask! column D {name}:')
++    for row in range(start, end+1):
++        nearby = {get_column_letter(c): ws.cell(row, c).value for c in range(1, 8)}
++        yellow = [ws.cell(row, col).value for col in range(8, 13)]
++        print(f'  row {row}: D={ws.cell(row,4).value!r}; A:G={nearby}; H:L={yellow}')
++
++print('\nTask! yellow cell ranges emptiness H12:L17, H19:L24, H26:L31:')
++for start, end, rng_name in [(12,17,'H12:L17'), (19,24,'H19:L24'), (26,31,'H26:L31')]:
++    nonempty = []
++    for row in range(start, end+1):
++        vals = []
++        for col in range(8, 13):
++            val = ws.cell(row, col).value
++            vals.append(val)
++            if val is not None:
++                nonempty.append(f'{get_column_letter(col)}{row}={val!r}')
++        print(f'  row {row} {get_column_letter(8)}:{get_column_letter(12)} = {vals}')
++    print(f'  {rng_name} nonempty count = {len(nonempty)}; entries = {nonempty}')
++
++for start, end, label in [(35,40,'Net reliability gap region rows'), (42,47,'Stats rows')]:
++    print(f'\nTask! rows {start}-{end} ({label}) A:L:')
++    for row in range(start, end+1):
++        vals = [ws.cell(row, col).value for col in range(1, 13)]
++        print(f'  row {row}: {vals}')
++
++print('\nTask! row 50 (weighted mean row) A:L:')
++print([ws.cell(50, col).value for col in range(1, 13)])
++
++ds = wb['Data']
++print('\nData! dimensions:', ds.max_row, ds.max_column)
++print('Data! rows 19-38 (A through used max column or Z, whichever larger needed for context):')
++max_col = max(ds.max_column, 26)
++for row in range(19, 39):
++    vals = [ds.cell(row, col).value for col in range(1, max_col+1)]
++    # trim trailing None for readability
++    while vals and vals[-1] is None:
++        vals.pop()
++    print(f'  row {row}: {vals}')
++
++# Heuristic layout identification for Data rows 21-38
++print('\nData layout heuristic:')
++for col in range(1, min(ds.max_column, 10)+1):
++    vals = [ds.cell(row, col).value for row in range(21, 39)]
++    nonempty = [v for v in vals if v is not None]
++    print(f'  Col {get_column_letter(col)} rows21-38 nonempty {len(nonempty)} sample={nonempty[:8]}')
++for row in range(1, 22):
++    vals = [ds.cell(row, col).value for col in range(1, ds.max_column+1)]
++    years = [v for v in vals if isinstance(v, int) and 1900 <= v <= 2100]
++    if years:
++        print(f'  possible year header row {row}: years={years}; row values={vals}')
++
++# Explicitly identify likely series column and year header row
++series_candidates = []
++for col in range(1, ds.max_column+1):
++    vals = [ds.cell(row, col).value for row in range(21, 39)]
++    nonempty = [v for v in vals if v not in (None, '')]
++    if len(nonempty) >= 10:
++        # codes often textual and repeated from Task col D
++        series_candidates.append((col, get_column_letter(col), nonempty[:5]))
++print('  likely series/data columns with many nonempty values in rows 21-38:', series_candidates)
++
++wb.close()
+  ┊ review diff
+a/populate_workbook.py → b/populate_workbook.py
+@@ -0,0 +1,66 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++src = '/root/data/workbook.xlsx'
++out = '/root/output/result.xlsx'
++
++wb = load_workbook(src, data_only=False)
++original_sheets = list(wb.sheetnames)
++ws = wb['Task']
++
++# Data sheet layout identified by inspection:
++# - series codes in Data!D21:D38
++# - year headers in Data!H4:L4
++# - values in Data!H21:L38
++series_range = "Data!$D$21:$D$38"
++year_range = "Data!$H$4:$L$4"
++value_range = "Data!$H$21:$L$38"
++
++# Populate lookup formulas in the three metric blocks.
++for start, end in [(12, 17), (19, 24), (26, 31)]:
++    for row in range(start, end + 1):
++        for col in range(8, 13):  # H:L
++            col_letter = get_column_letter(col)
++            ws.cell(row, col).value = (
++                f'=INDEX({value_range},'
++                f'MATCH($D{row},{series_range},0),'
++                f'MATCH({col_letter}$10,{year_range},0))'
++            )
++
++# Net reliability gap formulas in H35:L40.
++# Region rows map in order: rows 35-40 -> data block offsets 12-17, 19-24, 26-31.
++for offset, row in enumerate(range(35, 41)):
++    success_row = 12 + offset
++    fail_row = 19 + offset
++    cap_row = 26 + offset
++    for col in range(8, 13):
++        col_letter = get_column_letter(col)
++        ws.cell(row, col).value = f'=({col_letter}{success_row}-{col_letter}{fail_row})/{col_letter}{cap_row}*100'
++
++# Summary statistics in H42:L47 using labels observed in Task!E42:E47.
++stat_formula_templates = {
++    42: '=MIN({col}35:{col}40)',
++    43: '=MAX({col}35:{col}40)',
++    44: '=MEDIAN({col}35:{col}40)',
++    45: '=AVERAGE({col}35:{col}40)',
++    46: '=PERCENTILE.INC({col}35:{col}40,0.25)',
++    47: '=PERCENTILE.INC({col}35:{col}40,0.75)',
++}
++for row, template in stat_formula_templates.items():
++    for col in range(8, 13):
++        col_letter = get_column_letter(col)
++        ws.cell(row, col).value = template.format(col=col_letter)
++
++# Weighted mean row in H50:L50, weights are Compute Capacity H26:H31 etc.
++for col in range(8, 13):
++    col_letter = get_column_letter(col)
++    ws.cell(50, col).value = f'=SUMPRODUCT({col_letter}35:{col_letter}40,{col_letter}26:{col_letter}31)/SUM({col_letter}26:{col_letter}31)'
++
++# Guard against accidental sheet additions/removals.
++assert list(wb.sheetnames) == original_sheets, (original_sheets, wb.sheetnames)
++
++wb.save(out)
++wb.close()
++print(f'Saved {out}')
++print('Sheets preserved:', original_sheets)
++print('Formula ranges populated: H12:L17, H19:L24, H26:L31, H35:L40, H42:L47, H50:L50')
+  ┊ review diff
+a/validate_workbook.py → b/validate_workbook.py
+@@ -0,0 +1,41 @@
++from openpyxl import load_workbook
++
++src = '/root/data/workbook.xlsx'
++out = '/root/output/result.xlsx'
++orig = load_workbook(src, data_only=False)
++orig_sheets = list(orig.sheetnames)
++orig.close()
++
++wb = load_workbook(out, data_only=False)
++print('Validated workbook:', out)
++print('Original sheets:', orig_sheets)
++print('Result sheets:', wb.sheetnames)
++print('No new sheets added:', wb.sheetnames == orig_sheets)
++print('Workbook has exactly original sheets:', set(wb.sheetnames) == set(orig_sheets) and len(wb.sheetnames) == len(orig_sheets))
++
++ws = wb['Task']
++check_cells = ['H12', 'L17', 'H19', 'L24', 'H26', 'L31', 'H35', 'L40', 'H42', 'L47', 'H50', 'L50']
++all_formulas = True
++print('\nRequired validation cell contents:')
++for coord in check_cells:
++    val = ws[coord].value
++    starts = isinstance(val, str) and val.startswith('=')
++    all_formulas = all_formulas and starts
++    print(f'  {coord}: {val!r}; starts_with_equal={starts}')
++print('\nAll listed cells contain formula strings starting with =:', all_formulas)
++
++# Additional count checks for formula coverage.
++ranges = [(12,17), (19,24), (26,31), (35,40), (42,47), (50,50)]
++missing = []
++for start, end in ranges:
++    for row in range(start, end+1):
++        for col in range(8, 13):
++            val = ws.cell(row, col).value
++            if not (isinstance(val, str) and val.startswith('=')):
++                missing.append(ws.cell(row, col).coordinate)
++print('Formula cells checked across all target ranges:', sum((end-start+1)*5 for start,end in ranges))
++print('Missing/non-formula target cells:', missing)
++
++wb.close()
++if wb.sheetnames != orig_sheets or not all_formulas or missing:
++    raise SystemExit(1)
+
+session_id: 20260613_115011_b2ea33

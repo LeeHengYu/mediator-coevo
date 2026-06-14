@@ -1,0 +1,167 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve_workbook.py → b/solve_workbook.py
+@@ -0,0 +1,87 @@
++import os
++from statistics import median
++import openpyxl
++
++INPUT = '/root/data/workbook.xlsx'
++OUTPUT = '/root/output/result.xlsx'
++
++
++def percentile_linear(values, percent):
++    """Match numpy.percentile default / Excel PERCENTILE.INC interpolation."""
++    xs = sorted(values)
++    if len(xs) == 1:
++        return xs[0]
++    pos = (len(xs) - 1) * (percent / 100.0)
++    lo = int(pos)
++    hi = min(lo + 1, len(xs) - 1)
++    frac = pos - lo
++    return xs[lo] * (1 - frac) + xs[hi] * frac
++
++
++wb = openpyxl.load_workbook(INPUT)
++task = wb['Task']
++data = wb['Data']
++
++# Data layout: row 4 has years in H:L, column D has series codes, values rows 21:38.
++year_to_col = {}
++for c in range(8, 13):
++    year_to_col[data.cell(4, c).value] = c
++
++data_lookup = {}
++for r in range(21, 39):
++    series_code = data.cell(r, 4).value
++    if not series_code:
++        continue
++    for year, c in year_to_col.items():
++        data_lookup[(series_code, year)] = data.cell(r, c).value
++
++# Step 1: populate source lookup values in H12:L17, H19:L24, H26:L31.
++source_rows = list(range(12, 18)) + list(range(19, 25)) + list(range(26, 32))
++for r in source_rows:
++    code = task.cell(r, 4).value
++    for c in range(8, 13):
++        year = task.cell(10, c).value
++        value = data_lookup[(code, year)]
++        task.cell(r, c).value = value
++
++# Step 2: net patient flow values H35:L40.
++for i, r in enumerate(range(35, 41)):
++    admits_row = 12 + i
++    discharges_row = 19 + i
++    beds_row = 26 + i
++    for c in range(8, 13):
++        admits = task.cell(admits_row, c).value
++        discharges = task.cell(discharges_row, c).value
++        beds = task.cell(beds_row, c).value
++        task.cell(r, c).value = (admits - discharges) / beds * 100
++
++# Step 2 summary statistics H42:L47.
++for c in range(8, 13):
++    vals = [task.cell(r, c).value for r in range(35, 41)]
++    label_to_value = {
++        'Minimum': min(vals),
++        'Maximum': max(vals),
++        'Median': median(vals),
++        'Simple mean': sum(vals) / len(vals),
++        '25th percentile': percentile_linear(vals, 25),
++        '75th percentile': percentile_linear(vals, 75),
++    }
++    for r in range(42, 48):
++        label = task.cell(r, 5).value
++        task.cell(r, c).value = label_to_value[label]
++
++# Step 3: weighted mean H50:L50.
++for c in range(8, 13):
++    vals = [task.cell(r, c).value for r in range(35, 41)]
++    weights = [task.cell(r, c).value for r in range(26, 32)]
++    task.cell(50, c).value = sum(v * w for v, w in zip(vals, weights)) / sum(weights)
++
+… omitted 9 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/solve_workbook.py → b/solve_workbook.py
+@@ -1,9 +1,21 @@
+ import os
++import zipfile
++import shutil
++import tempfile
++import xml.etree.ElementTree as ET
+ from statistics import median
++from openpyxl.utils import get_column_letter
+ import openpyxl
+ 
+ INPUT = '/root/data/workbook.xlsx'
+ OUTPUT = '/root/output/result.xlsx'
++TMP_FORMULA = '/root/output/result_formulas_tmp.xlsx'
++
++NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
++NS_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
++NS_PKG_REL = 'http://schemas.openxmlformats.org/package/2006/relationships'
++ET.register_namespace('', NS_MAIN)
++ET.register_namespace('r', NS_REL)
+ 
+ 
+ def percentile_linear(values, percent):
+@@ -18,15 +30,33 @@
+     return xs[lo] * (1 - frac) + xs[hi] * frac
+ 
+ 
++def q(tag, ns=NS_MAIN):
++    return f'{{{ns}}}{tag}'
++
++
++def get_sheet_xml_path(xlsx_path, sheet_name):
++    with zipfile.ZipFile(xlsx_path, 'r') as zf:
++        wb_root = ET.fromstring(zf.read('xl/workbook.xml'))
++        rels_root = ET.fromstring(zf.read('xl/_rels/workbook.xml.rels'))
++    rid_to_target = {}
++    for rel in rels_root.findall(f'{{{NS_PKG_REL}}}Relationship'):
++        rid_to_target[rel.attrib['Id']] = rel.attrib['Target']
++    for sheet in wb_root.find(q('sheets')).findall(q('sheet')):
++        if sheet.attrib['name'] == sheet_name:
++            rid = sheet.attrib[f'{{{NS_REL}}}id']
++            target = rid_to_target[rid]
++            if target.startswith('/'):
++                return target.lstrip('/')
++            return 'xl/' + target.lstrip('/')
++    raise KeyError(sheet_name)
++
++
+ wb = openpyxl.load_workbook(INPUT)
+ task = wb['Task']
+ data = wb['Data']
+ 
+ # Data layout: row 4 has years in H:L, column D has series codes, values rows 21:38.
+-year_to_col = {}
+-for c in range(8, 13):
+-    year_to_col[data.cell(4, c).value] = c
+-
++year_to_col = {data.cell(4, c).value: c for c in range(8, 13)}
+ data_lookup = {}
+ for r in range(21, 39):
+     series_code = data.cell(r, 4).value
+@@ -35,30 +65,49 @@
+     for year, c in year_to_col.items():
+         data_lookup[(series_code, year)] = data.cell(r, c).value
+ 
+-# Step 1: populate source lookup values in H12:L17, H19:L24, H26:L31.
++cached_values = {}
++
++# Step 1: source lookup values in H12:L17, H19:L24, H26:L31.
+ source_rows = list(range(12, 18)) + list(range(19, 25)) + list(range(26, 32))
+ for r in source_rows:
+     code = task.cell(r, 4).value
+     for c in range(8, 13):
++        col = get_column_letter(c)
+         year = task.cell(10, c).value
+         value = data_lookup[(code, year)]
+-        task.cell(r, c).value = value
++        formula = f'=INDEX(Data!$H$21:$L$38,MATCH($D{r},Data!$D$21:$D$38,0),MATCH({col}$10,Data!$H$4:$L$4,0))'
++        task.cell(r, c).value = formula
++        cached_values[f'{col}{r}'] = value
+… omitted 107 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260613_152840_ea9e6f
