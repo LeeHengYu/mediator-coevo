@@ -300,9 +300,7 @@ def test_matrix_list_prints_indexed_rows_without_runtime_setup(monkeypatch, flag
     assert "skill update: all, diffusion policy: top_k_similarity" in result.output
 
 
-def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
-    config_dir = tmp_path / "config"
-    _write_minimal_config(config_dir)
+def _stub_matrix_runtime_build(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
     repository = object()
 
@@ -348,6 +346,14 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
         capture_matrix_build,
     )
 
+    return captured, repository
+
+
+def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+    captured, repository = _stub_matrix_runtime_build(monkeypatch, tmp_path)
+
     result = CliRunner().invoke(
         app,
         [
@@ -371,6 +377,53 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
     assert captured["matrix_run_id"] == "custom-matrix-run"
     assert "Rows: skill_none_top_k_similarity" in result.output
     assert "skill_all_top_k_similarity" not in result.output
+
+
+def test_matrix_index_accepts_comma_separated_rows(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+    captured, repository = _stub_matrix_runtime_build(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "matrix",
+            "--task",
+            "task-A",
+            "--index",
+            "1,3",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["preset_names"] == [
+        BASELINE_PRESET_NAMES[1],
+        BASELINE_PRESET_NAMES[3],
+    ]
+    assert captured["flatten_single_row"] is False
+    assert captured["benchmark_repo"] is repository
+    assert captured["matrix_seed"] == 42
+    assert f"Rows: {BASELINE_PRESET_NAMES[1]}, {BASELINE_PRESET_NAMES[3]}" in (
+        result.output
+    )
+    assert BASELINE_PRESET_NAMES[0] not in result.output
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ("1,,3", "cannot be empty"),
+        ("not-an-index", "must be comma-separated integers"),
+        ("-1", "must be between"),
+        (str(len(BASELINE_PRESET_NAMES)), "must be between"),
+        ("1,1", "cannot repeat"),
+    ],
+)
+def test_matrix_index_rejects_invalid_comma_separated_rows(value, match):
+    with pytest.raises(typer.BadParameter, match=match):
+        matrix_module._parse_matrix_row_indexes(value)
 
 
 @pytest.mark.parametrize(

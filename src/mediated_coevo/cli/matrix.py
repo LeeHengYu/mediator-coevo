@@ -129,14 +129,15 @@ def matrix(
             help="List matrix row indexes and row-local config, then exit.",
         ),
     ] = False,
-    row_index: Annotated[
-        int | None,
+    row_indexes: Annotated[
+        str | None,
         typer.Option(
             "--index",
             "-i",
-            min=0,
-            max=len(BASELINE_PRESET_NAMES) - 1,
-            help="Run only the matrix row at this zero-based index.",
+            help=(
+                "Run only selected zero-based matrix row indexes. "
+                "Use comma-separated values, e.g. 1,3."
+            ),
         ),
     ] = None,
     run_id: Annotated[
@@ -187,15 +188,11 @@ def matrix(
             "diffusion.graph; use --diffusion-max-artifacts or "
             "--diffusion-top-k-neighbors for shared matrix knobs"
         )
-    if row_index is None:
+    selected_indexes = _parse_matrix_row_indexes(row_indexes)
+    if selected_indexes is None:
         preset_names = list(BASELINE_PRESET_NAMES)
     else:
-        if row_index < 0 or row_index >= len(BASELINE_PRESET_NAMES):
-            raise typer.BadParameter(
-                "matrix row index must be between "
-                f"0 and {len(BASELINE_PRESET_NAMES) - 1}"
-            )
-        preset_names = [BASELINE_PRESET_NAMES[row_index]]
+        preset_names = [BASELINE_PRESET_NAMES[index] for index in selected_indexes]
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides=_run_config_overrides(
@@ -244,7 +241,7 @@ def matrix(
         matrix_dir=matrix_dir,
         benchmark_repo=repository,
         preset_names=preset_names,
-        flatten_single_row=row_index is not None,
+        flatten_single_row=selected_indexes is not None and len(selected_indexes) == 1,
     )
 
     print_task_selection(selection)
@@ -295,6 +292,32 @@ def matrix(
             history_store=row.runtime.orchestrator.history_store,
         )
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
+
+
+def _parse_matrix_row_indexes(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+    indexes: list[int] = []
+    for token in value.split(","):
+        token = token.strip()
+        if not token:
+            raise typer.BadParameter("matrix row indexes cannot be empty")
+        try:
+            index = int(token)
+        except ValueError as exc:
+            raise typer.BadParameter(
+                "matrix row indexes must be comma-separated integers"
+            ) from exc
+        if index < 0 or index >= len(BASELINE_PRESET_NAMES):
+            raise typer.BadParameter(
+                "matrix row indexes must be between "
+                f"0 and {len(BASELINE_PRESET_NAMES) - 1}"
+            )
+        if index in indexes:
+            raise typer.BadParameter("matrix row indexes cannot repeat")
+        indexes.append(index)
+    return indexes
+
 
 def register_matrix_command(app: typer.Typer) -> None:
     app.command()(matrix)
