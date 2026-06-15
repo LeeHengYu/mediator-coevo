@@ -1,0 +1,104 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/run_reagent_policy.py → b/run_reagent_policy.py
+@@ -0,0 +1,193 @@
++import json
++import csv
++from collections import defaultdict
++
++# Load inputs
++with open('/root/assay_manifest.json') as f:
++    manifest = json.load(f)
++
++with open('/root/carrier_cost.csv') as f:
++    carrier_costs = list(csv.DictReader(f))
++
++with open('/root/billing.csv') as f:
++    billing_rows = list(csv.DictReader(f))
++
++with open('/root/lab_overrides.csv') as f:
++    lab_overrides = list(csv.DictReader(f))
++
++with open('/root/report_template.json') as f:
++    template = json.load(f)
++
++# Build carrier cost lookup
++carrier_lookup = {}
++for row in carrier_costs:
++    carrier_lookup[row['carrier_type'].strip()] = float(row['carrier_cost_usd'])
++
++# Filter in-scope assays
++in_scope_assays = [a for a in manifest['assays'] if a.get('in_scope') == True]
++
++# Build alias-to-assay mapping
++alias_to_assay = {}
++for assay in in_scope_assays:
++    alias_to_assay[assay['assay_name'].strip().lower()] = assay['assay_id']
++    for alias in assay.get('aliases', []):
++        alias_to_assay[alias.strip().lower()] = assay['assay_id']
++
++# Resolve billing: only active rows, map to assay_id, keep latest effective_month
++active_billing = [r for r in billing_rows if r.get('is_active', '').strip().lower() == 'true']
++billing_by_assay = {}
++for row in active_billing:
++    label = row['assay_label'].strip().lower()
++    assay_id = alias_to_assay.get(label)
++    if assay_id is None:
++        continue
++    em = row['effective_month'].strip()
++    if assay_id not in billing_by_assay or em > billing_by_assay[assay_id]['effective_month'].strip():
++        billing_by_assay[assay_id] = row
++
++# Resolve lab overrides: only approved, highest revision per assay_id
++approved_overrides = [r for r in lab_overrides if r.get('status', '').strip().lower() == 'approved']
++override_by_assay = {}
++for row in approved_overrides:
++    aid = row['assay_id'].strip()
++    rev = int(row['revision'])
++    if aid not in override_by_assay or rev > int(override_by_assay[aid]['revision']):
++        override_by_assay[aid] = row
++
++# Build assay-level lookup
++assay_lookup = {a['assay_id']: a for a in in_scope_assays}
++
++# Calculate per-assay
++assay_results = []
++for assay in in_scope_assays:
++    aid = assay['assay_id']
++    aname = assay['assay_name']
++    
++    # Active labs
++    if aid in override_by_assay:
++        active_labs = int(override_by_assay[aid]['active_labs'])
++    else:
++        active_labs = int(assay['default_active_labs'])
++    
++    reagent_price = float(assay['reagent_price_per_1000_tests_usd'])
++    carrier_type = assay['carrier_type'].strip()
++    carrier_cost = carrier_lookup[carrier_type]
++    
++    # Billing
++    billing_row = billing_by_assay.get(aid)
++    if billing_row is None:
+… omitted 115 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/run_reagent_policy.py → b//root/run_reagent_policy.py
+@@ -24,7 +24,15 @@
+     carrier_lookup[row['carrier_type'].strip()] = float(row['carrier_cost_usd'])
+ 
+ # Filter in-scope assays
+-in_scope_assays = [a for a in manifest['assays'] if a.get('in_scope') == True]
++# The manifest may either contain a top-level "assays" list or group assays under regions.
++if 'assays' in manifest:
++    manifest_assays = manifest['assays']
++else:
++    manifest_assays = []
++    for region in manifest.get('regions', []):
++        manifest_assays.extend(region.get('assays', []))
++
++in_scope_assays = [a for a in manifest_assays if a.get('in_scope') == True]
+ 
+ # Build alias-to-assay mapping
+ alias_to_assay = {}
+
+session_id: 20260614_135139_157990

@@ -1,0 +1,148 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/create_syncpack_outputs.py → b/create_syncpack_outputs.py
+@@ -0,0 +1,135 @@
++#!/usr/bin/env python3
++import csv
++import json
++from pathlib import Path
++
++ROOT = Path('/root')
++INGREDIENT_PATH = ROOT / 'ingredient_cost.csv'
++CARD_PATH = ROOT / 'card_cost.csv'
++REIMBURSEMENT_PATH = ROOT / 'reimbursement.csv'
++ANALYSIS_PATH = ROOT / 'syncpack_analysis.json'
++SUMMARY_PATH = ROOT / 'syncpack_summary.md'
++
++PATIENTS = 180
++FILLS_28 = 12
++FILLS_56 = 6
++CAPS_28 = 56
++CAPS_56 = 112
++THRESHOLD = 9000
++
++
++def read_csv(path):
++    with path.open(newline='') as f:
++        rows = list(csv.DictReader(f))
++    return rows
++
++
++def print_csv_debug(path, rows):
++    print(f"\n=== {path} ===")
++    print(path.read_text().rstrip())
++    print(f"Columns: {list(rows[0].keys()) if rows else []}")
++
++
++def money(value):
++    return round(float(value) + 1e-9, 2)
++
++
++def main():
++    ingredient_rows = read_csv(INGREDIENT_PATH)
++    card_rows = read_csv(CARD_PATH)
++    reimbursement_rows = read_csv(REIMBURSEMENT_PATH)
++
++    # Required debug output before computation.
++    print_csv_debug(INGREDIENT_PATH, ingredient_rows)
++    print_csv_debug(CARD_PATH, card_rows)
++    print_csv_debug(REIMBURSEMENT_PATH, reimbursement_rows)
++
++    card_cost_by_count = {int(row['blister_card_count']): float(row['card_cost_usd']) for row in card_rows}
++    reimbursement_by_med = {
++        row['medication']: float(row['reimbursement_per_cycle_180_patients_usd'])
++        for row in reimbursement_rows
++    }
++
++    print("\nJoin logic verification:")
++    print(f"card_cost_by_count: {card_cost_by_count}")
++    print("For each medication, ingredient_cost.blister_card_count maps to card_cost.blister_card_count.")
++    print("For the 56-day model, this data set has no doubled card-count rows for 12 or 16; therefore the matching available per-medication card_cost row is reused and applied to 6 annual fills.")
++
++    medications = []
++    for row in sorted(ingredient_rows, key=lambda r: r['medication']):
++        medication = row['medication']
++        price_per_1000 = float(row['price_per_1000_capsules_usd'])
++        blister_card_count = int(row['blister_card_count'])
++        if blister_card_count not in card_cost_by_count:
++            raise KeyError(f"No card cost for blister_card_count={blister_card_count} ({medication})")
++        card_cost = card_cost_by_count[blister_card_count]
++        reimbursement = reimbursement_by_med[medication]
++
++        annual_drug_28 = (price_per_1000 / 1000) * CAPS_28 * FILLS_28 * PATIENTS
++        annual_drug_56 = (price_per_1000 / 1000) * CAPS_56 * FILLS_56 * PATIENTS
++        annual_packaging_28 = card_cost * PATIENTS * FILLS_28
++        annual_packaging_56 = card_cost * PATIENTS * FILLS_56
++        annual_reimbursement_28 = reimbursement * FILLS_28
++        annual_reimbursement_56 = reimbursement * FILLS_56
++        annual_margin_28 = annual_reimbursement_28 - annual_drug_28 - annual_packaging_28
++        annual_margin_56 = annual_reimbursement_56 - annual_drug_56 - annual_packaging_56
++        annual_margin_diff = annual_margin_56 - annual_margin_28
++
++        medications.append({
+… omitted 57 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tests/test_outputs.py → b//tests/test_outputs.py
+@@ -0,0 +1,60 @@
++import json
++from pathlib import Path
++
++
++def test_syncpack_analysis_contract():
++    path = Path('/root/syncpack_analysis.json')
++    assert path.exists()
++    data = json.loads(path.read_text())
++
++    assert data['assumptions'] == {
++        'patients_per_medication': 180,
++        'fills_per_year_28_day': 12,
++        'fills_per_year_56_day': 6,
++        'capsules_per_fill_28_day': 56,
++        'capsules_per_fill_56_day': 112,
++        'switch_threshold_usd': 9000,
++    }
++
++    med_keys = {
++        'medication',
++        'price_per_1000_capsules_usd',
++        'blister_card_count',
++        'card_cost_usd',
++        'reimbursement_per_cycle_180_patients_usd',
++        'annual_drug_cost_28_day_usd',
++        'annual_drug_cost_56_day_usd',
++        'annual_packaging_cost_28_day_usd',
++        'annual_packaging_cost_56_day_usd',
++        'annual_reimbursement_28_day_usd',
++        'annual_reimbursement_56_day_usd',
++        'annual_margin_28_day_usd',
++        'annual_margin_56_day_usd',
++        'annual_margin_difference_56_minus_28_usd',
++    }
++    assert [m['medication'] for m in data['medications']] == sorted(m['medication'] for m in data['medications'])
++    assert all(set(m) == med_keys for m in data['medications'])
++
++    assert set(data['totals']) == {
++        'total_annual_margin_28_day_usd',
++        'total_annual_margin_56_day_usd',
++        'total_annual_margin_difference_56_minus_28_usd',
++        'absolute_total_margin_difference_usd',
++    }
++    assert data['totals']['total_annual_margin_28_day_usd'] == -42908.83
++    assert data['totals']['total_annual_margin_56_day_usd'] == -37130.83
++    assert data['totals']['total_annual_margin_difference_56_minus_28_usd'] == 5778.0
++    assert data['totals']['absolute_total_margin_difference_usd'] == 5778.0
++    assert data['decision'] == 'convert_to_56_day'
++    assert '5,778.00' in data['justification']
++    assert '9,000.00' in data['justification']
++
++
++def test_summary_exists_and_mentions_decision():
++    summary = Path('/root/syncpack_summary.md').read_text()
++    lines = [line for line in summary.splitlines() if line.strip()]
++    assert 4 <= len(lines) <= 8
++    assert 'Total 28-day margin' in summary
++    assert 'Total 56-day margin' in summary
++    assert 'Absolute difference' in summary
++    assert 'convert_to_56_day' in summary
+
+session_id: 20260614_210442_228931

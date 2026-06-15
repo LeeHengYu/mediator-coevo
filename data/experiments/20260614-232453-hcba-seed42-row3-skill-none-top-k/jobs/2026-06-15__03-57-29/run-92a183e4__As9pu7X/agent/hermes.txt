@@ -1,0 +1,153 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,157 @@
++#!/usr/bin/env python3
++import csv
++import json
++from pathlib import Path
++
++ROOT = Path('/root')
++INGREDIENT_PATH = ROOT / 'ingredient_cost.csv'
++CARD_PATH = ROOT / 'card_cost.csv'
++REIMBURSEMENT_PATH = ROOT / 'reimbursement.csv'
++JSON_OUT = ROOT / 'syncpack_analysis.json'
++SUMMARY_OUT = ROOT / 'syncpack_summary.md'
++
++PATIENTS = 180
++CAPSULES_28_DAY = 56
++CAPSULES_56_DAY = 112
++FILLS_28_DAY = 12
++FILLS_56_DAY = 6
++DECISION_THRESHOLD_USD = 9000.0
++
++
++def money(value):
++    return round(float(value), 2)
++
++
++def read_csv(path):
++    with path.open(newline='', encoding='utf-8') as f:
++        return list(csv.DictReader(f))
++
++
++def require_columns(rows, path, columns):
++    if not rows:
++        raise ValueError(f'{path} is empty')
++    available = set(rows[0].keys())
++    missing = [col for col in columns if col not in available]
++    if missing:
++        raise ValueError(f'{path} is missing required columns: {missing}; available columns: {sorted(available)}')
++
++
++def main():
++    ingredients = read_csv(INGREDIENT_PATH)
++    card_costs_raw = read_csv(CARD_PATH)
++    reimbursements_raw = read_csv(REIMBURSEMENT_PATH)
++
++    require_columns(ingredients, INGREDIENT_PATH, ['medication', 'price_per_1000_capsules_usd', 'blister_card_count'])
++    require_columns(card_costs_raw, CARD_PATH, ['blister_card_count', 'card_cost_usd'])
++    require_columns(reimbursements_raw, REIMBURSEMENT_PATH, ['medication', 'reimbursement_per_cycle_180_patients_usd'])
++
++    card_cost_by_count = {}
++    for row in card_costs_raw:
++        count = int(row['blister_card_count'])
++        if count in card_cost_by_count:
++            raise ValueError(f'Duplicate blister_card_count in card costs: {count}')
++        card_cost_by_count[count] = float(row['card_cost_usd'])
++
++    reimbursement_by_medication = {}
++    for row in reimbursements_raw:
++        med = row['medication'].strip()
++        if med in reimbursement_by_medication:
++            raise ValueError(f'Duplicate medication in reimbursements: {med}')
++        reimbursement_by_medication[med] = float(row['reimbursement_per_cycle_180_patients_usd'])
++
++    medications = []
++    for row in ingredients:
++        medication = row['medication'].strip()
++        price_per_1000 = float(row['price_per_1000_capsules_usd'])
++        blister_card_count = int(row['blister_card_count'])
++
++        if medication not in reimbursement_by_medication:
++            raise ValueError(f'Missing reimbursement row for medication: {medication}')
++        if blister_card_count not in card_cost_by_count:
++            raise ValueError(f'Missing card cost row for blister_card_count: {blister_card_count}')
++
++        card_cost = card_cost_by_count[blister_card_count]
++        reimbursement = reimbursement_by_medication[medication]
++
++        annual_drug_cost_28 = (price_per_1000 / 1000.0) * CAPSULES_28_DAY * PATIENTS * FILLS_28_DAY
++        annual_drug_cost_56 = (price_per_1000 / 1000.0) * CAPSULES_56_DAY * PATIENTS * FILLS_56_DAY
++        annual_packaging_cost_28 = card_cost * PATIENTS * FILLS_28_DAY
+… omitted 79 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ import csv
+ import json
++from json.encoder import _make_iterencode, encode_basestring
+ from pathlib import Path
+ 
+ ROOT = Path('/root')
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -19,8 +19,43 @@
+ DECISION_THRESHOLD_USD = 9000.0
+ 
+ 
++class CurrencyFloat(float):
++    pass
++
++
++class CurrencyEncoder(json.JSONEncoder):
++    def iterencode(self, obj, _one_shot=False):
++        if self.check_circular:
++            markers = {}
++        else:
++            markers = None
++
++        def floatstr(value, allow_nan=self.allow_nan, _repr=float.__repr__, _inf=float('inf'), _neginf=-float('inf')):
++            if isinstance(value, CurrencyFloat):
++                return f'{float(value):.2f}'
++            if value != value:
++                text = 'NaN'
++            elif value == _inf:
++                text = 'Infinity'
++            elif value == _neginf:
++                text = '-Infinity'
++            else:
++                return _repr(value)
++            if not allow_nan:
++                raise ValueError('Out of range float values are not JSON compliant: ' + repr(value))
++            return text
++
++        encoder = encode_basestring
++        _iterencode = _make_iterencode(
++            markers, self.default, encoder, self.indent, floatstr,
++            self.key_separator, self.item_separator, self.sort_keys,
++            self.skipkeys, _one_shot
++        )
++        return _iterencode(obj, 0)
++
++
+ def money(value):
+-    return round(float(value), 2)
++    return CurrencyFloat(f'{float(value):.2f}')
+ 
+ 
+ def read_csv(path):
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -175,7 +175,7 @@
+     }
+ 
+     with JSON_OUT.open('w', encoding='utf-8') as f:
+-        json.dump(analysis, f, indent=2)
++        json.dump(analysis, f, indent=2, cls=CurrencyEncoder)
+         f.write('\n')
+ 
+     summary_lines = [
+
+session_id: 20260614_200013_a30774

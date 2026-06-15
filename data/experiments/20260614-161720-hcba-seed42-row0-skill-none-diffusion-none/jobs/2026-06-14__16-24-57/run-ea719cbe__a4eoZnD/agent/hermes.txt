@@ -1,0 +1,174 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,244 @@
++#!/usr/bin/env python3
++import csv
++import json
++from decimal import Decimal, ROUND_HALF_UP
++from pathlib import Path
++
++ROOT = Path('/root')
++
++CURRENCY_FIELDS = {
++    'reagent_cost_per_1000_tests_usd',
++    'network_adjustment_per_run_per_lab_usd',
++    'shipper_cost_usd',
++    'base_payment_per_run_per_lab_usd',
++    'total_payment_per_run_per_lab_usd',
++    'annual_reagent_cost_14_day_usd',
++    'annual_reagent_cost_28_day_usd',
++    'annual_shipper_cost_14_day_usd',
++    'annual_shipper_cost_28_day_usd',
++    'annual_revenue_14_day_usd',
++    'annual_revenue_28_day_usd',
++    'annual_margin_14_day_usd',
++    'annual_margin_28_day_usd',
++    'annual_margin_difference_28_minus_14_usd',
++    'total_annual_margin_14_day_usd',
++    'total_annual_margin_28_day_usd',
++    'total_annual_margin_difference_28_minus_14_usd',
++    'absolute_total_margin_difference_usd',
++}
++
++class RawNumber:
++    def __init__(self, text):
++        self.text = text
++
++
++def money(value):
++    """Return a RawNumber JSON numeric literal rounded/formatted to exactly 2 decimals."""
++    if not isinstance(value, Decimal):
++        value = Decimal(str(value))
++    return RawNumber(format(value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), '.2f'))
++
++
++def D(value):
++    return Decimal(str(value))
++
++
++def dump_json_exact(obj, indent=2):
++    """Minimal pretty JSON writer that supports RawNumber literals."""
++    def write(value, level):
++        sp = ' ' * (indent * level)
++        child_sp = ' ' * (indent * (level + 1))
++        if isinstance(value, RawNumber):
++            return value.text
++        if isinstance(value, dict):
++            if not value:
++                return '{}'
++            parts = []
++            for k, v in value.items():
++                parts.append(f'{child_sp}{json.dumps(k)}: {write(v, level + 1)}')
++            return '{\n' + ',\n'.join(parts) + '\n' + sp + '}'
++        if isinstance(value, list):
++            if not value:
++                return '[]'
++            parts = [f'{child_sp}{write(item, level + 1)}' for item in value]
++            return '[\n' + ',\n'.join(parts) + '\n' + sp + ']'
++        return json.dumps(value)
++    return write(obj, 0)
++
++
++def read_csv(name):
++    with (ROOT / name).open(newline='') as f:
++        return list(csv.DictReader(f))
++
++
++def main():
++    manifest = json.loads((ROOT / 'panel_manifest.json').read_text())
++    holdouts = json.loads((ROOT / 'holdouts.json').read_text())
++    template = json.loads((ROOT / 'report_template.json').read_text())
++    contract_rows = read_csv('contract_terms.csv')
+… omitted 166 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/validate_outputs.py → b/validate_outputs.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python3
++import json
++import re
++from decimal import Decimal
++from pathlib import Path
++
++ROOT = Path('/root')
++report_text = (ROOT / 'diagpanel_policy_report.json').read_text()
++report = json.loads(report_text, parse_float=Decimal)
++template = json.loads((ROOT / 'report_template.json').read_text())
++
++assert report['metadata'] == template['metadata'], 'metadata mismatch'
++assert report['audit_notes'] == template['audit_notes'], 'audit_notes mismatch'
++expected_assumptions = {
++    'runs_per_year_14_day': 26,
++    'runs_per_year_28_day': 13,
++    'switch_threshold_usd': 6000,
++    'override_rule': 'highest numeric approved rev with non-empty active_labs, else default_active_labs',
++    'holdout_rule': 'exclude holdout_state=exclude',
++    'adjustment_rule': 'missing network_tier adjustment defaults to 0.0',
++}
++assert report['analysis']['assumptions'] == expected_assumptions, 'assumptions mismatch'
++panels = report['analysis']['panels']
++assert [p['panel_code'] for p in panels] == sorted(p['panel_code'] for p in panels), 'panels not sorted'
++
++currency_fields = {
++    'reagent_cost_per_1000_tests_usd',
++    'network_adjustment_per_run_per_lab_usd',
++    'shipper_cost_usd',
++    'base_payment_per_run_per_lab_usd',
++    'total_payment_per_run_per_lab_usd',
++    'annual_reagent_cost_14_day_usd',
++    'annual_reagent_cost_28_day_usd',
++    'annual_shipper_cost_14_day_usd',
++    'annual_shipper_cost_28_day_usd',
++    'annual_revenue_14_day_usd',
++    'annual_revenue_28_day_usd',
++    'annual_margin_14_day_usd',
++    'annual_margin_28_day_usd',
++    'annual_margin_difference_28_minus_14_usd',
++    'total_annual_margin_14_day_usd',
++    'total_annual_margin_28_day_usd',
++    'total_annual_margin_difference_28_minus_14_usd',
++    'absolute_total_margin_difference_usd',
++}
++for field in currency_fields:
++    pattern = r'"' + re.escape(field) + r'": -?\d+\.\d{2}(?=[,\n])'
++    assert re.search(pattern, report_text), f'{field} missing exactly 2 decimals in JSON text'
++
++sum_diff = sum(p['annual_margin_difference_28_minus_14_usd'] for p in panels)
++totals = report['analysis']['totals']
++assert totals['total_annual_margin_difference_28_minus_14_usd'] == sum_diff, 'difference total mismatch'
++assert totals['absolute_total_margin_difference_usd'] == abs(totals['total_annual_margin_difference_28_minus_14_usd']), 'absolute mismatch'
++expected_decision = 'adopt_28_day' if totals['absolute_total_margin_difference_usd'] < Decimal('6000') else 'keep_14_day'
++assert report['analysis']['recommendation']['decision'] == expected_decision, 'decision mismatch'
++
++summary_lines = [line for line in (ROOT / 'diagpanel_policy_summary.md').read_text().splitlines() if line.strip()]
++assert 4 <= len(summary_lines) <= 8, 'summary line count'
++assert any('Total 14-day margin (USD)' in line for line in summary_lines), 'summary missing 14-day total'
++assert any('Total 28-day margin (USD)' in line for line in summary_lines), 'summary missing 28-day total'
++assert any('Absolute difference (USD)' in line for line in summary_lines), 'summary missing abs difference'
++assert any(expected_decision in line for line in summary_lines), 'summary missing exact decision slug'
++print('validation ok')
+
+session_id: 20260614_082958_88a204
+Completed.
+
+Created and verified:
+- /root/solve.py
+- /root/diagpanel_policy_report.json
+- /root/diagpanel_policy_summary.md
+
+Execution:
+- Initial required command `cd /root && python solve.py` failed because `python` was not installed in PATH.
+- Created `/usr/local/bin/python` symlink to `python3`.
+- Re-ran `cd /root && python solve.py` successfully.
+
+Validation:
+- Wrote and ran `/root/validate_outputs.py`
+- Result: `validation ok`
+
+Final decision:
+- keep_14_day
+
+Key totals:
+- Total 14-day margin: 26185.96 USD
+- Total 28-day margin: 10454.66 USD
+- Absolute difference: 15731.30 USD
