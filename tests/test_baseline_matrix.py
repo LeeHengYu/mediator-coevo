@@ -38,6 +38,7 @@ from mediated_coevo.experiment.records import build_coevolution_record
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.experiment.orchestrator import Orchestrator
+from mediated_coevo.runtime.token_budget import TokenBudgetEvent
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
@@ -1225,8 +1226,13 @@ async def test_disabled_executor_updates_skip_proposal_and_advisor(tmp_path):
 class _LLM:
     model = "test-model"
 
-    def drain_token_events(self):
-        return []
+    def __init__(self, token_events: list[TokenBudgetEvent] | None = None) -> None:
+        self._token_events = list(token_events or [])
+
+    def drain_token_events(self) -> list[TokenBudgetEvent]:
+        events = list(self._token_events)
+        self._token_events.clear()
+        return events
 
 
 class _Planner:
@@ -1244,6 +1250,11 @@ class _Advisor:
     llm_client = _LLM()
 
 
+class _AgentWithLLM:
+    def __init__(self, llm_client: _LLM) -> None:
+        self.llm_client = llm_client
+
+
 class _SkillStore:
     def skill_hashes(self) -> dict[str, str]:
         return {}
@@ -1252,6 +1263,50 @@ class _SkillStore:
 class _PairableHistoryStore:
     def tagged_task_counts(self, agent_role: str) -> dict[str, int]:
         return {"task-A": 2}
+
+
+@pytest.mark.asyncio
+async def test_coevolve_skips_metric_when_all_skill_updates_disabled(
+    caplog,
+    monkeypatch,
+):
+    def _raise_if_reflector_is_created(*args, **kwargs) -> None:
+        raise AssertionError("reflector should not run when all updates are disabled")
+
+    import mediated_coevo.experiment.orchestrator as orchestrator_module
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "Reflector",
+        _raise_if_reflector_is_created,
+    )
+
+    token_event = TokenBudgetEvent(
+        label="compactor.context",
+        model="test-model",
+        prompt_tokens=10,
+        completion_tokens=3,
+        total_tokens=13,
+    )
+    planner_llm = _LLM([token_event])
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = _config()
+    orch.config.experiment.skill_updates = SkillUpdateConfig(
+        executor=False,
+        planner=False,
+        mediator=False,
+    )
+    orch.planner = _AgentWithLLM(planner_llm)
+    orch.mediator = _AgentWithLLM(_LLM())
+    orch.skill_advisor = _AgentWithLLM(_LLM())
+    orch.judge_llm_client = None
+    caplog.set_level("INFO")
+
+    assert await orch._coevolve(4, "no_feedback") is None
+    assert planner_llm.drain_token_events() == []
+    assert "all skill updates are disabled" in caplog.text
+    assert "discarded 1 pending token telemetry events" in caplog.text
 
 
 @pytest.mark.asyncio

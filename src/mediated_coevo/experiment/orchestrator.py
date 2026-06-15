@@ -1179,6 +1179,21 @@ class Orchestrator:
             _display_iteration(iteration),
             condition,
         )
+        skill_update_config = self.config.experiment.skill_updates
+        if not any(
+            (
+                skill_update_config.executor,
+                skill_update_config.planner,
+                skill_update_config.mediator,
+            )
+        ):
+            drained_events = self._drain_llm_token_events()
+            logger.info(
+                "Co-evolution checkpoint skipped because all skill updates are "
+                "disabled; discarded %d pending token telemetry events.",
+                len(drained_events),
+            )
+            return None
 
         reflector = Reflector(
             self.history_store,
@@ -1191,7 +1206,7 @@ class Orchestrator:
         skill_updates: list[SkillUpdate] = []
         reflection_seed = random.randrange(1 << 32)
 
-        if self.config.experiment.skill_updates.mediator:
+        if skill_update_config.mediator:
             mediator_update = await self._reflect_and_validate_mediator(
                 reflector,
                 iteration=iteration,
@@ -1202,7 +1217,7 @@ class Orchestrator:
         else:
             logger.info("Mediator skill evolution skipped (skill updates disabled).")
 
-        if self.config.experiment.skill_updates.planner:
+        if skill_update_config.planner:
             planner_update = await self._reflect_and_validate_planner(
                 reflector,
                 iteration=iteration,
