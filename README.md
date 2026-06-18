@@ -1,7 +1,7 @@
 # Mediated Co-Evolution
 
-Mediated Co-Evolution is an experiment runner for studying how agent skills
-change when execution feedback is routed through different context policies.
+Mediated Co-Evolution is an experiment runner for studying how diffusion network policies can help later task runs to perform better. Skill update feature is optional and auxiliary and is compatible with context diffusion.
+
 The executor backend now targets SkillFlow tasks through Harbor, while the
 planner, mediator, judge, reward tagging, reflection, validation, and diffusion
 concepts remain the same experimental frame.
@@ -11,7 +11,9 @@ concepts remain the same experimental frame.
 Mediated Co-Evolution studies skill files as runtime policies. It uses a
 GRPO-like loop at the level of reward-relative skill editing: completed task
 traces produce rewards, same-task history forms group-relative evidence, and LLM
-reflection rewrites Markdown skills. It does not train model weights.
+reflection rewrites Markdown skills.
+
+Note that skill rewrites only occur when any of the role skill update is enabled. Even when there is no skill update, the mediator still process the logs of prior runs and serve as prior context under `learned_mediator` condition, just that the artifacts are used in different ways under different protocols.
 
 ```text
 SkillFlow task
@@ -41,7 +43,8 @@ The experiment loop has four roles:
   normalized execution trace and verifier reward.
 - Mediator: when the condition uses mediation, compresses and filters execution
   feedback before it is exposed to later Planner iterations.
-- Judge: annotates completed traces and reports with rubric-based rewards.
+- Judge: annotates completed traces and reports with rubric-based rewards. Ideally this model can be small.
+- Compactor: when context exceeds configurable token budget, another LLM call is invoked to compact the context into more concise summaries.
 
 The mutable runtime policies are:
 
@@ -70,7 +73,7 @@ portable policy channel; task-local resources remain task resources.
 ### Reward Sources And Tagging
 
 The main online evolution reward is the Judge reward. The verifier reward is
-kept as provenance and used as fallback when Judge scoring is unavailable.
+kept as provenance and used as fallback when Judge scoring is unavailable and audit.
 
 After a usable task run finishes, the Judge-scored evolution reward is assigned
 directly to same-task history entries from that run once those entries exist.
@@ -83,59 +86,6 @@ History entries keep:
 - `reward`: the evolution reward used for ranking and reflection.
 - `metadata.verifier_reward`: the raw verifier score from Harbor.
 - `metadata.reward_source`: `judge`, `verifier_fallback`, or `verifier`.
-
-### Group-Relative Evidence
-
-Co-evolution reflection builds same-role, same-task contrastive pairs from
-tagged history. For each task and role, the history store computes:
-
-```text
-relative_reward = entry.reward - task_mean_reward
-```
-
-It then takes bottom and top reward buckets, forms worse/better pairs, and sorts
-them by relative reward gap. This is the GRPO-like step: behavior is judged
-relative to other attempts in the same task group rather than by a global scalar
-alone.
-
-### Skill Update Paths
-
-Two skill update paths can be enabled independently.
-
-Executor skill evolution is advisor-gated:
-
-```text
-Planner proposals -> proposal buffer -> SkillAdvisor batch review
-                  -> Planner candidate rewrites -> candidate audit
-                  -> empirical validation -> Executor skill commit
-```
-
-The SkillAdvisor evaluates the proposal batch against the current Executor
-skill, including proposal reasoning, diffs, evolution rewards, and reward
-sources. If the advisor approves, the Planner drafts candidate Executor skill
-rewrites, and the selected candidate is validated before commit.
-
-Planner and Mediator meta-skill evolution runs at the co-evolution interval:
-
-```text
-same-task history -> group-relative pairs -> LLM reflection prompt
-                  -> candidate skill rewrites -> candidate audit
-                  -> empirical validation -> meta-skill commit
-```
-
-The reflection prompt shows each worse/better pair with its evolution reward and
-task-relative delta. Planner and Mediator reflection each ask for candidate skill
-rewrites, validate them empirically, and commit only accepted candidates.
-Mediator validation replays a shared source trace through current and candidate
-mediator protocols, then scores the executor skill candidate induced by that
-feedback through the executor validation gate.
-
-Executor validation compares old and candidate Executor policies on selected
-SkillFlow tasks under the same task instruction, task resources, and verifier
-contract. It accepts only when the candidate's summed validation reward exceeds
-the current skill's summed validation reward by more than
-`min_mean_delta * validation_task_count`; per-task regressions are recorded as
-validation evidence but do not veto an aggregate improvement.
 
 ### Diffusion
 
@@ -183,6 +133,59 @@ When `medcoevo run` starts with `diffusion.enabled = true` and
 `diffusion.graph` set to `task_similarity` or `precomputed_similarity`, it
 materializes run-local graph artifacts under `task-graph/` using the configured
 local SkillFlow task cache and the default edge threshold `0.05`.
+
+### Skill Update Paths
+
+Two skill update paths can be enabled independently.
+
+Executor skill evolution is advisor-gated:
+
+```text
+Planner proposals -> proposal buffer -> SkillAdvisor batch review
+                  -> Planner candidate rewrites -> candidate audit
+                  -> empirical validation -> Executor skill commit
+```
+
+The SkillAdvisor evaluates the proposal batch against the current Executor
+skill, including proposal reasoning, diffs, evolution rewards, and reward
+sources. If the advisor approves, the Planner drafts candidate Executor skill
+rewrites, and the selected candidate is validated before commit.
+
+Planner and Mediator meta-skill evolution runs at the co-evolution interval:
+
+```text
+same-task history -> group-relative pairs -> LLM reflection prompt
+                  -> candidate skill rewrites -> candidate audit
+                  -> empirical validation -> meta-skill commit
+```
+
+The reflection prompt shows each worse/better pair with its evolution reward and
+task-relative delta. Planner and Mediator reflection each ask for candidate skill
+rewrites, validate them empirically, and commit only accepted candidates.
+Mediator validation replays a shared source trace through current and candidate
+mediator protocols, then scores the executor skill candidate induced by that
+feedback through the executor validation gate.
+
+Executor validation compares old and candidate Executor policies on selected
+SkillFlow tasks under the same task instruction, task resources, and verifier
+contract. It accepts only when the candidate's summed validation reward exceeds
+the current skill's summed validation reward by more than
+`min_mean_delta * validation_task_count`; per-task regressions are recorded as
+validation evidence but do not veto an aggregate improvement.
+
+### Group-Relative Evidence
+
+Co-evolution reflection builds same-role, same-task contrastive pairs from
+tagged history. For each task and role, the history store computes:
+
+```text
+relative_reward = entry.reward - task_mean_reward
+```
+
+It then takes bottom and top reward buckets, forms worse/better pairs, and sorts
+them by relative reward gap. This is the GRPO-like step: behavior is judged
+relative to other attempts in the same task group rather than by a global scalar
+alone.
 
 ## Requirements
 
@@ -403,16 +406,16 @@ uv run medcoevo matrix \
 
 Matrix rows:
 
-| Index | Preset                         | Condition          | Skill updates               | Diffusion policy    | Diffusion graph    |
-| ----- | ------------------------------ | ------------------ | --------------------------- | ------------------- | ------------------ |
-| `0`   | `skill_none_diffusion_none`    | `learned_mediator` | `none`                      | `none`              | `none`             |
-| `1`   | `skill_none_capped_broadcast`  | `learned_mediator` | `none`                      | `capped_broadcast`  | `none`             |
-| `2`   | `skill_none_random_k`          | `learned_mediator` | `none`                      | `random_k`          | `none`             |
-| `3`   | `skill_none_top_k_similarity`  | `learned_mediator` | `none`                      | `top_k_similarity`  | `task_similarity`  |
-| `4`   | `skill_all_diffusion_none`     | `learned_mediator` | `executor,planner,mediator` | `none`              | `none`             |
-| `5`   | `skill_all_capped_broadcast`   | `learned_mediator` | `executor,planner,mediator` | `capped_broadcast`  | `none`             |
-| `6`   | `skill_all_random_k`           | `learned_mediator` | `executor,planner,mediator` | `random_k`          | `none`             |
-| `7`   | `skill_all_top_k_similarity`   | `learned_mediator` | `executor,planner,mediator` | `top_k_similarity`  | `task_similarity`  |
+| Index | Preset                        | Condition          | Skill updates               | Diffusion policy   | Diffusion graph   |
+| ----- | ----------------------------- | ------------------ | --------------------------- | ------------------ | ----------------- |
+| `0`   | `skill_none_diffusion_none`   | `learned_mediator` | `none`                      | `none`             | `none`            |
+| `1`   | `skill_none_capped_broadcast` | `learned_mediator` | `none`                      | `capped_broadcast` | `none`            |
+| `2`   | `skill_none_random_k`         | `learned_mediator` | `none`                      | `random_k`         | `none`            |
+| `3`   | `skill_none_top_k_similarity` | `learned_mediator` | `none`                      | `top_k_similarity` | `task_similarity` |
+| `4`   | `skill_all_diffusion_none`    | `learned_mediator` | `executor,planner,mediator` | `none`             | `none`            |
+| `5`   | `skill_all_capped_broadcast`  | `learned_mediator` | `executor,planner,mediator` | `capped_broadcast` | `none`            |
+| `6`   | `skill_all_random_k`          | `learned_mediator` | `executor,planner,mediator` | `random_k`         | `none`            |
+| `7`   | `skill_all_top_k_similarity`  | `learned_mediator` | `executor,planner,mediator` | `top_k_similarity` | `task_similarity` |
 
 Each row gets an isolated copy of the skill tree under its experiment
 directory and writes its own `config.toml`, metrics, summaries, diffusion
@@ -429,7 +432,7 @@ owned by the fixed row presets.
 
 ## `inspect`
 
-Inspect the newest experiment:
+Inspect the experiment run basic statistics:
 
 ```bash
 uv run medcoevo inspect
@@ -439,6 +442,7 @@ Inspect a specific experiment:
 
 ```bash
 uv run medcoevo inspect data/experiments/<run-dir>
+uv run medcoevo inspect data/experiments/<batch-dir>/<row-dir>
 ```
 
 Emit machine-readable JSON:
