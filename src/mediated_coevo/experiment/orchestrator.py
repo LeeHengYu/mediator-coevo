@@ -191,7 +191,6 @@ class Orchestrator:
 
         for iteration in range(num_iterations):
             self._release_staged_cross_task_reports()
-            iteration_records: list[IterationRecord] = []
             for task_id in task_ids:
                 logger.info(
                     "=== Iteration %d/%d | Task: %s ===",
@@ -201,7 +200,7 @@ class Orchestrator:
                 )
                 record = await self._run_iteration(task_id, iteration)
                 records.append(record)
-                iteration_records.append(record)
+                self._snapshot_and_write_metrics(iteration, [record])
 
             # Co-evolution checkpoint
             coevolution_record: IterationRecord | None = None
@@ -210,12 +209,11 @@ class Orchestrator:
                     iteration,
                     self.config.experiment.condition_name,
                 )
-
-            self._snapshot_and_write_metrics(
-                iteration,
-                iteration_records,
-                coevolution_record=coevolution_record,
-            )
+                self._snapshot_and_write_metrics(
+                    iteration,
+                    [],
+                    coevolution_record=coevolution_record,
+                )
 
         logger.info(
             "Experiment complete: %d iterations, %d records",
@@ -1899,7 +1897,7 @@ class Orchestrator:
         *,
         coevolution_record: IterationRecord | None = None,
     ) -> None:
-        """Snapshot skills and write metric rows against that exact version."""
+        """Snapshot skills and append completed metric rows."""
         current_skill_version = skill_version(iteration)
         self.skill_store.snapshot(iteration, self._snapshots_dir)
         skill_hashes = self._current_skill_hashes()

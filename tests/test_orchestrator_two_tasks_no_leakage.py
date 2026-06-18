@@ -52,9 +52,13 @@ class _TaskRepo:
 
 
 class _Planner:
-    def __init__(self) -> None:
+    def __init__(self, metrics_path=None) -> None:
         self.llm_client = _LLM()
         self.prior_contexts: list[tuple[str, int, str | None]] = []
+        self.metrics_path = metrics_path
+        self.metrics_rows_before_plan: list[
+            tuple[str, int, list[tuple[str, int]]]
+        ] = []
 
     def set_skill_context(
         self,
@@ -71,6 +75,20 @@ class _Planner:
         current_skills: list[str] | None = None,
         iteration: int = 0,
     ) -> TaskSpec:
+        if self.metrics_path is not None:
+            rows = []
+            if self.metrics_path.exists():
+                rows = [
+                    json.loads(line)
+                    for line in self.metrics_path.read_text().splitlines()
+                ]
+            self.metrics_rows_before_plan.append(
+                (
+                    task_id,
+                    iteration,
+                    [(row["task_id"], row["iteration"]) for row in rows],
+                )
+            )
         self.prior_contexts.append((task_id, iteration, prior_context))
         return TaskSpec(
             task_id=task_id,
@@ -224,7 +242,7 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
     config.experiment.condition_name = "learned_mediator"
     config.experiment.coevo_interval = 99
     config.experiment.advisor_buffer_max = 99
-    planner = _Planner()
+    planner = _Planner(metrics_path=tmp_path / "metrics.jsonl")
     skill_store = _SkillStore()
     artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
     history_store = HistoryStore(history_dir=tmp_path / "history")
@@ -290,7 +308,13 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
         ("task-B", 0),
         ("task-B", 1),
     ]
-    assert skill_store.snapshots == [0, 1]
+    assert skill_store.snapshots == [0, 0, 1, 1]
+    assert planner.metrics_rows_before_plan == [
+        ("task-A", 0, []),
+        ("task-B", 0, [("task-A", 0)]),
+        ("task-A", 1, [("task-A", 0), ("task-B", 0)]),
+        ("task-B", 1, [("task-A", 0), ("task-B", 0), ("task-A", 1)]),
+    ]
     assert [record.skill_version for record in records] == [
         "iter_0000",
         "iter_0000",
