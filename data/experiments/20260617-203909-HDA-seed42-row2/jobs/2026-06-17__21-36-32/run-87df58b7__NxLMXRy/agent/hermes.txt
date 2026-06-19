@@ -1,0 +1,249 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/process_hwpx.py → b/process_hwpx.py
+@@ -0,0 +1,123 @@
++import zipfile
++import json
++import re
++import xml.etree.ElementTree as ET
++from io import BytesIO
++
++# Read JSON data
++with open('/root/training_feedback.json', 'r', encoding='utf-8') as f:
++    data = json.load(f)
++
++# Build placeholder mappings with transformations
++placeholders = {}
++
++# Direct mappings (no transformation)
++direct_keys = ['교육명', '교육일시', '장소', '강사', '유익내용', '개선사항', '희망교육', '강사평가', '자료평가', '실습평가']
++for key in direct_keys:
++    placeholders[f'{{{{{key}}}}}'] = data[key]
++
++# 참석자수: convert to digits only
++attendee_count = data['참석자수']
++# Extract digits only
++digits_only = re.sub(r'[^0-9]', '', attendee_count)
++placeholders['{{참석자수}}'] = digits_only
++
++# 만족도: rewrite as X.X점 (5.0점 만점)
++satisfaction = data['만족도']  # e.g., "4.5/5.0"
++# Extract the numeric score
++match = re.match(r'([\d.]+)', satisfaction)
++if match:
++    score = match.group(1)
++else:
++    score = satisfaction
++placeholders['{{만족도}}'] = f'{score}점 (5.0점 만점)'
++
++# 종합의견: append " 후속 심화반 검토 요망."
++overall_opinion = data['종합의견']
++placeholders['{{종합의견}}'] = f'{overall_opinion} 후속 심화반 검토 요망.'
++
++print("Placeholder mappings:")
++for k, v in placeholders.items():
++    print(f"  {k} -> {v}")
++
++# Copy and process the hwpx file
++with zipfile.ZipFile('/root/training_feedback_template.hwpx', 'r') as zin:
++    with zipfile.ZipFile('/root/training_feedback_ready.hwpx', 'w', compression=zipfile.ZIP_DEFLATED) as zout:
++        for item in zin.infolist():
++            data_bytes = zin.read(item.filename)
++            
++            # Only process XML files for text replacement
++            if item.filename.endswith('.xml'):
++                try:
++                    text = data_bytes.decode('utf-8')
++                    modified = False
++                    
++                    # Check if any placeholder exists in this file
++                    has_placeholder = any(ph in text for ph in placeholders.keys())
++                    
++                    if has_placeholder:
++                        # Parse XML
++                        # Register namespace
++                        ns = {'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML'}
++                        ET.register_namespace('', 'http://www.hancom.co.kr/hwpml/2010/HWPML')
++                        
++                        # Parse with namespace
++                        tree = ET.fromstring(text)
++                        
++                        # Find all paragraphs
++                        for p in tree.iter():
++                            if p.tag == '{http://www.hancom.co.kr/hwpml/2010/HWPML}p':
++                                para_modified = False
++                                
++                                # Find all text elements in this paragraph
++                                for elem in p.iter():
++                                    if elem.tag == '{http://www.hancom.co.kr/hwpml/2010/HWPML}t':
++                                        if elem.text:
++                                            original_text = elem.text
++                                            new_text = original_text
++                                            for ph, val in placeholders.items():
+… omitted 45 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/process_hwpx.py → b/process_hwpx.py
+@@ -18,18 +18,13 @@
+ 
+ # 참석자수: convert to digits only
+ attendee_count = data['참석자수']
+-# Extract digits only
+ digits_only = re.sub(r'[^0-9]', '', attendee_count)
+ placeholders['{{참석자수}}'] = digits_only
+ 
+ # 만족도: rewrite as X.X점 (5.0점 만점)
+-satisfaction = data['만족도']  # e.g., "4.5/5.0"
+-# Extract the numeric score
++satisfaction = data['만족도']  # "4.5/5.0"
+ match = re.match(r'([\d.]+)', satisfaction)
+-if match:
+-    score = match.group(1)
+-else:
+-    score = satisfaction
++score = match.group(1) if match else satisfaction
+ placeholders['{{만족도}}'] = f'{score}점 (5.0점 만점)'
+ 
+ # 종합의견: append " 후속 심화반 검토 요망."
+@@ -39,6 +34,61 @@
+ print("Placeholder mappings:")
+ for k, v in placeholders.items():
+     print(f"  {k} -> {v}")
++
++# Namespace handling
++NS = 'http://www.hancom.co.kr/hwpml/2010/HWPML'
++NSMAP = {'hp': NS}
++
++def remove_linesegarray_elements(element):
++    """Remove all linesegarray and related layout cache elements from the paragraph."""
++    to_remove = []
++    for child in list(element):
++        tag_local = child.tag.split('}')[-1] if '}' in child.tag else child.tag
++        if tag_local in ('linesegarray', 'lineseg', 'lineSegArray', 'lineSeg', 'linesegArray', 'lineSegarray'):
++            to_remove.append(child)
++        else:
++            remove_linesegarray_elements(child)
++    for child in to_remove:
++        element.remove(child)
++
++def process_xml_content(xml_content):
++    """Process XML content: replace placeholders and remove layout cache elements."""
++    # Parse XML
++    tree = ET.ElementTree(ET.fromstring(xml_content))
++    root = tree.getroot()
++    
++    modified = False
++    
++    # Find all paragraphs
++    for p in root.iter(f'{NS}p'):
++        para_modified = False
++        
++        # Find all text elements in this paragraph
++        for t in p.iter(f'{NS}t'):
++            if t.text:
++                original_text = t.text
++                new_text = original_text
++                for ph, val in placeholders.items():
++                    new_text = new_text.replace(ph, val)
++                if new_text != original_text:
++                    t.text = new_text
++                    para_modified = True
++                    modified = True
++        
++        # If paragraph was modified, remove layout cache elements
++        if para_modified:
++            remove_linesegarray_elements(p)
++    
++    if modified:
++        # Register namespace for proper serialization
++        ET.register_namespace('', NS)
++        # Convert back to string preserving XML declaration
++        result = ET.tostring(root, encoding='utf-8').decode('utf-8')
++        # Add XML declaration
++        result = '<?xml version=\'1.0\' encoding=\'utf-8\'?>\n' + result
++        return result
++    else:
+… omitted 80 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/process_hwpx.py → b/process_hwpx.py
+@@ -2,7 +2,6 @@
+ import json
+ import re
+ import xml.etree.ElementTree as ET
+-from io import BytesIO
+ 
+ # Read JSON data
+ with open('/root/training_feedback.json', 'r', encoding='utf-8') as f:
+@@ -35,60 +34,54 @@
+ for k, v in placeholders.items():
+     print(f"  {k} -> {v}")
+ 
+-# Namespace handling
+-NS = 'http://www.hancom.co.kr/hwpml/2010/HWPML'
+-NSMAP = {'hp': NS}
+-
+-def remove_linesegarray_elements(element):
+-    """Remove all linesegarray and related layout cache elements from the paragraph."""
+-    to_remove = []
+-    for child in list(element):
+-        tag_local = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+-        if tag_local in ('linesegarray', 'lineseg', 'lineSegArray', 'lineSeg', 'linesegArray', 'lineSegarray'):
+-            to_remove.append(child)
+-        else:
+-            remove_linesegarray_elements(child)
+-    for child in to_remove:
+-        element.remove(child)
+-
++# Process XML content
+ def process_xml_content(xml_content):
+     """Process XML content: replace placeholders and remove layout cache elements."""
+-    # Parse XML
+-    tree = ET.ElementTree(ET.fromstring(xml_content))
+-    root = tree.getroot()
+-    
++    original = xml_content
+     modified = False
+     
+-    # Find all paragraphs
+-    for p in root.iter(f'{NS}p'):
+-        para_modified = False
+-        
+-        # Find all text elements in this paragraph
+-        for t in p.iter(f'{NS}t'):
+-            if t.text:
+-                original_text = t.text
+-                new_text = original_text
+-                for ph, val in placeholders.items():
+-                    new_text = new_text.replace(ph, val)
+-                if new_text != original_text:
+-                    t.text = new_text
+-                    para_modified = True
+-                    modified = True
+-        
+-        # If paragraph was modified, remove layout cache elements
+-        if para_modified:
+-            remove_linesegarray_elements(p)
++    # First check if any placeholders exist
++    has_placeholder = any(ph in xml_content for ph in placeholders.keys())
++    
++    if not has_placeholder:
++        return xml_content
++    
++    # Use Regex to replace placeholders (simpler and preserves structure)
++    for ph, val in placeholders.items():
++        if ph in xml_content:
++            xml_content = xml_content.replace(ph, val)
++            modified = True
+     
+     if modified:
+-        # Register namespace for proper serialization
+-        ET.register_namespace('', NS)
+-        # Convert back to string preserving XML declaration
+-        result = ET.tostring(root, encoding='utf-8').decode('utf-8')
+-        # Add XML declaration
++        # Now parse XML to remove linesegarray elements from modified paragraphs
++        # Parse the XML
++        tree = ET.fromstring(xml_content)
++        ns = {'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML'}
+… omitted 46 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260617_123948_7ece2c

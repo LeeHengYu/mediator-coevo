@@ -1,0 +1,184 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a//tmp/hwpx_work/build.py → b//tmp/hwpx_work/build.py
+@@ -0,0 +1,180 @@
++import json, os, re, shutil, zipfile
++from pathlib import Path
++
++# Check if lxml is available; fallback to manual removal
++try:
++    from lxml import etree
++    LXML_AVAILABLE = True
++except ImportError:
++    LXML_AVAILABLE = False
++    print("WARNING: lxml not available. Using regex fallback for lineSegArray removal.")
++
++# Paths
++TEMPLATE = '/tmp/hwpx_work/template.hwpx'
++OUTPUT = '/root/safety_audit_brief_final.hwpx'
++OVERVIEW = Path('/root/audit_overview.json')
++CORRECTIVE = Path('/root/corrective_actions.json')
++
++assert OVERVIEW.exists(), 'Cannot find audit_overview.json'
++assert CORRECTIVE.exists(), 'Cannot find corrective_actions.json'
++
++overview_raw = json.loads(OVERVIEW.read_text(encoding='utf-8'))
++# The overview has a nested "summary" object
++if 'summary' in overview_raw:
++    overview = overview_raw['summary']
++else:
++    overview = overview_raw
++
++corrective = json.loads(CORRECTIVE.read_text(encoding='utf-8'))
++
++# Determine risk tier and severity note
++SEVERITY_MAP = {'High': '즉시조치', 'Medium': '계획보완', 'Low': '모니터링'}
++risk_tier = overview.get('위험등급', '')
++severity_note = SEVERITY_MAP.get(risk_tier, '')
++risk_with_severity = f"{risk_tier} ({severity_note})"
++
++# Reformat date
++raw_date = overview.get('점검일', '')
++formatted_date = raw_date.replace('-', '.') if raw_date else ''
++
++print(f'Risk tier: {risk_tier}')
++print(f'Risk with severity: {risk_with_severity}')
++print(f'Date raw: {raw_date} -> formatted: {formatted_date}')
++print(f'Overview keys: {list(overview.keys())}')
++print(f'Corrective actions: {json.dumps(corrective, ensure_ascii=False, indent=2)}')
++
++# --- Phase 1: Text replacement ---
++work_dir = Path('/tmp/hwpx_work/output_contents')
++if work_dir.exists():
++    shutil.rmtree(work_dir)
++work_dir.mkdir(parents=True)
++
++with zipfile.ZipFile(TEMPLATE, 'r') as zin:
++    zin.extractall(work_dir)
++
++xml_files = list(work_dir.rglob('*.xml'))
++
++# First pass: discover all {{...}} placeholders
++all_placeholders = set()
++for xf in xml_files:
++    content = xf.read_text(encoding='utf-8')
++    all_placeholders.update(re.findall(r'\{\{[^}]+\}\}', content))
++
++print(f'Found placeholders: {all_placeholders}')
++
++# Build replacement dict from overview and corrective actions
++replacements = {}
++for ph in all_placeholders:
++    key = ph.strip('{}').strip()  # e.g., "점검ID"
++    if key in overview:
++        val = str(overview[key])
++        # Date reformat
++        if re.match(r'\d{4}-\d{2}-\d{2}', val):
++            val = val.replace('-', '.')
++        # Risk tier append severity
++        if val == risk_tier and risk_tier in SEVERITY_MAP:
++            val = risk_with_severity
++        replacements[ph] = val
++    else:
+… omitted 102 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/hwpx_work/build.py → b//tmp/hwpx_work/build.py
+@@ -1,13 +1,6 @@
+ import json, os, re, shutil, zipfile
+ from pathlib import Path
+-
+-# Check if lxml is available; fallback to manual removal
+-try:
+-    from lxml import etree
+-    LXML_AVAILABLE = True
+-except ImportError:
+-    LXML_AVAILABLE = False
+-    print("WARNING: lxml not available. Using regex fallback for lineSegArray removal.")
++from lxml import etree
+ 
+ # Paths
+ TEMPLATE = '/tmp/hwpx_work/template.hwpx'
+  ┊ review diff
+a//tmp/hwpx_work/build.py → b//tmp/hwpx_work/build.py
+@@ -12,7 +12,6 @@
+ assert CORRECTIVE.exists(), 'Cannot find corrective_actions.json'
+ 
+ overview_raw = json.loads(OVERVIEW.read_text(encoding='utf-8'))
+-# The overview has a nested "summary" object
+ if 'summary' in overview_raw:
+     overview = overview_raw['summary']
+ else:
+@@ -47,7 +46,7 @@
+ 
+ xml_files = list(work_dir.rglob('*.xml'))
+ 
+-# First pass: discover all {{...}} placeholders
++# Discover all {{...}} placeholders
+ all_placeholders = set()
+ for xf in xml_files:
+     content = xf.read_text(encoding='utf-8')
+@@ -55,10 +54,10 @@
+ 
+ print(f'Found placeholders: {all_placeholders}')
+ 
+-# Build replacement dict from overview and corrective actions
++# Build replacement dict
+ replacements = {}
+ for ph in all_placeholders:
+-    key = ph.strip('{}').strip()  # e.g., "점검ID"
++    key = ph.strip('{}').strip()
+     if key in overview:
+         val = str(overview[key])
+         # Date reformat
+@@ -69,7 +68,6 @@
+             val = risk_with_severity
+         replacements[ph] = val
+     else:
+-        # Check key patterns for corrective actions
+         if re.match(r'조치\d+', key):
+             idx = int(re.search(r'\d+', key).group()) - 1
+             actions = corrective.get('immediate_actions', [])
+@@ -85,10 +83,8 @@
+     original = content
+     for ph, val in replacements.items():
+         content = content.replace(ph, val)
+-    # Also replace any remaining raw date with formatted date
+     if raw_date and formatted_date:
+         content = content.replace(raw_date, formatted_date)
+-    # Also replace standalone risk tier without severity note (avoid double-replace)
+     if risk_tier and severity_note:
+         pattern = re.escape(risk_tier) + r'(?!\s*\(' + re.escape(severity_note) + r'\))'
+         content = re.sub(pattern, risk_with_severity, content)
+@@ -100,39 +96,26 @@
+ 
+ # --- Phase 2: Remove layout cache (lineSegArray) from modified paragraphs ---
+ for xf_path in [Path(p) for p in modified_files]:
+-    content_bytes = xf_path.read_bytes()
++    parser = etree.XMLParser(remove_blank_text=False)
++    try:
++        tree = etree.parse(str(xf_path), parser)
++        root = tree.getroot()
++    except Exception as e:
++        print(f'XML parse error in {xf_path}: {e}')
++        continue
+ 
+-    if LXML_AVAILABLE:
+-        # Parse with lxml
+-        parser = etree.XMLParser(remove_blank_text=False)
+-        try:
+-            tree = etree.parse(str(xf_path), parser)
+-            root = tree.getroot()
+-        except Exception as e:
+-            print(f'XML parse error in {xf_path}: {e}')
+-            continue
++    removed = 0
++    for elem in root.iter():
++        local = etree.QName(elem.tag).localname if isinstance(elem.tag, str) else ''
++        if local == 'lineSegArray':
++            parent = elem.getparent()
++            if parent is not None:
++                parent.remove(elem)
++                removed += 1
+… omitted 28 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260617_110401_adc48a

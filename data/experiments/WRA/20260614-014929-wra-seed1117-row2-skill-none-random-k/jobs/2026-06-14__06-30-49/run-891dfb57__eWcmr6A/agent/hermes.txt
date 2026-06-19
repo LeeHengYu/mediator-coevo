@@ -1,0 +1,230 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/output/inspect_workbook.py → b/output/inspect_workbook.py
+@@ -0,0 +1,74 @@
++import openpyxl
++from openpyxl.utils import get_column_letter
++
++path = '/root/data/workbook.xlsx'
++wb = openpyxl.load_workbook(path, data_only=False)
++print('Workbook sheets:', wb.sheetnames)
++
++# Locate likely sheets by exact/common names
++ws_task = wb['Task'] if 'Task' in wb.sheetnames else wb[wb.sheetnames[0]]
++ws_data = wb['Data'] if 'Data' in wb.sheetnames else wb[wb.sheetnames[1]]
++print('Task sheet:', ws_task.title)
++print('Data sheet:', ws_data.title)
++
++print('\n=== Task sheet requested cells ===')
++for rng_name, rows in [('D12:D17', range(12,18)), ('D19:D24', range(19,25)), ('D26:D31', range(26,32))]:
++    print(rng_name)
++    for r in rows:
++        print(f'D{r} = {repr(ws_task[f"D{r}"].value)}')
++
++print('Row 10 H-L year headers')
++for c in range(8,13):
++    cell = ws_task.cell(10,c)
++    print(f'{cell.coordinate} = {repr(cell.value)} (type={type(cell.value).__name__})')
++
++for rng_name, rows in [('H35:L40', range(35,41)), ('H42:L47', range(42,48)), ('H50:L50', range(50,51))]:
++    print(rng_name, 'labels/contents')
++    for r in rows:
++        vals = []
++        for c in range(8,13):
++            cell = ws_task.cell(r,c)
++            vals.append(f'{cell.coordinate}={repr(cell.value)}')
++        print(' | '.join(vals))
++
++print('Block labels B12:B17, B19:B24, B26:B31')
++for rows in (range(12,18), range(19,25), range(26,32)):
++    for r in rows:
++        print(f'B{r} = {repr(ws_task[f"B{r}"].value)}')
++
++print('\n=== Task rows 10-50, cols A-L all content ===')
++for r in range(10,51):
++    vals = []
++    for c in range(1,13):
++        cell = ws_task.cell(r,c)
++        vals.append(f'{cell.coordinate}:{repr(cell.value)}')
++    print(' | '.join(vals))
++
++print('\n=== Data dimensions ===')
++print('max_row:', ws_data.max_row, 'max_column:', ws_data.max_column)
++
++print('\n=== Data rows 1-5, cols A-Z repr ===')
++for r in range(1,6):
++    vals = []
++    for c in range(1,27):
++        cell = ws_data.cell(r,c)
++        vals.append(f'{cell.coordinate}:{repr(cell.value)}({type(cell.value).__name__})')
++    print(' | '.join(vals))
++
++print('\n=== Data rows 18-40, cols A-Z repr ===')
++for r in range(18,41):
++    vals = []
++    for c in range(1,27):
++        cell = ws_data.cell(r,c)
++        vals.append(f'{cell.coordinate}:{repr(cell.value)}({type(cell.value).__name__})')
++    print(' | '.join(vals))
++
++print('\n=== Potential Data code/year summary ===')
++# Print non-empty values in rows 18-40 A-Z and rows 1-5 A-Z compactly
++for r in list(range(1,6)) + list(range(18,41)):
++    nonempty = []
++    for c in range(1,27):
++        v = ws_data.cell(r,c).value
++        if v is not None:
++            nonempty.append(f'{get_column_letter(c)}={repr(v)}[{type(v).__name__}]')
++    print(f'Row {r}: ' + '; '.join(nonempty))
+  ┊ review diff
+a/output/write_formulas.py → b/output/write_formulas.py
+@@ -0,0 +1,65 @@
++import openpyxl
++from openpyxl.utils import get_column_letter
++
++src = '/root/data/workbook.xlsx'
++out = '/root/output/result.xlsx'
++
++wb = openpyxl.load_workbook(src, data_only=False)
++ws = wb['Task']
++
++# Data layout determined from inspection:
++# - Series codes are in rows, in Data!D21:D38.
++# - Year headers are numeric integers in Data!H4:L4.
++# - Task year headers are numeric integers in Task!H10:L10.
++# - Data values are in Data!H21:L38.
++data_values = 'Data!$H$21:$L$38'
++data_codes = 'Data!$D$21:$D$38'
++data_years = 'Data!$H$4:$L$4'
++
++lookup_rows = list(range(12, 18)) + list(range(19, 25)) + list(range(26, 32))
++for row in lookup_rows:
++    for col in range(8, 13):  # H:L
++        col_letter = get_column_letter(col)
++        ws.cell(row, col).value = (
++            f'=INDEX({data_values},MATCH($D{row},{data_codes},0),MATCH({col_letter}$10,{data_years},0))'
++        )
++
++# Net container flow rows H35:L40. Row 35 maps to rows 12/19/26, etc.
++for row in range(35, 41):
++    source_offset = row - 35
++    inbound_row = 12 + source_offset
++    outbound_row = 19 + source_offset
++    capacity_row = 26 + source_offset
++    for col in range(8, 13):
++        col_letter = get_column_letter(col)
++        ws.cell(row, col).value = f'=({col_letter}{inbound_row}-{col_letter}{outbound_row})/{col_letter}{capacity_row}*100'
++
++# Column-wise statistics over the 6 ports in rows 35:40.
++stat_formulas = {
++    42: 'MIN',
++    43: 'MAX',
++    44: 'MEDIAN',
++    45: 'AVERAGE',
++}
++for col in range(8, 13):
++    col_letter = get_column_letter(col)
++    for row, fn in stat_formulas.items():
++        ws.cell(row, col).value = f'={fn}({col_letter}35:{col_letter}40)'
++    ws.cell(46, col).value = f'=PERCENTILE({col_letter}35:{col_letter}40,0.25)'
++    ws.cell(47, col).value = f'=PERCENTILE({col_letter}35:{col_letter}40,0.75)'
++
++# Weighted mean using terminal throughput capacity as weights.
++for col in range(8, 13):
++    col_letter = get_column_letter(col)
++    ws.cell(50, col).value = f'=SUMPRODUCT({col_letter}35:{col_letter}40,{col_letter}26:{col_letter}31)/SUM({col_letter}26:{col_letter}31)'
++
++# Encourage recalculation in Excel/compatible engines.
++try:
++    wb.calculation.fullCalcOnLoad = True
++    wb.calculation.forceFullCalc = True
++    wb.calculation.calcMode = 'auto'
++except Exception:
++    pass
++
++wb.save(out)
++print(f'Saved {out}')
+  ┊ review diff
+a/output/validate_result.py → b/output/validate_result.py
+@@ -0,0 +1,92 @@
++import openpyxl
++from openpyxl.utils import get_column_letter
++
++out = '/root/output/result.xlsx'
++formula_ranges = [
++    ('H12:L17', range(12,18)),
++    ('H19:L24', range(19,25)),
++    ('H26:L31', range(26,32)),
++    ('H35:L40', range(35,41)),
++    ('H42:L47', range(42,48)),
++    ('H50:L50', range(50,51)),
++]
++
++wb = openpyxl.load_workbook(out, data_only=False)
++ws = wb['Task']
++
++print('=== Formula validation data_only=False ===')
++missing = []
++wrong = []
++for name, rows in formula_ranges:
++    print(name)
++    for r in rows:
++        vals = []
++        for c in range(8,13):
++            cell = ws.cell(r,c)
++            value = cell.value
++            vals.append(f'{cell.coordinate}={repr(value)}')
++            if not (isinstance(value, str) and value.startswith('=')):
++                missing.append(cell.coordinate)
++            if isinstance(value, str) and ('PERCENTILE.INC' in value or 'PERCENTILE.EXC' in value):
++                wrong.append((cell.coordinate, value))
++        print(' | '.join(vals))
++
++print('Missing/non-formula cells:', missing)
++print('Wrong percentile formulas:', wrong)
++
++print('\n=== data_only=True cached values / possible errors ===')
++wbv = openpyxl.load_workbook(out, data_only=True)
++wsv = wbv['Task']
++errors = []
++for name, rows in formula_ranges:
++    print(name)
++    for r in rows:
++        vals = []
++        for c in range(8,13):
++            cell = wsv.cell(r,c)
++            v = cell.value
++            vals.append(f'{cell.coordinate}={repr(v)}')
++            if isinstance(v, str) and v.startswith('#'):
++                errors.append((cell.coordinate, v))
++        print(' | '.join(vals))
++print('Cached error values:', errors)
++
++# Additional structural checks.
++expected_counts = sum(len(list(rows))*5 for _, rows in formula_ranges)
++formula_count = 0
++for _, rows in formula_ranges:
++    for r in rows:
++        for c in range(8,13):
++            if isinstance(ws.cell(r,c).value, str) and ws.cell(r,c).value.startswith('='):
++                formula_count += 1
++print(f'Formula count: {formula_count}/{expected_counts}')
++
++# Validate lookup formulas use inspected Data layout and exact-match MATCH.
++for r in list(range(12,18)) + list(range(19,25)) + list(range(26,32)):
++    for c in range(8,13):
++        col = get_column_letter(c)
++        expected = f'=INDEX(Data!$H$21:$L$38,MATCH($D{r},Data!$D$21:$D$38,0),MATCH({col}$10,Data!$H$4:$L$4,0))'
++        actual = ws.cell(r,c).value
++        if actual != expected:
++            raise AssertionError(f'{ws.cell(r,c).coordinate}: expected {expected}, got {actual}')
++
++# Check stat formulas exactly include PERCENTILE legacy function.
++for c in range(8,13):
++    col = get_column_letter(c)
++    checks = {
++        42: f'=MIN({col}35:{col}40)',
++        43: f'=MAX({col}35:{col}40)',
+… omitted 14 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260613_223306_1875f2

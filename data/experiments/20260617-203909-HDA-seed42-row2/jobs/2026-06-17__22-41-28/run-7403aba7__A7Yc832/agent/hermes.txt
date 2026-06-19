@@ -1,0 +1,188 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/generate.py → b/generate.py
+@@ -0,0 +1,175 @@
++import json, zipfile, os, re, copy
++import xml.etree.ElementTree as ET
++from datetime import date
++
++# ── Load patient data ──
++with open('patient_intake.json', 'r', encoding='utf-8') as f:
++    data = json.load(f)
++
++# ── Derive computed values ──
++# Korean full-year age: visit_year - birth_year, minus 1 if birthday not yet passed
++visit_date = date.fromisoformat(data['방문일'])
++birth_date = date.fromisoformat(data['생년월일'])
++age = visit_date.year - birth_date.year - (
++    (visit_date.month, visit_date.day) < (birth_date.month, birth_date.day)
++)
++age_note = f'({age}세)'
++
++# Normalize phone: strip non-digits, format as 000-0000-0000
++raw_phone = re.sub(r'\D', '', data.get('회신전화', ''))
++if len(raw_phone) == 11:
++    norm_phone = f'{raw_phone[:3]}-{raw_phone[3:7]}-{raw_phone[7:]}'
++elif len(raw_phone) == 10:
++    norm_phone = f'{raw_phone[:3]}-{raw_phone[3:6]}-{raw_phone[6:]}'
++else:
++    norm_phone = raw_phone  # fallback
++
++# ── Build replacement map ──
++# Map Korean keys to placeholders
++replacements = {}
++for k, v in data.items():
++    replacements['{{' + k + '}}'] = str(v)
++
++# Override phone with normalized version
++if '회신전화' in data:
++    replacements['{{회신전화}}'] = norm_phone
++
++# ── Register HWPX namespaces ──
++NAMESPACES = {
++    'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML',
++}
++
++def register_all_namespaces(xml_bytes):
++    """Parse XML to discover and register all namespace prefixes."""
++    import io
++    for event, elem in ET.iterparse(io.BytesIO(xml_bytes), events=['start-ns']):
++        prefix, uri = elem
++        if prefix:
++            try:
++                ET.register_namespace(prefix, uri)
++            except:
++                pass
++        NAMESPACES[prefix] = uri
++
++def process_xml(xml_bytes):
++    """Replace placeholders in an HWPX XML, handling split <hp:t> tags."""
++    register_all_namespaces(xml_bytes)
++    tree = ET.ElementTree(ET.fromstring(xml_bytes))
++    root = tree.getroot()
++
++    # Find the hp namespace URI
++    hp_ns = NAMESPACES.get('hp', 'http://www.hancom.co.kr/hwpml/2010/HWPML')
++
++    hp_t_tag = f'{{{hp_ns}}}t'
++    hp_p_tag = f'{{{hp_ns}}}p'
++    hp_run_tag = f'{{{hp_ns}}}run'
++    hp_linesegarray_tag = f'{{{hp_ns}}}linesegarray'
++    hp_lineseg_tag = f'{{{hp_ns}}}lineseg'
++
++    modified_paragraphs = set()
++
++    # Process each paragraph
++    for p_elem in root.iter(hp_p_tag):
++        # Collect all <hp:t> elements in this paragraph (across runs)
++        t_elems = list(p_elem.iter(hp_t_tag))
++        if not t_elems:
++            continue
++
++        # Concatenate all text
+… omitted 97 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/test_output.py → b/test_output.py
+@@ -0,0 +1,78 @@
++import zipfile
++import re
++import json
++from datetime import date
++
++def test_hwpx_output():
++    """Test the generated HWPX file meets all requirements."""
++    
++    # Load patient data for reference
++    with open('patient_intake.json', 'r', encoding='utf-8') as f:
++        data = json.load(f)
++    
++    # Open the generated HWPX
++    with zipfile.ZipFile('/root/clinic_intake_ready.hwpx', 'r') as z:
++        content = z.read('Contents/section0.xml').decode('utf-8')
++    
++    # Test 1: No remaining placeholders
++    remaining = re.findall(r'\{\{[^}]+\}\}', content)
++    assert len(remaining) == 0, f"Found remaining placeholders: {remaining}"
++    print("✓ No remaining placeholders")
++    
++    # Test 2: Patient name replaced correctly
++    assert data['환자명'] in content, "Patient name not found"
++    assert content.count(data['환자명']) == 2, f"Patient name should appear twice (main + confirmation), found {content.count(data['환자명'])}"
++    print("✓ Patient name replaced and appears twice")
++    
++    # Test 3: Birth date with age note
++    birth_date = data['생년월일']
++    
++    # Calculate expected age
++    visit_date = date.fromisoformat(data['방문일'])
++    birth_date_obj = date.fromisoformat(birth_date)
++    age = visit_date.year - birth_date_obj.year - (
++        (visit_date.month, visit_date.day) < (birth_date_obj.month, birth_date_obj.day)
++    )
++    age_note = f"({age}세)"
++    
++    # Check birth date appears with age note
++    assert birth_date in content, "Birth date not found"
++    assert age_note in content, f"Age note '{age_note}' not found"
++    
++    # Check age note appears right after birth date in the same line
++    birth_with_age = f"생년월일: {birth_date} {age_note}"
++    assert birth_with_age in content, f"Birth date with age note not found. Expected: {birth_with_age}"
++    print(f"✓ Birth date with age note '{age_note}' found")
++    
++    # Test 4: Phone number format
++    raw_phone = re.sub(r'\D', '', data['회신전화'])
++    expected_phone = f"{raw_phone[:3]}-{raw_phone[3:7]}-{raw_phone[7:]}"
++    assert expected_phone in content, f"Formatted phone number not found. Expected: {expected_phone}"
++    print(f"✓ Phone number formatted correctly: {expected_phone}")
++    
++    # Test 5: Korean labels preserved
++    korean_labels = ['환자명:', '생년월일:', '방문일:', '담당 진료팀:', '회신 전화:', '증샅 요약:', '보험 상태:']
++    for label in korean_labels:
++        assert label in content, f"Korean label '{label}' not found"
++    print("✓ All Korean labels preserved")
++    
++    # Test 6: Handwritten signature note preserved
++    assert '확인 메모:' in content, "Confirmation memo label not found"
++    assert '수기 서명 칸은 비워 두세요.' in content, "Handwritten signature note not found"
++    print("✓ Handwritten signature note preserved")
++    
++    # Test 7: Other data fields
++    assert data['방문일'] in content, "Visit date not found"
++    assert data['진료팀'] in content, "Medical team not found"
++    assert data['증샅요약'] in content, "Symptoms summary not found"
++    assert data['보험상태'] in content, "Insurance status not found"
++    print("✓ All data fields present")
++    
++    # Test 8: Title preserved
++    assert '환자 접수 요약' in content, "Title not found"
++    print("✓ Title preserved")
++    
++    print("\n✅ All tests passed!")
++
++if __name__ == '__main__':
++    test_hwpx_output()
+  ┊ review diff
+a//root/test_output.py → b//root/test_output.py
+@@ -51,7 +51,7 @@
+     print(f"✓ Phone number formatted correctly: {expected_phone}")
+     
+     # Test 5: Korean labels preserved
+-    korean_labels = ['환자명:', '생년월일:', '방문일:', '담당 진료팀:', '회신 전화:', '증샅 요약:', '보험 상태:']
++    korean_labels = ['환자명:', '생년월일:', '방문일:', '담당 진료팀:', '회신 전화:', '증상 요약:', '보험 상태:']
+     for label in korean_labels:
+         assert label in content, f"Korean label '{label}' not found"
+     print("✓ All Korean labels preserved")
+  ┊ review diff
+a//root/test_output.py → b//root/test_output.py
+@@ -64,7 +64,7 @@
+     # Test 7: Other data fields
+     assert data['방문일'] in content, "Visit date not found"
+     assert data['진료팀'] in content, "Medical team not found"
+-    assert data['증샅요약'] in content, "Symptoms summary not found"
++    assert data['증상요약'] in content, "Symptoms summary not found"
+     assert data['보험상태'] in content, "Insurance status not found"
+     print("✓ All data fields present")
+     
+
+session_id: 20260617_134448_1a7c1e

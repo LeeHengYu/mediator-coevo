@@ -1,0 +1,297 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -0,0 +1,304 @@
++#!/usr/bin/env python3
++"""
++Process HWPX template with JSON data, replacing placeholders and cleaning up layout cache.
++"""
++
++import json
++import re
++import zipfile
++import os
++import shutil
++from lxml import etree
++
++# Configuration
++JSON_FILE = '/root/training_feedback.json'
++HWPX_INPUT = '/root/training_feedback_template.hwpx'
++HWPX_OUTPUT = '/root/training_feedback_ready.hwpx'
++WORK_DIR = '/tmp/hwpx_work'
++
++def load_json_data(json_path):
++    """Load the JSON data file."""
++    with open(json_path, 'r', encoding='utf-8') as f:
++        return json.load(f)
++
++def transform_value(key, value):
++    """Transform value based on field rules."""
++    if key == '참석자수':
++        # Extract digits only (e.g., "32명" -> "32")
++        digits = re.search(r'(\d+)', str(value))
++        return digits.group(1) if digits else str(value)
++    elif key == '만족도':
++        # Rewrite as X.X점 (5.0점 만점)
++        # Extract numeric score
++        match = re.search(r'([\d.]+)', str(value))
++        if match:
++            score = match.group(1)
++            return f"{score}점 (5.0점 만점)"
++        return str(value)
++    elif key == '종합의견':
++        # Append the static note
++        return f"{value} 후속 심화반 검토 요망."
++    else:
++        return str(value)
++
++def replace_placeholder(text, data):
++    """Replace all {{...}} placeholders in text with transformed values."""
++    if not text:
++        return text
++    
++    def replacer(match):
++        key = match.group(1)
++        if key in data:
++            return transform_value(key, data[key])
++        return match.group(0)  # Keep original if key not found
++    
++    return re.sub(r'\{\{(\w+)\}\}', replacer, text)
++
++def get_namespace_prefix(tree, ns_uri_fragment='hwpml'):
++    """Get the namespace prefix for HP from the tree."""
++    root = tree.getroot()
++    nsmap = root.nsmap
++    for prefix, uri in nsmap.items():
++        if ns_uri_fragment in uri:
++            return prefix
++    return None
++
++def process_section_xml(section_path, data):
++    """Process a single section XML file."""
++    print(f"\nProcessing: {section_path}")
++    
++    # Parse the XML
++    tree = etree.parse(section_path)
++    root = tree.getroot()
++    
++    # Get namespace prefix
++    ns_prefix = get_namespace_prefix(tree)
++    ns_uri = root.nsmap.get(ns_prefix) if ns_prefix else None
++    
++    print(f"  Namespace prefix: {ns_prefix}, URI: {ns_uri}")
+… omitted 226 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -104,14 +104,15 @@
+                 placeholders_found.extend(re.findall(r'\{\{(\w+)\}\}', elem.tail))
+                 elem.tail = new_tail
+     
+-    # Remove lineSegArray from modified paragraphs
++    # Remove lineSegArray (linesegarray) from modified paragraphs
+     lineSegArray_removed = 0
+     for para in modified_paragraphs:
+-        # Find all lineSegArray children
+-        lineSegArrays = para.findall(f'.//{{{ns_uri}}}lineSegArray' if ns_uri else f'.//{ns_prefix}:lineSegArray')
+-        for lsa in lineSegArrays:
+-            para.remove(lsa)
+-            lineSegArray_removed += 1
++        # Find all linesegarray children (note: lowercase in actual XML)
++        for child in list(para):
++            tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
++            if tag_name.lower() == 'linesegarray':
++                para.remove(child)
++                lineSegArray_removed += 1
+     
+     print(f"  Modified paragraphs: {len(set(modified_paragraphs))}")
+     print(f"  lineSegArray elements removed: {lineSegArray_removed}")
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -222,12 +222,12 @@
+                             print(f"[FAIL] 종합의견 ending mismatch")
+                             print(f"       Expected: {expected_ending}")
+                         
+-                        # Check no lineSegArray elements
+-                        if 'lineSegArray' in content:
++                        # Check no linesegarray elements (case insensitive)
++                        if re.search(r'linesegarray', content, re.IGNORECASE):
+                             results['no_lineSegArray'] = False
+-                            print(f"[FAIL] lineSegArray found in {section_file}")
++                            print(f"[FAIL] linesegarray found in {section_file}")
+                         else:
+-                            print(f"[OK] No lineSegArray in {section_file}")
++                            print(f"[OK] No linesegarray in {section_file}")
+                 else:
+                     print(f"[WARN] Section file not found: {section_path}")
+     except zipfile.BadZipFile:
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -165,7 +165,7 @@
+         '참석자수_format': False,
+         '만족도_format': False,
+         '종합의견_ending': False,
+-        'no_lineSegArray': True
++        'no_linesegarray': True
+     }
+     
+     # Check file exists
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -224,7 +224,7 @@
+                         
+                         # Check no linesegarray elements (case insensitive)
+                         if re.search(r'linesegarray', content, re.IGNORECASE):
+-                            results['no_lineSegArray'] = False
++                            results['no_linesegarray'] = False
+                             print(f"[FAIL] linesegarray found in {section_file}")
+                         else:
+                             print(f"[OK] No linesegarray in {section_file}")
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -222,12 +222,46 @@
+                             print(f"[FAIL] 종합의견 ending mismatch")
+                             print(f"       Expected: {expected_ending}")
+                         
+-                        # Check no linesegarray elements (case insensitive)
+-                        if re.search(r'linesegarray', content, re.IGNORECASE):
+-                            results['no_linesegarray'] = False
+-                            print(f"[FAIL] linesegarray found in {section_file}")
+-                        else:
+-                            print(f"[OK] No linesegarray in {section_file}")
++                        # Check no linesegarray elements - only in modified paragraphs
++                        # Modified paragraphs are those with replaced content
++                        # For this check, we need to identify which paragraphs were modified
++                        has_placeholder_original = any(f'{{{{{key}}}}}' in content for key in data.keys())
++                        # Actually, we can't easily tell which were modified from just the output
++                        # So we'll check the working directory before/after comparison
++                        
++                # Check linesegarray in modified paragraphs only
++                # Modified paragraphs had placeholders originally
++                modified_para_ids = set()
++                with zipfile.ZipFile(HWPX_INPUT, 'r') as zf_in:
++                    with zf_in.open(section_path) as f_in:
++                        orig_content = f_in.read().decode('utf-8')
++                        # Parse original to find paragraphs with placeholders
++                        orig_root = ET.fromstring(orig_content)
++                        ns = {'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML'}
++                        orig_paras = orig_root.findall('.//hp:p', ns)
++                        for para in orig_paras:
++                            para_id = para.get('id')
++                            t_elems = para.findall('.//hp:t', ns)
++                            para_text = ''.join(t.text or '' for t in t_elems)
++                            if '{{' in para_text:
++                                modified_para_ids.add(para_id)
++                
++                # Now check output
++                output_root = ET.fromstring(content)
++                output_paras = output_root.findall('.//hp:p', ns)
++                linesegarray_in_modified = 0
++                for para in output_paras:
++                    para_id = para.get('id')
++                    if para_id in modified_para_ids:
++                        lsa = para.find('.//hp:linesegarray', ns)
++                        if lsa is not None:
++                            linesegarray_in_modified += 1
++                
++                if linesegarray_in_modified > 0:
++                    results['no_linesegarray'] = False
++                    print(f"[FAIL] {linesegarray_in_modified} linesegarray found in modified paragraphs of {section_file}")
++                else:
++                    print(f"[OK] No linesegarray in modified paragraphs of {section_file}")
+                 else:
+                     print(f"[WARN] Section file not found: {section_path}")
+     except zipfile.BadZipFile:
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -221,51 +221,56 @@
+                         else:
+                             print(f"[FAIL] 종합의견 ending mismatch")
+                             print(f"       Expected: {expected_ending}")
+-                        
+-                        # Check no linesegarray elements - only in modified paragraphs
+-                        # Modified paragraphs are those with replaced content
+-                        # For this check, we need to identify which paragraphs were modified
+-                        has_placeholder_original = any(f'{{{{{key}}}}}' in content for key in data.keys())
+-                        # Actually, we can't easily tell which were modified from just the output
+-                        # So we'll check the working directory before/after comparison
+-                        
+-                # Check linesegarray in modified paragraphs only
+-                # Modified paragraphs had placeholders originally
+-                modified_para_ids = set()
+-                with zipfile.ZipFile(HWPX_INPUT, 'r') as zf_in:
+-                    with zf_in.open(section_path) as f_in:
+-                        orig_content = f_in.read().decode('utf-8')
+-                        # Parse original to find paragraphs with placeholders
+-                        orig_root = ET.fromstring(orig_content)
+-                        ns = {'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML'}
+-                        orig_paras = orig_root.findall('.//hp:p', ns)
+-                        for para in orig_paras:
+-                            para_id = para.get('id')
+-                            t_elems = para.findall('.//hp:t', ns)
+-                            para_text = ''.join(t.text or '' for t in t_elems)
+-                            if '{{' in para_text:
+-                                modified_para_ids.add(para_id)
+-                
+-                # Now check output
+-                output_root = ET.fromstring(content)
+-                output_paras = output_root.findall('.//hp:p', ns)
+-                linesegarray_in_modified = 0
+-                for para in output_paras:
+-                    para_id = para.get('id')
+-                    if para_id in modified_para_ids:
+-                        lsa = para.find('.//hp:linesegarray', ns)
+-                        if lsa is not None:
+-                            linesegarray_in_modified += 1
+-                
+-                if linesegarray_in_modified > 0:
+-                    results['no_linesegarray'] = False
+-                    print(f"[FAIL] {linesegarray_in_modified} linesegarray found in modified paragraphs of {section_file}")
+-                else:
+-                    print(f"[OK] No linesegarray in modified paragraphs of {section_file}")
+                 else:
+                     print(f"[WARN] Section file not found: {section_path}")
+     except zipfile.BadZipFile:
+         print(f"[FAIL] Not a valid ZIP file")
++    
++    # Check linesegarray in modified paragraphs only (after the zip is closed)
++    # Modified paragraphs had placeholders originally
++    try:
++        for section_file in section_files:
++            section_path = f'Contents/{section_file}'
++            if section_path not in zf.namelist():
++                continue
++                
++            modified_para_ids = set()
++            with zipfile.ZipFile(HWPX_INPUT, 'r') as zf_in:
++                with zf_in.open(section_path) as f_in:
++                    orig_content = f_in.read().decode('utf-8')
++                    # Parse original to find paragraphs with placeholders
++                    import xml.etree.ElementTree as ET
++                    orig_root = ET.fromstring(orig_content)
++                    ns = {'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML'}
++                    orig_paras = orig_root.findall('.//hp:p', ns)
++                    for para in orig_paras:
++                        para_id = para.get('id')
++                        t_elems = para.findall('.//hp:t', ns)
++                        para_text = ''.join(t.text or '' for t in t_elems)
++                        if '{{' in para_text:
++                            modified_para_ids.add(para_id)
++            
++            # Now check output
++            with zipfile.ZipFile(hwpx_path, 'r') as zf_out:
++                with zf_out.open(section_path) as f_out:
++                    out_content = f_out.read().decode('utf-8')
++                    output_root = ET.fromstring(out_content)
+… omitted 19 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/process_hwpx.py → b//tmp/process_hwpx.py
+@@ -8,6 +8,7 @@
+ import zipfile
+ import os
+ import shutil
++import xml.etree.ElementTree as ET
+ from lxml import etree
+ 
+ # Configuration
+
+session_id: 20260618_171808_db3b50

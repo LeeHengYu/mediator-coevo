@@ -1,0 +1,211 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a//tmp/hwpx_work/fill_template.py → b//tmp/hwpx_work/fill_template.py
+@@ -0,0 +1,289 @@
++#!/usr/bin/env python3
++import json
++import os
++import shutil
++import zipfile
++import re
++import copy
++from xml.etree import ElementTree as ET
++
++# Load JSON files
++with open('/root/audit_overview.json', 'r', encoding='utf-8') as f:
++    audit_overview = json.load(f)
++
++with open('/root/corrective_actions.json', 'r', encoding='utf-8') as f:
++    corrective_actions = json.load(f)
++
++# Build replacement map
++summary = audit_overview['summary']
++replacement_map = {
++    '점검ID': summary['점검ID'],
++    '현장명': summary['현장명'],
++    '주관점검자': summary['주관점검자'],
++    '점검일': summary['점검일'],
++    '위험등급': summary['위험등급'],
++    '총평': summary['총평'],
++    '보고대상': summary['보고대상'],
++    '조치1': corrective_actions['immediate_actions'][0],
++    '조치2': corrective_actions['immediate_actions'][1],
++    '조치3': corrective_actions['immediate_actions'][2],
++}
++
++# Risk tier severity mapping
++severity_map = {
++    'High': ' 즉시조치',
++    'Medium': ' 계획보완',
++    'Low': ' 모니터링'
++}
++
++risk_tier = summary['위험등급']
++severity_note = severity_map.get(risk_tier, '')
++
++# Namespaces used in HWPX
++namespaces = {
++    'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML',
++}
++
++# Register namespaces to preserve prefixes
++for prefix, uri in namespaces.items():
++    ET.register_namespace(prefix, uri)
++
++# Also register common ones that might be in the XML
++ET.register_namespace('opf', 'http://www.idpf.org/2007/opf')
++
++def get_local_name(tag):
++    """Get local name from a namespaced tag."""
++    if '}' in tag:
++        return tag.split('}')[1]
++    return tag
++
++def is_layout_cache_element(elem):
++    """Check if element is a layout cache element."""
++    local_name = get_local_name(elem.tag).lower()
++    return 'linesegarray' in local_name or 'lineseg' in local_name
++
++def find_all_text_nodes(elem, path=""):
++    """Find all text nodes (elements with text or tail) in the element tree."""
++    results = []
++    
++    # Check if this element has text
++    if elem.text and elem.text.strip():
++        results.append((elem, 'text', elem.text))
++    
++    # Check tail text (text after the closing tag)
++    if elem.tail and elem.tail.strip():
++        results.append((elem, 'tail', elem.tail))
++    
++    # Recurse into children
++    for child in elem:
+… omitted 211 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/hwpx_work/fill_template.py → b//tmp/hwpx_work/fill_template.py
+@@ -39,18 +39,6 @@
+ risk_tier = summary['위험등급']
+ severity_note = severity_map.get(risk_tier, '')
+ 
+-# Namespaces used in HWPX
+-namespaces = {
+-    'hp': 'http://www.hancom.co.kr/hwpml/2010/HWPML',
+-}
+-
+-# Register namespaces to preserve prefixes
+-for prefix, uri in namespaces.items():
+-    ET.register_namespace(prefix, uri)
+-
+-# Also register common ones that might be in the XML
+-ET.register_namespace('opf', 'http://www.idpf.org/2007/opf')
+-
+ def get_local_name(tag):
+     """Get local name from a namespaced tag."""
+     if '}' in tag:
+@@ -62,28 +50,9 @@
+     local_name = get_local_name(elem.tag).lower()
+     return 'linesegarray' in local_name or 'lineseg' in local_name
+ 
+-def find_all_text_nodes(elem, path=""):
+-    """Find all text nodes (elements with text or tail) in the element tree."""
+-    results = []
+-    
+-    # Check if this element has text
+-    if elem.text and elem.text.strip():
+-        results.append((elem, 'text', elem.text))
+-    
+-    # Check tail text (text after the closing tag)
+-    if elem.tail and elem.tail.strip():
+-        results.append((elem, 'tail', elem.tail))
+-    
+-    # Recurse into children
+-    for child in elem:
+-        results.extend(find_all_text_nodes(child, path + "/" + get_local_name(elem.tag)))
+-    
+-    return results
+-
+ def replace_placeholders_in_text(text):
+     """Replace placeholders in text and return modified text."""
+     modified = False
+-    original_text = text
+     
+     # Replace placeholders
+     for placeholder, value in replacement_map.items():
+@@ -103,78 +72,33 @@
+ 
+ def append_severity_to_risk_tier(text, risk_tier, severity_note):
+     """Append severity note after risk tier value."""
+-    # Find the risk tier value (not in a placeholder, but the actual value)
+-    # We need to handle cases where the risk tier might be followed by other text
++    # Find the risk tier value and append severity note
+     pattern = r'(' + re.escape(risk_tier) + r')(?!' + re.escape(severity_note) + r')'
+     new_text = re.sub(pattern, r'\1' + severity_note, text)
+     return new_text
+ 
+ def process_xml_file(filepath):
+     """Process a single XML file."""
+-    # Parse XML
++    # Read the file content first
++    with open(filepath, 'r', encoding='utf-8') as f:
++        original_content = f.read()
++    
++    # Parse XML while preserving namespaces
+     tree = ET.parse(filepath)
+     root = tree.getroot()
+     
++    # Build parent map
++    parent_map = {root: None}
++    def build_parent_map(element):
++        for child in element:
++            parent_map[child] = element
++            build_parent_map(child)
++    build_parent_map(root)
++    
+     # Track which paragraphs were modified
+… omitted 185 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/hwpx_work/fill_template.py → b//tmp/hwpx_work/fill_template.py
+@@ -6,6 +6,10 @@
+ import re
+ import copy
+ from xml.etree import ElementTree as ET
++
++# Register namespaces BEFORE parsing to preserve prefixes
++ET.register_namespace('hp', 'http://www.hancom.co.kr/hwpml/2010/HWPML')
++ET.register_namespace('opf', 'http://www.idpf.org/2007/opf')
+ 
+ # Load JSON files
+ with open('/root/audit_overview.json', 'r', encoding='utf-8') as f:
+@@ -79,10 +83,6 @@
+ 
+ def process_xml_file(filepath):
+     """Process a single XML file."""
+-    # Read the file content first
+-    with open(filepath, 'r', encoding='utf-8') as f:
+-        original_content = f.read()
+-    
+     # Parse XML while preserving namespaces
+     tree = ET.parse(filepath)
+     root = tree.getroot()
+@@ -146,11 +146,6 @@
+                     p = parent_map.get(p)
+     
+     # Third pass: remove layout cache elements from modified paragraphs
+-    # We need to rebuild parent map after modifications
+-    parent_map = {root: None}
+-    build_parent_map(root)
+-    
+-    # Also need to track sublist paragraphs (in tables)
+     for elem in root.iter():
+         local_name = get_local_name(elem.tag)
+         
+@@ -189,7 +184,6 @@
+     return len(remaining_placeholders) == 0
+ 
+ # Re-extract fresh template
+-import shutil
+ if os.path.exists('/tmp/hwpx_work/template_contents'):
+     shutil.rmtree('/tmp/hwpx_work/template_contents')
+ 
+
+session_id: 20260619_024412_de2d22

@@ -1,0 +1,249 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/fill_proposal.py → b/fill_proposal.py
+@@ -0,0 +1,248 @@
++import json
++import os
++import re
++import shutil
++import zipfile
++
++# Paths
++TEMPLATE = '/root/project_proposal_template.hwpx'
++OUTPUT = '/root/project_proposal_ready.hwpx'
++EXTRACT_DIR = '/root/hwpx_extracted'
++
++# Clean up any previous extraction
++if os.path.exists(EXTRACT_DIR):
++    shutil.rmtree(EXTRACT_DIR)
++
++# Step 1: Extract the HWPX (ZIP) archive
++with zipfile.ZipFile(TEMPLATE, 'r') as zf:
++    zf.extractall(EXTRACT_DIR)
++
++# Step 2: Load JSON values
++with open('/root/project_proposal.json', 'r', encoding='utf-8') as f:
++    data = json.load(f)
++
++# Flatten nested JSON if needed (handle both flat and nested structures)
++def flatten(d, parent_key='', sep='.'):
++    items = []
++    for k, v in d.items():
++        new_key = f"{parent_key}{sep}{k}" if parent_key else k
++        if isinstance(v, dict):
++            items.extend(flatten(v, new_key, sep=sep).items())
++        else:
++            items.append((new_key, v))
++    return dict(items)
++
++flat_data = flatten(data)
++print("JSON keys (flat):", list(flat_data.keys()))
++print("JSON data:", json.dumps(data, ensure_ascii=False, indent=2))
++
++# Step 3: Process all XML files in the extracted directory
++def compute_month_span(date_range_str):
++    """Given a date range like '2025.01 ~ 2025.03', compute the month span."""
++    match = re.search(r'(\d{4})\.(\d{2})\s*~\s*(\d{4})\.(\d{2})', date_range_str)
++    if match:
++        y1, m1, y2, m2 = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
++        months = (y2 - y1) * 12 + (m2 - m1)
++        # If same month, count as 1 month
++        if months == 0:
++            months = 1
++        return f"({months}개월)"
++    return None
++
++for root, dirs, files in os.walk(EXTRACT_DIR):
++    for fname in files:
++        fpath = os.path.join(root, fname)
++        if fname.endswith('.xml'):
++            with open(fpath, 'r', encoding='utf-8') as f:
++                content = f.read()
++            
++            original_content = content
++            
++            # Replace placeholders {{key}} with values from JSON
++            # First try direct keys, then try nested dot-notation keys
++            def replace_placeholder(m):
++                key = m.group(1)
++                # Try direct lookup in original data
++                val = data.get(key)
++                if val is None:
++                    # Try flat lookup
++                    val = flat_data.get(key)
++                if val is None:
++                    # Try nested access
++                    parts = key.split('.')
++                    obj = data
++                    for p in parts:
++                        if isinstance(obj, dict):
++                            obj = obj.get(p)
++                        else:
++                            obj = None
+… omitted 170 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/fill_proposal.py → b/fill_proposal.py
+@@ -38,15 +38,19 @@
+ 
+ # Step 3: Process all XML files in the extracted directory
+ def compute_month_span(date_range_str):
+-    """Given a date range like '2025.01 ~ 2025.03', compute the month span."""
+-    match = re.search(r'(\d{4})\.(\d{2})\s*~\s*(\d{4})\.(\d{2})', date_range_str)
++    """Given a date range like '2025-08 ~ 2025-10', compute the month span."""
++    # Support both dot and hyphen separators: 2025.08 or 2025-08
++    match = re.search(r'(\d{4})[.-](\d{2})\s*~\s*(\d{4})[.-](\d{2})', date_range_str)
+     if match:
+         y1, m1, y2, m2 = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
+         months = (y2 - y1) * 12 + (m2 - m1)
+-        # If same month, count as 1 month
+         if months == 0:
+             months = 1
+         return f"({months}개월)"
++    # For single month (no ~)
++    match = re.search(r'(\d{4})[.-](\d{2})', date_range_str)
++    if match:
++        return "(1개월)"
+     return None
+ 
+ for root, dirs, files in os.walk(EXTRACT_DIR):
+@@ -59,16 +63,12 @@
+             original_content = content
+             
+             # Replace placeholders {{key}} with values from JSON
+-            # First try direct keys, then try nested dot-notation keys
+             def replace_placeholder(m):
+                 key = m.group(1)
+-                # Try direct lookup in original data
+                 val = data.get(key)
+                 if val is None:
+-                    # Try flat lookup
+                     val = flat_data.get(key)
+                 if val is None:
+-                    # Try nested access
+                     parts = key.split('.')
+                     obj = data
+                     for p in parts:
+@@ -81,113 +81,55 @@
+                 if val is not None:
+                     val_str = str(val)
+                     # Normalize budget: remove commas but keep currency symbol
+-                    if '예산' in key or 'budget' in key.lower() or (',' in val_str and re.search(r'[₩$€]', val_str)):
++                    if '예산' in key or 'budget' in key.lower():
+                         val_str = val_str.replace(',', '')
+-                    # Also check if the value itself has commas and looks like a number with currency
+                     return val_str
+                 print(f"WARNING: No value found for placeholder: {{{{{key}}}}}")
+-                return m.group(0)  # Leave as-is if not found (should not happen)
++                return m.group(0)
+             
+-            # Handle placeholders that might be split across XML tags
+-            # First, try to find and fix split placeholders
+-            # Pattern: {{ might be in one <hp:t> and }} in another
+-            # Strategy: collect all text, replace, then put back
+-            
+-            # Simple approach: replace on the raw XML string
+-            # This works when placeholders are not split across tags
+             content = re.sub(r'\{\{([^}]+)\}\}', replace_placeholder, content)
+             
+-            # If placeholders are split across tags, handle that:
+-            # Look for patterns like >{{</hp:t>...<hp:t>key}}<
+-            # Consolidate by removing intermediate tags
+-            split_pattern = r'(\{\{[^}]*?)(<[^>]*>)(.*?)(</[^>]*>)([^}]*?\}\})'
+-            while re.search(r'\{\{', content) and re.search(split_pattern, content):
+-                # Try to consolidate split placeholders
+-                def consolidate(m):
+-                    full = m.group(0)
+-                    # Remove XML tags between {{ and }}
+-                    text_only = re.sub(r'<[^>]+>', '', full)
+-                    return text_only
+-                content_new = re.sub(split_pattern, consolidate, content)
+-                if content_new == content:
+-                    break
+-                content = content_new
+-                content = re.sub(r'\{\{([^}]+)\}\}', replace_placeholder, content)
+-            
+… omitted 129 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/fill_proposal.py → b/fill_proposal.py
+@@ -16,6 +16,12 @@
+ # Step 1: Extract the HWPX (ZIP) archive
+ with zipfile.ZipFile(TEMPLATE, 'r') as zf:
+     zf.extractall(EXTRACT_DIR)
++
++# Create mimetype file if not exists
++mimetype_path = os.path.join(EXTRACT_DIR, 'mimetype')
++if not os.path.exists(mimetype_path):
++    with open(mimetype_path, 'w', encoding='utf-8') as f:
++        f.write('application/x-hwpml-package+xml')
+ 
+ # Step 2: Load JSON values
+ with open('/root/project_proposal.json', 'r', encoding='utf-8') as f:
+@@ -39,7 +45,6 @@
+ # Step 3: Process all XML files in the extracted directory
+ def compute_month_span(date_range_str):
+     """Given a date range like '2025-08 ~ 2025-10', compute the month span."""
+-    # Support both dot and hyphen separators: 2025.08 or 2025-08
+     match = re.search(r'(\d{4})[.-](\d{2})\s*~\s*(\d{4})[.-](\d{2})', date_range_str)
+     if match:
+         y1, m1, y2, m2 = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
+@@ -47,7 +52,6 @@
+         if months == 0:
+             months = 1
+         return f"({months}개월)"
+-    # For single month (no ~)
+     match = re.search(r'(\d{4})[.-](\d{2})', date_range_str)
+     if match:
+         return "(1개월)"
+@@ -94,7 +98,6 @@
+                 lambda m: m.group(1) + m.group(2).replace(',', ''), content)
+             
+             # Add month spans after phase lines with date ranges
+-            # Pattern: >X단계: description (YYYY-MM ~ YYYY-MM)<
+             phase_pattern = r'(\d단계[^<]*?)\((\d{4}[.-]\d{2}\s*~\s*\d{4}[.-]\d{2})\)([^<]*<)'
+             
+             def add_month_span_to_phase(m):
+@@ -108,17 +111,15 @@
+             
+             content = re.sub(phase_pattern, add_month_span_to_phase, content)
+             
+-            # Also handle single-month phases (no ~ in date)
+-            # Pattern: >3단계: description (YYYY-MM)< - single month
++            # Also handle single-month phases
+             single_month_pattern = r'(\d단계[^<]*?)\((\d{4}[.-]\d{2})\)([^<]*<)'
+             
+             def add_month_span_single(m):
+                 before = m.group(1)
+                 date_range = m.group(2)
+                 after = m.group(3)
+-                # Check if this is already a range (contains ~)
+                 if '~' in m.group(0):
+-                    return m.group(0)  # Already handled or is a range
++                    return m.group(0)
+                 span = compute_month_span(date_range)
+                 if span and span not in before and span not in after:
+                     return f"{before}({date_range} {span}){after}"
+@@ -144,16 +145,17 @@
+             if content != original_content:
+                 print(f"Modified: {fpath}")
+ 
+-# Step 4: Repackage as HWPX
++# Step 4: Repackage as HWPX - mimetype FIRST and uncompressed
+ if os.path.exists(OUTPUT):
+     os.remove(OUTPUT)
+ 
+ # Create the ZIP with mimetype first and uncompressed
+ with zipfile.ZipFile(OUTPUT, 'w') as zf:
+-    # Add mimetype first, uncompressed
+-    mimetype_path = os.path.join(EXTRACT_DIR, 'mimetype')
+-    if os.path.exists(mimetype_path):
+-        zf.write(mimetype_path, 'mimetype', compress_type=zipfile.ZIP_STORED)
++    # Add mimetype first, uncompressed (required by OCF/ODF/HWPX spec)
++    mimetype_file = os.path.join(EXTRACT_DIR, 'mimetype')
++    if os.path.exists(mimetype_file):
++        zf.write(mimetype_file, 'mimetype', compress_type=zipfile.ZIP_STORED)
++        print(f"Added mimetype (uncompressed, first)")
+     
+     # Add all other files
+… omitted 10 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260619_033257_a01a40

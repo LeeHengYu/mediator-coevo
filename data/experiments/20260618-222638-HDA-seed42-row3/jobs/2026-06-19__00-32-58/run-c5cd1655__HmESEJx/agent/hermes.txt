@@ -1,0 +1,167 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/process_hwpx.py → b/process_hwpx.py
+@@ -0,0 +1,114 @@
++#!/usr/bin/env python3
++import json
++import re
++import zipfile
++import xml.etree.ElementTree as ET
++
++# Paths
++DATA_PATH = '/root/inventory_data.json'
++TEMPLATE_PATH = '/root/inventory_report_template.hwpx'
++OUTPUT_PATH = '/root/inventory_report_ready.hwpx'
++
++# Load JSON data
++with open(DATA_PATH, 'r', encoding='utf-8') as f:
++    data = json.load(f)
++
++# Convert all values to strings
++for key in data:
++    if not isinstance(data[key], str):
++        data[key] = str(data[key])
++
++placeholder_re = re.compile(r'\{\{([^}]+)\}\}')
++
++# Namespace used in HWPX
++HWPML_NS = 'http://www.hancom.co.kr/hwpml/2010/HWPML'
++
++def process_xml(name: str, xml_bytes: bytes) -> bytes:
++    """Parse XML, replace placeholders, remove layout caches, return modified bytes."""
++    text = xml_bytes.decode('utf-8')
++    root = ET.fromstring(text)
++
++    modified = False
++
++    # Iterate over all paragraph elements in the tree
++    for para in root.iter(f'{{{HWPML_NS}}}p'):
++        # Collect all hp:t text nodes that are descendants of this paragraph
++        t_elements = list(para.iter(f'{{{HWPML_NS}}}t'))
++        if not t_elements:
++            continue
++
++        # Concatenate all text
++        full_text = ''.join(t.text or '' for t in t_elements)
++
++        # Replace placeholders
++        def replacer(m):
++            key = m.group(1)
++            return data.get(key, m.group(0))
++
++        new_text = placeholder_re.sub(replacer, full_text)
++
++        if new_text != full_text:
++            modified = True
++
++            # Remove layout-cache elements from the paragraph
++            # We remove direct children that are linesegarray or lineseg
++            # and also any deeper linesegarray/lineseg descendants
++            for lineseg in list(para.iter(f'{{{HWPML_NS}}}linesegarray')):
++                parent = get_parent(root, lineseg)
++                if parent is not None:
++                    parent.remove(lineseg)
++            for lineseg in list(para.iter(f'{{{HWPML_NS}}}lineseg')):
++                parent = get_parent(root, lineseg)
++                if parent is not None:
++                    parent.remove(lineseg)
++
++            # Put all replaced text into the first hp:t element
++            t_elements[0].text = new_text
++            # Clear the rest: set text empty and remove tail
++            for t in t_elements[1:]:
++                t.text = ''
++                t.tail = ''
++
++    if not modified:
++        return xml_bytes
++
++    # Serialize back to XML string
++    # ET.tostring with xml_declaration=True returns bytes
++    result = ET.tostring(root, encoding='utf-8', xml_declaration=True)
++    return result
+… omitted 36 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/process_hwpx.py → b/process_hwpx.py
+@@ -1,4 +1,7 @@
+ #!/usr/bin/env python3
++"""
++Replace {{...}} placeholders in an HWPX template with values from a JSON file.
++"""
+ import json
+ import re
+ import zipfile
+@@ -9,62 +12,64 @@
+ TEMPLATE_PATH = '/root/inventory_report_template.hwpx'
+ OUTPUT_PATH = '/root/inventory_report_ready.hwpx'
+ 
+-# Load JSON data
++# Register namespace so ElementTree keeps the 'hp' prefix
++HWPML_NS = 'http://www.hancom.co.kr/hwpml/2010/HWPML'
++ET.register_namespace('hp', HWPML_NS)
++
++# Load JSON data and stringify all values
+ with open(DATA_PATH, 'r', encoding='utf-8') as f:
+     data = json.load(f)
+-
+-# Convert all values to strings
+-for key in data:
+-    if not isinstance(data[key], str):
+-        data[key] = str(data[key])
++for k, v in list(data.items()):
++    if not isinstance(v, str):
++        data[k] = str(v)
+ 
+ placeholder_re = re.compile(r'\{\{([^}]+)\}\}')
+ 
+-# Namespace used in HWPX
+-HWPML_NS = 'http://www.hancom.co.kr/hwpml/2010/HWPML'
+ 
+-def process_xml(name: str, xml_bytes: bytes) -> bytes:
++def build_parent_map(root):
++    """Return a dict mapping each element to its parent."""
++    parent_map = {}
++    for parent in root.iter():
++        for child in parent:
++            parent_map[child] = parent
++    return parent_map
++
++
++def remove_layout_caches(para, parent_map):
++    """Remove linesegarray and lineseg descendants from a paragraph."""
++    # Snapshot the descendants to avoid modification-during-iteration issues
++    for elem in list(para.iter(f'{{{HWPML_NS}}}linesegarray')):
++        parent = parent_map.get(elem)
++        if parent is not None and elem in parent:
++            parent.remove(elem)
++    for elem in list(para.iter(f'{{{HWPML_NS}}}lineseg')):
++        parent = parent_map.get(elem)
++        if parent is not None and elem in parent:
++            parent.remove(elem)
++
++
++def process_xml(xml_bytes: bytes) -> bytes:
+     """Parse XML, replace placeholders, remove layout caches, return modified bytes."""
+     text = xml_bytes.decode('utf-8')
+     root = ET.fromstring(text)
+-
++    parent_map = build_parent_map(root)
+     modified = False
+ 
+-    # Iterate over all paragraph elements in the tree
+-    for para in root.iter(f'{{{HWPML_NS}}}p'):
+-        # Collect all hp:t text nodes that are descendants of this paragraph
+-        t_elements = list(para.iter(f'{{{HWPML_NS}}}t'))
++    para_tag = f'{{{HWPML_NS}}}p'
++    t_tag = f'{{{HWPML_NS}}}t'
++
++    for para in root.iter(para_tag):
++        t_elements = list(para.iter(t_tag))
+         if not t_elements:
+             continue
+ 
+-        # Concatenate all text
+         full_text = ''.join(t.text or '' for t in t_elements)
+… omitted 84 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260618_163610_23a4ce

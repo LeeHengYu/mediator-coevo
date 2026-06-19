@@ -1,0 +1,184 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a//tmp/update_hwpx.py → b//tmp/update_hwpx.py
+@@ -0,0 +1,272 @@
++#!/usr/bin/env python3
++"""Update HWPX renewal playbook with new values from JSON and CSV."""
++import json
++import csv
++import zipfile
++import os
++import tempfile
++import xml.etree.ElementTree as ET
++
++# Files
++INPUT_HWPX = '/root/renewal_playbook.hwpx'
++UPDATE_JSON = '/root/renewal_update.json'
++FOLLOWUPS_CSV = '/root/followups.csv'
++OUTPUT_HWPX = '/root/renewal_playbook_updated.hwpx'
++
++# Namespace
++NS_HP = "http://www.hancom.co.kr/hwpml/2010/HWPML"
++ET.register_namespace('hp', NS_HP)
++
++# Read updates
++with open(UPDATE_JSON, 'r', encoding='utf-8') as f:
++    updates = json.load(f)
++
++# Read followups, sort by sequence
++followups = []
++with open(FOLLOWUPS_CSV, 'r', encoding='utf-8') as f:
++    reader = csv.DictReader(f)
++    for row in reader:
++        followups.append((int(row['sequence']), row['item']))
++followups.sort(key=lambda x: x[0])
++
++# Extract HWPX to temp directory
++temp_dir = tempfile.mkdtemp()
++with zipfile.ZipFile(INPUT_HWPX, 'r') as z:
++    z.extractall(temp_dir)
++
++# Create mimetype file (standard HWPX mimetype)
++mimetype_path = os.path.join(temp_dir, 'mimetype')
++if not os.path.exists(mimetype_path):
++    with open(mimetype_path, 'w', encoding='utf-8') as f:
++        f.write('application/vnd.hancom.hwpx')
++
++# Find all XML files to process
++xml_files = []
++for root_dir, dirs, files in os.walk(temp_dir):
++    for file in files:
++        if file.endswith('.xml'):
++            xml_files.append(os.path.join(root_dir, file))
++
++# Process each XML file
++for xml_path in xml_files:
++    tree = ET.parse(xml_path)
++    root = tree.getroot()
++    modified = False
++    modified_paras = set()
++
++    # Step 1: Consolidate <hp:t> tags within each <hp:run>
++    for run in root.iter(f'{{{NS_HP}}}run'):
++        t_elements = list(run.findall(f'{{{NS_HP}}}t'))
++        if len(t_elements) > 1:
++            merged_text = ''.join(t.text or '' for t in t_elements)
++            t_elements[0].text = merged_text
++            for t in t_elements[1:]:
++                run.remove(t)
++            modified = True
++
++    # Step 2: Perform text replacements in <hp:t> elements
++    for para in root.iter(f'{{{NS_HP}}}p'):
++        para_modified = False
++        for t_elem in para.iter(f'{{{NS_HP}}}t'):
++            original_text = t_elem.text or ''
++            new_text = original_text
++
++            # Never modify the appendix sentence
++            if original_text == '이 부록 문단은 그대로 유지해야 합니다.':
++                continue
++
++            # Customer name (split across runs in original)
+… omitted 194 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//tmp/update_hwpx.py → b//tmp/update_hwpx.py
+@@ -149,9 +149,12 @@
+             f"hp:linesegarray still present in paragraph after removal!"
+         )
+ 
+-    # Write back modified XML
++    # Write back modified XML with preserved XML declaration format (double quotes)
+     if modified:
+-        tree.write(xml_path, encoding='UTF-8', xml_declaration=True)
++        root = tree.getroot()
++        with open(xml_path, 'wb') as f:
++            f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n')
++            tree.write(f, encoding='UTF-8', xml_declaration=False)
+ 
+ # Step 5: Re-zip as HWPX
+ # Add mimetype FIRST with ZIP_STORED, everything else with ZIP_DEFLATED
+  ┊ review diff
+a//tmp/update_hwpx.py → b//tmp/update_hwpx.py
+@@ -189,69 +189,64 @@
+             print(f"\n--- {name} ---")
+             content = z.read(name).decode('utf-8')
+ 
+-            # Check new values present
+-            checks = [
+-                (updates['customer'], 'customer'),
+-                (updates['owner_name'], 'owner_name'),
+-                (updates['band'], 'band'),
+-                (updates['escalation_email'], 'escalation_email'),
+-                (updates['note'], 'note'),
+-                (f"{updates['window_start']} ~ {updates['window_end']}", 'window'),
+-            ]
+-            for val, label in checks:
++            # File-specific expected values
++            if 'section0' in name:
++                expected_values = [
++                    (updates['customer'], 'customer'),
++                    (updates['owner_name'], 'owner_name'),
++                    (updates['band'], 'band'),
++                    (updates['escalation_email'], 'escalation_email'),
++                    (updates['note'], 'note'),
++                    (f"{updates['window_start']} ~ {updates['window_end']}", 'window'),
++                ]
++                unexpected_values = [
++                    ('이 부록 문단은 그대로 유지해야 합니다.', 'appendix'),
++                ]
++            else:  # section1
++                expected_values = [
++                    (f"{updates['window_start']} ~ {updates['window_end']}", 'window'),
++                    ('이 부록 문단은 그대로 유지해야 합니다.', 'appendix'),
++                ]
++                for seq, item in followups:
++                    expected_values.append((f"{seq}. {item}", f'follow-up {seq}'))
++                unexpected_values = []
++
++            for val, label in expected_values:
+                 if val in content:
+-                    print(f"  [OK] {label} found: {val}")
++                    print(f"  [OK] {label} found")
+                 else:
+                     errors.append(f"{name}: {label} missing")
+                     print(f"  [ERROR] {label} NOT found: {val}")
+ 
+-            # Check old values removed
++            for val, label in unexpected_values:
++                if val in content:
++                    errors.append(f"{name}: unexpected {label} present")
++                    print(f"  [ERROR] unexpected {label} present")
++
++            # Check old values removed globally
+             old_checks = [
+                 'Northwind',
+                 '이전담당자',
++                '2025-04-01 ~ 2025-04-15',
+                 'Standard-18M',
+                 'ops-old@northwind.example',
+                 '기존 메모를 새 메모로 바꾸세요.',
+                 'old follow-up',
+-                '2025-04-01 ~ 2025-04-15',
+             ]
+             for old_val in old_checks:
+                 if old_val in content:
+                     errors.append(f"{name}: old value '{old_val}' still present")
+                     print(f"  [ERROR] old value still present: {old_val}")
+ 
+-            # Check appendix preserved
+-            appendix = '이 부록 문단은 그대로 유지해야 합니다.'
+-            if appendix in content:
+-                print(f"  [OK] appendix preserved")
+-            else:
+-                errors.append(f"{name}: appendix missing")
+-                print(f"  [ERROR] appendix missing!")
+-
+-            # Check follow-ups in sequence
+-            for seq, item in followups:
+-                expected = f"{seq}. {item}"
+-                if expected in content:
+-                    print(f"  [OK] follow-up {seq}: {expected}")
+… omitted 24 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260619_054335_011238

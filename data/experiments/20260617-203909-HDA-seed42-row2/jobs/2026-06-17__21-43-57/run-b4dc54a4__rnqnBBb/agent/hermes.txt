@@ -1,0 +1,197 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,227 @@
++#!/usr/bin/env python3
++"""
++Generate clinic_intake_ready.hwpx from template and patient data.
++"""
++import zipfile
++import json
++import re
++import xml.etree.ElementTree as ET
++from io import BytesIO
++
++def load_patient_data(path):
++    """Load patient data from JSON."""
++    with open(path, 'r', encoding='utf-8') as f:
++        return json.load(f)
++
++def compute_korean_age(birth_date_str, visit_date_str):
++    """
++    Compute Korean full-year age.
++    visit_year - birth_year, minus 1 if birthday hasn't occurred yet in visit year.
++    Returns formatted string like '(35세)'.
++    """
++    birth_year, birth_month, birth_day = map(int, birth_date_str.split('-'))
++    visit_year, visit_month, visit_day = map(int, visit_date_str.split('-'))
++    
++    age = visit_year - birth_year
++    # If birthday hasn't occurred yet in visit year, subtract 1
++    if (visit_month, visit_day) < (birth_month, birth_day):
++        age -= 1
++    
++    return f"({age}세)"
++
++def normalize_phone(phone_str):
++    """
++    Normalize phone number to 3-4-4 format (for 11 digits) or 3-3-4 (for 10 digits).
++    """
++    digits = re.sub(r'\D', '', phone_str)
++    if len(digits) == 11:
++        return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
++    elif len(digits) == 10:
++        return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
++    else:
++        # Return as-is if not standard length
++        return phone_str
++
++def get_namespaces(xml_content):
++    """Extract namespaces from XML content for proper registration."""
++    namespaces = {}
++    # Parse using iterparse to get start-ns events
++    events = ('start-ns',)
++    try:
++        for event, elem in ET.iterparse(BytesIO(xml_content), events):
++            if event == 'start-ns':
++                prefix, uri = elem
++                namespaces[prefix] = uri
++    except ET.ParseError:
++        pass
++    return namespaces
++
++def remove_lineSegArray(element):
++    """Remove all lineSegArray child elements from an element."""
++    to_remove = []
++    for child in element:
++        # Check local name (without namespace)
++        tag_local = child.tag.split('}')[-1] if '}' in child.tag else child.tag
++        if tag_local.lower() in ('linesegarray', 'lineseg'):
++            to_remove.append(child)
++    for child in to_remove:
++        element.remove(child)
++
++def find_all_paragraphs(element):
++    """Find all paragraph elements recursively."""
++    paragraphs = []
++    # Check if this is a paragraph element (local name 'p')
++    tag_local = element.tag.split('}')[-1] if '}' in element.tag else element.tag
++    if tag_local == 'p':
++        paragraphs.append(element)
++    for child in element:
++        paragraphs.extend(find_all_paragraphs(child))
+… omitted 149 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -174,17 +174,18 @@
+     with zipfile.ZipFile(template_path, 'r') as zin:
+         files = zin.infolist()
+         
++        # Determine if mimetype exists
++        mimetype_data = None
++        try:
++            mimetype_data = zin.read('mimetype')
++        except KeyError:
++            # Use standard HWPX mimetype
++            mimetype_data = b'application/hwp+zip'
++        
+         # Create output ZIP
+         with zipfile.ZipFile(output_path, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+-            # First, write mimetype if it exists (stored, no compression)
+-            mimetype_data = None
+-            try:
+-                mimetype_data = zin.read('mimetype')
+-            except KeyError:
+-                pass
+-            
+-            if mimetype_data:
+-                zout.writestr('mimetype', mimetype_data, compress_type=zipfile.ZIP_STORED)
++            # Write mimetype FIRST with stored (no compression)
++            zout.writestr('mimetype', mimetype_data, compress_type=zipfile.ZIP_STORED)
+             
+             # Process other files
+             for item in files:
+  ┊ review diff
+a/test_output.py → b/test_output.py
+@@ -0,0 +1,149 @@
++"""
++Verifier for clinic_intake_ready.hwpx
++"""
++import zipfile
++import json
++import pytest
++from xml.etree import ElementTree as ET
++
++OUTPUT_PATH = '/root/clinic_intake_ready.hwpx'
++PATIENT_PATH = '/root/patient_intake.json'
++
++def load_patient():
++    with open(PATIENT_PATH, 'r', encoding='utf-8') as f:
++        return json.load(f)
++
++class TestZIPStructure:
++    """Verify the HWPX ZIP archive structure."""
++    
++    def test_mimetype_first_and_stored(self):
++        with zipfile.ZipFile(OUTPUT_PATH) as z:
++            info = z.infolist()
++            assert len(info) > 0, "Archive is empty"
++            assert info[0].filename == 'mimetype', "mimetype must be first entry"
++            assert info[0].compress_type == zipfile.ZIP_STORED, "mimetype must be stored (no compression)"
++    
++    def test_no_remaining_placeholders(self):
++        with zipfile.ZipFile(OUTPUT_PATH) as z:
++            for name in z.namelist():
++                data = z.read(name)
++                if b'{{' in data:
++                    # Find and print the lines with placeholders
++                    content = data.decode('utf-8', errors='replace')
++                    for line in content.split('\n'):
++                        if '{{' in line:
++                            print(f"Placeholder in {name}: {line.strip()}")
++                    pytest.fail(f"Placeholder remains in {name}")
++
++
++class TestPatientDataReplacements:
++    """Verify patient data is correctly inserted."""
++    
++    @pytest.fixture
++    def section_xml(self):
++        with zipfile.ZipFile(OUTPUT_PATH) as z:
++            return z.read('Contents/section0.xml').decode('utf-8')
++    
++    @pytest.fixture
++    def patient(self):
++        return load_patient()
++    
++    def test_patient_name_replaced(self, section_xml, patient):
++        """환자명 should be replaced."""
++        assert patient['환자명'] in section_xml, f"Patient name {patient['환자명']} not found"
++        assert '{{환자명}}' not in section_xml, "환자명 placeholder remains"
++    
++    def test_patient_name_appears_twice(self, section_xml, patient):
++        """환자명 should appear in both 환자명: and 환자명 확인: lines."""
++        count = section_xml.count(patient['환자명'])
++        assert count == 2, f"Patient name should appear twice (in line and confirmation), found {count} times"
++    
++    def test_birth_date_with_age(self, section_xml, patient):
++        """생년월일 should include the birth date with Korean age."""
++        # Calculate expected age
++        birth_year, birth_month, birth_day = map(int, patient['생년월일'].split('-'))
++        visit_year, visit_month, visit_day = map(int, patient['방문일'].split('-'))
++        age = visit_year - birth_year
++        if (visit_month, visit_day) < (birth_month, birth_day):
++            age -= 1
++        
++        expected_text = f"생년월일: {patient['생년월일']} ({age}세)"
++        assert expected_text in section_xml, f"Expected '{expected_text}' in XML"
++    
++    def test_visit_date_replaced(self, section_xml, patient):
++        """방문일 should be replaced."""
++        expected_text = f"방문일: {patient['방문일']}"
++        assert expected_text in section_xml, f"Expected '{expected_text}'"
++    
++    def test_medical_team_replaced(self, section_xml, patient):
+… omitted 71 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260617_124636_baae3c

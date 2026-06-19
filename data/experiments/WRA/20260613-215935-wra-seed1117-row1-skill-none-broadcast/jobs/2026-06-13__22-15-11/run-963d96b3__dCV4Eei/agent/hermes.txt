@@ -1,0 +1,182 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/inspect_workbook.py → b/inspect_workbook.py
+@@ -0,0 +1,48 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++path='/root/output/result.xlsx'
++wb=load_workbook(path, data_only=False)
++print('Sheet names:', wb.sheetnames)
++for name in ['Task','Data']:
++    print(f'{name} exists:', name in wb.sheetnames)
++ws=wb['Task']
++print('\nTask row 10 H:L year headers:')
++print([(get_column_letter(c), ws.cell(10,c).value) for c in range(8,13)])
++for rows in [(12,17),(19,24),(26,31)]:
++    print(f'\nTask column D rows {rows[0]}-{rows[1]}:')
++    print([(r, ws.cell(r,4).value) for r in range(rows[0], rows[1]+1)])
++print('\nTask column D rows 35-40:')
++print([(r, ws.cell(r,4).value) for r in range(35,41)])
++print('\nTask rows 42-47 A:G:')
++for r in range(42,48):
++    print(r, [ws.cell(r,c).value for c in range(1,8)])
++print('\nTask row 50 A:G:')
++print([ws.cell(50,c).value for c in range(1,8)])
++print('\nTask block labels rows 12-17,19-24,26-31 A:G:')
++for rows in [(12,17),(19,24),(26,31),(35,40)]:
++    print(f'Rows {rows[0]}-{rows[1]} A:G')
++    for r in range(rows[0], rows[1]+1):
++        print(r, [ws.cell(r,c).value for c in range(1,8)])
++print('\nCurrent yellow target cells values/formulas:')
++for rows in [(12,17),(19,24),(26,31),(35,40),(42,47),(50,50)]:
++    for r in range(rows[0], rows[1]+1):
++        print(r, [ws.cell(r,c).value for c in range(8,13)])
++
++ds=wb['Data']
++print('\nData max_row/max_column:', ds.max_row, ds.max_column, get_column_letter(ds.max_column))
++print('Data rows 21-38 A:Z:')
++for r in range(21,39):
++    vals=[ds.cell(r,c).value for c in range(1,27)]
++    print(r, vals)
++print('\nNon-empty Data cells rows 1-45 A:AZ:')
++for r in range(1, min(ds.max_row,45)+1):
++    vals=[]
++    anyv=False
++    for c in range(1, min(ds.max_column,52)+1):
++        v=ds.cell(r,c).value
++        vals.append(v)
++        if v is not None:
++            anyv=True
++    if anyv:
++        last=max(i for i,v in enumerate(vals, start=1) if v is not None)
++        print(r, vals[:last])
+  ┊ review diff
+a/write_formulas.py → b/write_formulas.py
+@@ -0,0 +1,64 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++
++path = '/root/output/result.xlsx'
++wb = load_workbook(path, data_only=False)
++ws = wb['Task']
++
++# Discovered Data layout:
++# Data rows 21:38 contain records.
++# Column D contains the series/indicator code.
++# Row 4 columns H:L contain year headers.
++# Columns H:L rows 21:38 contain values.
++lookup_formula = '=INDEX(Data!$H$21:$L$38, MATCH($D{row}, Data!$D$21:$D$38, 0), MATCH({col}$10, Data!$H$4:$L$4, 0))'
++
++# Step 1: lookup formulas in H12:L17, H19:L24, H26:L31
++for start, end in [(12, 17), (19, 24), (26, 31)]:
++    for row in range(start, end + 1):
++        for col in range(8, 13):
++            letter = get_column_letter(col)
++            ws.cell(row, col).value = lookup_formula.format(row=row, col=letter)
++
++# Step 2: net capacity headroom H35:L40
++# Rows 12:17 = Available Care Slots; 19:24 = Occupied Care Slots; 26:31 = Staffed Bed Capacity.
++for i, row in enumerate(range(35, 41)):
++    available_row = 12 + i
++    occupied_row = 19 + i
++    beds_row = 26 + i
++    for col in range(8, 13):
++        letter = get_column_letter(col)
++        ws.cell(row, col).value = f'=({letter}{available_row}-{letter}{occupied_row})/{letter}{beds_row}*100'
++
++# Step 2: summary stats H42:L47, matching labels in E42:E47.
++summary_formulas = {
++    42: 'MIN',
++    43: 'MAX',
++    44: 'MEDIAN',
++    45: 'AVERAGE',
++    46: 'PERCENTILE25',
++    47: 'PERCENTILE75',
++}
++for row, kind in summary_formulas.items():
++    for col in range(8, 13):
++        letter = get_column_letter(col)
++        if kind == 'PERCENTILE25':
++            formula = f'=PERCENTILE({letter}35:{letter}40, 0.25)'
++        elif kind == 'PERCENTILE75':
++            formula = f'=PERCENTILE({letter}35:{letter}40, 0.75)'
++        else:
++            formula = f'={kind}({letter}35:{letter}40)'
++        ws.cell(row, col).value = formula
++
++# Step 3: weighted mean H50:L50, capacity weights from H26:H31 etc.
++for col in range(8, 13):
++    letter = get_column_letter(col)
++    ws.cell(50, col).value = f'=SUMPRODUCT({letter}35:{letter}40, {letter}26:{letter}31) / SUM({letter}26:{letter}31)'
++
++wb.save(path)
++
++# Re-read a few representative cells to confirm stored formulas.
++wb2 = load_workbook(path, data_only=False)
++ws2 = wb2['Task']
++print('Representative formulas after save:')
++for cell in ['H12','I13','L17','H19','L24','H26','L31','H35','L40','H42','H43','H44','H45','H46','H47','H50','L50']:
++    print(cell, ws2[cell].value)
+  ┊ review diff
+a/validate_workbook.py → b/validate_workbook.py
+@@ -0,0 +1,58 @@
++from openpyxl import load_workbook
++from openpyxl.utils import get_column_letter
++path='/root/output/result.xlsx'
++
++blocks=[(12,17),(19,24),(26,31),(35,40),(42,47),(50,50)]
++wb=load_workbook(path, data_only=False)
++ws=wb['Task']
++print('VALIDATION data_only=False formulas in modified cells')
++print('Sheets:', wb.sheetnames)
++for start,end in blocks:
++    print(f'Rows {start}-{end} H:L')
++    for r in range(start,end+1):
++        print(r, [ws.cell(r,c).value for c in range(8,13)])
++
++# Confirm no target formula cells are blank and all are formulas.
++missing=[]
++non_formula=[]
++for start,end in blocks:
++    for r in range(start,end+1):
++        for c in range(8,13):
++            v=ws.cell(r,c).value
++            if v is None:
++                missing.append(f'{get_column_letter(c)}{r}')
++            elif not (isinstance(v,str) and v.startswith('=')):
++                non_formula.append((f'{get_column_letter(c)}{r}', v))
++print('Missing target cells:', missing)
++print('Non-formula target cells:', non_formula)
++
++# Formula shape checks.
++expected = {
++    'H12': '=INDEX(Data!$H$21:$L$38, MATCH($D12, Data!$D$21:$D$38, 0), MATCH(H$10, Data!$H$4:$L$4, 0))',
++    'L31': '=INDEX(Data!$H$21:$L$38, MATCH($D31, Data!$D$21:$D$38, 0), MATCH(L$10, Data!$H$4:$L$4, 0))',
++    'H35': '=(H12-H19)/H26*100',
++    'L40': '=(L17-L24)/L31*100',
++    'H42': '=MIN(H35:H40)',
++    'H43': '=MAX(H35:H40)',
++    'H44': '=MEDIAN(H35:H40)',
++    'H45': '=AVERAGE(H35:H40)',
++    'H46': '=PERCENTILE(H35:H40, 0.25)',
++    'H47': '=PERCENTILE(H35:H40, 0.75)',
++    'H50': '=SUMPRODUCT(H35:H40, H26:H31) / SUM(H26:H31)',
++    'L50': '=SUMPRODUCT(L35:L40, L26:L31) / SUM(L26:L31)',
++}
++errors=[]
++for cell, formula in expected.items():
++    if ws[cell].value != formula:
++        errors.append((cell, ws[cell].value, formula))
++print('Formula shape errors:', errors)
++
++wbd=load_workbook(path, data_only=True)
++wsd=wbd['Task']
++print('\nVALIDATION data_only=True target cached values (openpyxl does not calculate formulas):')
++for cell in ['H12','L31','H35','L40','H42','H50','L50']:
++    print(cell, wsd[cell].value)
++
++if missing or non_formula or errors:
++    raise SystemExit(1)
++print('VALIDATION PASSED')
+
+session_id: 20260613_141726_4ea724
