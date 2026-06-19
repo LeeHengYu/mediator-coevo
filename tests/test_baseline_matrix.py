@@ -30,6 +30,7 @@ from mediated_coevo.experiment.conditions import (
 )
 from mediated_coevo.experiment.runtime_factory import (
     ExperimentFactory,
+    build_benchmark_repo,
     build_matrix_runtimes,
 )
 from mediated_coevo.cli.config import _run_config_overrides
@@ -1067,6 +1068,18 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
     (row_skill_dirs[0] / "executor" / "SKILL.md").write_text("# Changed\n")
     assert (tmp_path / "skills" / "executor" / "SKILL.md").read_text() == "# Executor\n"
     assert (row_skill_dirs[1] / "executor" / "SKILL.md").read_text() == "# Executor\n"
+
+
+def test_build_benchmark_repo_uses_configured_harbor_base_images(tmp_path):
+    config = _config()
+    config.paths.benchmarks_dir = "benchmarks/skillflow"
+    config.executor_runtime.harbor_base_image = "local/harbor-base:test"
+    config.executor_runtime.legacy_harbor_base_images = ["legacy/harbor-base:test"]
+
+    repo = build_benchmark_repo(tmp_path, config)
+
+    assert repo.harbor_base_image == "local/harbor-base:test"
+    assert repo.legacy_harbor_base_images == ("legacy/harbor-base:test",)
 
 
 def test_matrix_runtimes_can_build_only_selected_presets(tmp_path):

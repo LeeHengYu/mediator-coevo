@@ -15,7 +15,10 @@ from pathlib import Path
 SECTION_RE = re.compile(r"^\s*\[[^\]]+\]\s*$")
 ENVIRONMENT_SECTION_RE = re.compile(r"^\s*\[\s*environment\s*\]\s*$", re.IGNORECASE)
 DOCKER_IMAGE_RE = re.compile(r"^\s*docker_image\s*=\s*['\"]([^'\"]+)['\"]\s*$")
-FROM_IMAGE_RE = re.compile(r"^\s*FROM\s+(?P<image>[^\s]+)", re.IGNORECASE)
+FROM_IMAGE_RE = re.compile(
+    r"^(?P<prefix>\s*FROM\s+(?:(?:--[^\s]+)\s+)*)(?P<image>[^\s]+)(?P<suffix>.*)$",
+    re.IGNORECASE,
+)
 
 LEGACY_HARBOR_BASE_IMAGE = "skillevlove/harbor-cli-openhands:ubuntu24.04"
 SKILLFLOW_HARBOR_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
@@ -75,6 +78,24 @@ def parse_args() -> argparse.Namespace:
         help="Optional docker build platform (example: linux/amd64)",
     )
     parser.add_argument(
+        "--base-image",
+        type=str,
+        default=SKILLFLOW_HARBOR_BASE_IMAGE,
+        help=(
+            "Canonical SkillFlow Harbor base image used to normalize legacy "
+            f"Dockerfiles (default: {SKILLFLOW_HARBOR_BASE_IMAGE})"
+        ),
+    )
+    parser.add_argument(
+        "--legacy-base-image",
+        action="append",
+        default=None,
+        help=(
+            "Legacy base image to rewrite to --base-image. Repeat for multiple "
+            f"images. Default: {LEGACY_HARBOR_BASE_IMAGE}"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print planned actions only. Do not build images or modify files.",
@@ -93,7 +114,44 @@ def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def discover_tasks(tasks_root: Path, stats: Stats) -> list[TaskEntry]:
+def normalize_dockerfile_text(
+    text: str,
+    *,
+    base_image: str,
+    legacy_base_images: tuple[str, ...],
+) -> tuple[str, bool]:
+    legacy_images = {image.strip() for image in legacy_base_images if image.strip()}
+    if not legacy_images:
+        return text, False
+
+    lines = text.splitlines()
+    changed = False
+    normalized_lines: list[str] = []
+    for line in lines:
+        match = FROM_IMAGE_RE.match(line)
+        if match is not None and match.group("image") in legacy_images:
+            line = f"{match.group('prefix')}{base_image}{match.group('suffix')}"
+            changed = True
+        normalized_lines.append(line)
+
+    if not changed:
+        return text, False
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    normalized_text = newline.join(normalized_lines)
+    if text.endswith(("\n", "\r\n")):
+        normalized_text += newline
+    return normalized_text, True
+
+
+def discover_tasks(
+    tasks_root: Path,
+    stats: Stats,
+    *,
+    base_image: str = SKILLFLOW_HARBOR_BASE_IMAGE,
+    legacy_base_images: tuple[str, ...] = (LEGACY_HARBOR_BASE_IMAGE,),
+    dry_run: bool = False,
+) -> list[TaskEntry]:
     entries: list[TaskEntry] = []
 
     for task_toml in sorted(tasks_root.rglob("task.toml"), key=lambda p: p.as_posix()):
@@ -107,10 +165,24 @@ def discover_tasks(tasks_root: Path, stats: Stats) -> list[TaskEntry]:
             stats.tasks_missing_dockerfile += 1
             continue
 
-        instruction_md = task_dir / "instruction.md"
-        hash_inputs: list[bytes] = [dockerfile.read_bytes()]
-        if instruction_md.exists():
-            hash_inputs.append(instruction_md.read_bytes())
+        dockerfile_text = dockerfile.read_text(encoding="utf-8")
+        normalized_dockerfile_text, changed = normalize_dockerfile_text(
+            dockerfile_text,
+            base_image=base_image,
+            legacy_base_images=legacy_base_images,
+        )
+        if changed:
+            if dry_run:
+                print(f"[DRY-RUN] NORMALIZE Dockerfile base image: {dockerfile}")
+            else:
+                dockerfile.write_text(normalized_dockerfile_text, encoding="utf-8")
+                print(f"NORMALIZE Dockerfile base image: {dockerfile}")
+
+        hash_inputs: list[bytes] = [normalized_dockerfile_text.encode("utf-8")]
+        instruction_path = task_dir / "instruction.md"
+        if instruction_path.exists():
+            instruction_md: Path | None = instruction_path
+            hash_inputs.append(instruction_path.read_bytes())
         else:
             instruction_md = None
         content_sha = sha256_bytes(b"".join(hash_inputs))
@@ -147,7 +219,9 @@ def run_cmd_stream(cmd: list[str]) -> int:
 
 
 def list_local_images() -> set[str]:
-    result = run_cmd(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], check=False)
+    result = run_cmd(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], check=False
+    )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Failed to list local images")
 
@@ -198,47 +272,43 @@ def ensure_legacy_base_image_alias(
     dockerfile: Path,
     local_images: set[str],
     dry_run: bool,
+    *,
+    base_image: str = SKILLFLOW_HARBOR_BASE_IMAGE,
+    legacy_base_images: tuple[str, ...] = (LEGACY_HARBOR_BASE_IMAGE,),
 ) -> bool:
     """Alias the repo-built Harbor base image for older synced task Dockerfiles."""
-    if LEGACY_HARBOR_BASE_IMAGE not in dockerfile_base_images(dockerfile):
-        return True
-    if LEGACY_HARBOR_BASE_IMAGE in local_images:
-        return True
-    if SKILLFLOW_HARBOR_BASE_IMAGE not in local_images:
-        print(
-            "WARN: Dockerfile uses legacy Harbor base image "
-            f"{LEGACY_HARBOR_BASE_IMAGE}, but local base image "
-            f"{SKILLFLOW_HARBOR_BASE_IMAGE} is missing. "
-            "Run `uv run medcoevo build-base-image` first."
-        )
-        return True
+    used_base_images = dockerfile_base_images(dockerfile)
+    for legacy_base_image in legacy_base_images:
+        if legacy_base_image not in used_base_images:
+            continue
+        if legacy_base_image in local_images:
+            continue
+        if base_image not in local_images:
+            print(
+                "WARN: Dockerfile uses legacy Harbor base image "
+                f"{legacy_base_image}, but local base image {base_image} is "
+                "missing. Run `uv run medcoevo build-base-image` first."
+            )
+            continue
 
-    cmd = [
-        "docker",
-        "tag",
-        SKILLFLOW_HARBOR_BASE_IMAGE,
-        LEGACY_HARBOR_BASE_IMAGE,
-    ]
-    if dry_run:
-        print("[DRY-RUN] TAG BASE IMAGE:", " ".join(cmd))
-        local_images.add(LEGACY_HARBOR_BASE_IMAGE)
-        return True
+        cmd = ["docker", "tag", base_image, legacy_base_image]
+        if dry_run:
+            print("[DRY-RUN] TAG BASE IMAGE:", " ".join(cmd))
+            local_images.add(legacy_base_image)
+            continue
 
-    result = run_cmd(cmd, check=False)
-    if result.returncode != 0:
-        stderr = result.stderr.strip() or "unknown error"
-        print(
-            "ERROR: failed to tag legacy Harbor base image "
-            f"{LEGACY_HARBOR_BASE_IMAGE}: {stderr}",
-            file=sys.stderr,
-        )
-        return False
+        result = run_cmd(cmd, check=False)
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or "unknown error"
+            print(
+                "ERROR: failed to tag legacy Harbor base image "
+                f"{legacy_base_image}: {stderr}",
+                file=sys.stderr,
+            )
+            return False
 
-    print(
-        "TAG BASE IMAGE: "
-        f"{SKILLFLOW_HARBOR_BASE_IMAGE} -> {LEGACY_HARBOR_BASE_IMAGE}"
-    )
-    local_images.add(LEGACY_HARBOR_BASE_IMAGE)
+        print(f"TAG BASE IMAGE: {base_image} -> {legacy_base_image}")
+        local_images.add(legacy_base_image)
     return True
 
 
@@ -303,7 +373,9 @@ def upsert_docker_image_in_task_toml(
             new_text += newline
 
         if dry_run:
-            print(f"[DRY-RUN] ADD [environment] + docker_image in task.toml: {task_toml}")
+            print(
+                f"[DRY-RUN] ADD [environment] + docker_image in task.toml: {task_toml}"
+            )
             return True
 
         task_toml.write_text(new_text, encoding="utf-8")
@@ -350,13 +422,20 @@ def upsert_docker_image_in_task_toml(
 def main() -> int:
     args = parse_args()
     stats = Stats()
+    legacy_base_images = tuple(args.legacy_base_image or [LEGACY_HARBOR_BASE_IMAGE])
 
     tasks_root = args.tasks_root.expanduser().resolve()
     if not tasks_root.exists() or not tasks_root.is_dir():
         print(f"ERROR: tasks root not found: {tasks_root}", file=sys.stderr)
         return 1
 
-    entries = discover_tasks(tasks_root, stats)
+    entries = discover_tasks(
+        tasks_root,
+        stats,
+        base_image=args.base_image,
+        legacy_base_images=legacy_base_images,
+        dry_run=args.dry_run,
+    )
     stats.unique_tasks = len(entries)
 
     print(f"tasks_root={tasks_root}")
@@ -395,7 +474,9 @@ def main() -> int:
         image_name = f"{args.image_prefix}:task-{entry.content_sha[:16]}"
 
         print()
-        print(f"TASK {entry.relative_task} sha={entry.content_sha[:16]} image={image_name}")
+        print(
+            f"TASK {entry.relative_task} sha={entry.content_sha[:16]} image={image_name}"
+        )
 
         if image_name in local_images and not args.force:
             stats.images_reused_local += 1
@@ -405,6 +486,8 @@ def main() -> int:
                 dockerfile=entry.dockerfile,
                 local_images=local_images,
                 dry_run=args.dry_run,
+                base_image=args.base_image,
+                legacy_base_images=legacy_base_images,
             ):
                 stats.images_failed += 1
                 failed_docker_paths.append(str(entry.dockerfile))
@@ -450,7 +533,9 @@ def main() -> int:
         if image in local_images and image not in target_images_in_scope
     )
     if stale_images_to_delete:
-        print(f"\nDeleting {len(stale_images_to_delete)} mismatched old images from task.toml...")
+        print(
+            f"\nDeleting {len(stale_images_to_delete)} mismatched old images from task.toml..."
+        )
         stats.deleted_images += delete_images(stale_images_to_delete, args.dry_run)
     elif mismatched_old_images:
         print("\nNo deletable mismatched old images found locally.")

@@ -13,6 +13,8 @@ from mediated_coevo.experiment.conditions import ConditionName
 
 OPENROUTER_MODEL_PREFIX = "openrouter/"
 DEFAULT_SKILLFLOW_DATASET = "zhang-ziao/SkillFlow-Task"
+DEFAULT_SKILLFLOW_HARBOR_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
+DEFAULT_LEGACY_HARBOR_BASE_IMAGE = "skillevlove/harbor-cli-openhands:ubuntu24.04"
 DiffusionPolicyName: TypeAlias = Literal[
     "none",
     "capped_broadcast",
@@ -225,6 +227,12 @@ class ExecutorRuntimeConfig(BaseModel):
     sync_enabled: bool = False
     dataset: str = Field(default=DEFAULT_SKILLFLOW_DATASET, min_length=1)
     dataset_repo_type: str = "dataset"
+    harbor_base_image: str = Field(
+        default=DEFAULT_SKILLFLOW_HARBOR_BASE_IMAGE, min_length=1
+    )
+    legacy_harbor_base_images: list[str] = Field(
+        default_factory=lambda: [DEFAULT_LEGACY_HARBOR_BASE_IMAGE]
+    )
     # Hard wall-clock cap on a single Harbor subprocess (seconds). This must
     # exceed task agent/verifier phase limits so Harbor can finish cleanly.
     harbor_timeout_sec: float = 5400.0
@@ -257,9 +265,7 @@ class DiffusionConfig(BaseModel):
                     "diffusion.enabled=false requires diffusion.policy='none'"
                 )
             if self.graph != "none":
-                errors.append(
-                    "diffusion.enabled=false requires diffusion.graph='none'"
-                )
+                errors.append("diffusion.enabled=false requires diffusion.graph='none'")
         elif self.policy == "none":
             errors.append("diffusion.enabled=true requires diffusion.policy != 'none'")
         elif self.policy == "top_k_similarity":
@@ -350,10 +356,7 @@ def load_config(
 def _deep_merge(target: dict[str, Any], source: Mapping[str, Any]) -> None:
     """Merge CLI override mappings into raw TOML data before validation."""
     for key, value in source.items():
-        if (
-            isinstance(value, Mapping)
-            and isinstance(target.get(key), dict)
-        ):
+        if isinstance(value, Mapping) and isinstance(target.get(key), dict):
             _deep_merge(target[key], value)
             continue
         target[key] = value

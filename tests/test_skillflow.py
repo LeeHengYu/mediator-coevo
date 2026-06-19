@@ -41,8 +41,18 @@ def test_repository_resolves_tasks_family_and_task_set(tmp_path: Path) -> None:
 
 def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None:
     root = tmp_path / "skillflow"
-    _write_task(root / "tasks" / "demo", family="demo")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    task_dir = root / "tasks" / "demo"
+    _write_task(task_dir, family="demo")
+    environment_dir = task_dir / "environment"
+    environment_dir.mkdir()
+    (environment_dir / "Dockerfile").write_text(
+        f"FROM {skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE}\n",
+    )
+    repo = SkillFlowRepository(
+        root_dir=root,
+        task_dirs=["tasks"],
+        harbor_base_image="local/harbor-base:test",
+    )
     task = repo.resolve("demo")
 
     run_dir = repo.prepare_run_workspace(
@@ -63,6 +73,9 @@ def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None
     assert "# Executor Policy" in instruction
     assert metadata["executor_policy_injected"] == "true"
     assert metadata["verifier_contract_kind"] == SKILLFLOW_VERIFIER_TYPE
+    assert (run_dir / "environment" / "Dockerfile").read_text() == (
+        "FROM local/harbor-base:test\n"
+    )
 
 
 def test_repository_lists_remote_task_ids(monkeypatch, tmp_path: Path) -> None:
@@ -159,7 +172,9 @@ def test_sync_tasks_downloads_all_test_tasks_to_configured_task_cache(
         del kwargs
         calls.append(command)
         local_dir = Path(command[command.index("--local-dir") + 1])
-        _write_task(local_dir / "test_tasks" / "family-a" / "task-one", family="family-a")
+        _write_task(
+            local_dir / "test_tasks" / "family-a" / "task-one", family="family-a"
+        )
         return _Completed(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(
@@ -206,9 +221,7 @@ def test_sync_tasks_downloads_selected_tasks_and_family_ranking(
 
     assert destination == root / "tasks"
     assert (root / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
-    assert (
-        root / "tasks" / "family-a" / "ALL_TASK_DIFFICULTY_RANKING.json"
-    ).is_file()
+    assert (root / "tasks" / "family-a" / "ALL_TASK_DIFFICULTY_RANKING.json").is_file()
     assert "test_tasks/family-a/task-one/**" in calls[0]
     assert "test_tasks/family-a/ALL_TASK_DIFFICULTY_RANKING.json" in calls[0]
     assert not (root / "tasks" / "test_tasks").exists()
@@ -221,7 +234,9 @@ def test_sync_cli_accepts_selected_tasks(monkeypatch, tmp_path: Path) -> None:
         del kwargs
         calls.append(command)
         local_dir = Path(command[command.index("--local-dir") + 1])
-        _write_task(local_dir / "test_tasks" / "family-a" / "task-one", family="family-a")
+        _write_task(
+            local_dir / "test_tasks" / "family-a" / "task-one", family="family-a"
+        )
         return _Completed(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(
@@ -247,6 +262,43 @@ def test_sync_cli_accepts_selected_tasks(monkeypatch, tmp_path: Path) -> None:
     assert "demo/dataset" in calls[0]
     assert "test_tasks/family-a/task-one/**" in calls[0]
     assert (tmp_path / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
+
+
+def test_sync_tasks_normalizes_legacy_dockerfiles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = SkillFlowRepository(
+        root_dir=tmp_path / "skillflow",
+        task_dirs=["tasks"],
+        sync=SkillFlowSyncConfig(dataset="demo/dataset"),
+        harbor_base_image="local/harbor-base:test",
+    )
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        local_dir = Path(command[command.index("--local-dir") + 1])
+        task_dir = local_dir / "test_tasks" / "family-a" / "task-one"
+        _write_task(task_dir, family="family-a")
+        environment_dir = task_dir / "environment"
+        environment_dir.mkdir()
+        (environment_dir / "Dockerfile").write_text(
+            f"FROM {skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE}\n",
+        )
+        return _Completed(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.subprocess.run",
+        fake_run,
+    )
+
+    destination = repo.sync_tasks(
+        destination=tmp_path / "tasks",
+        task_ids=["family-a/task-one"],
+    )
+
+    dockerfile = destination / "family-a" / "task-one" / "environment" / "Dockerfile"
+    assert dockerfile.read_text() == "FROM local/harbor-base:test\n"
 
 
 def test_sync_cli_accepts_family_selector(monkeypatch, tmp_path: Path) -> None:
@@ -279,8 +331,12 @@ def test_sync_cli_accepts_family_selector(monkeypatch, tmp_path: Path) -> None:
         del kwargs
         calls.append(command)
         local_dir = Path(command[command.index("--local-dir") + 1])
-        _write_task(local_dir / "test_tasks" / "family-a" / "task-one", family="family-a")
-        _write_task(local_dir / "test_tasks" / "family-a" / "task-two", family="family-a")
+        _write_task(
+            local_dir / "test_tasks" / "family-a" / "task-one", family="family-a"
+        )
+        _write_task(
+            local_dir / "test_tasks" / "family-a" / "task-two", family="family-a"
+        )
         return _Completed(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(
@@ -432,9 +488,7 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
                 "id": "job-1",
                 "stats": {
                     "evals": {
-                        "verifier": {
-                            "metrics": [{"name": "reward", "mean": 0.75}]
-                        }
+                        "verifier": {"metrics": [{"name": "reward", "mean": 0.75}]}
                     }
                 },
             }
@@ -485,9 +539,7 @@ def test_trace_parser_falls_back_to_hermes_session_tokens(
                 "id": "job-1",
                 "stats": {
                     "evals": {
-                        "verifier": {
-                            "metrics": [{"name": "reward", "mean": 0.5}]
-                        }
+                        "verifier": {"metrics": [{"name": "reward", "mean": 0.5}]}
                     }
                 },
             }
@@ -557,9 +609,7 @@ def test_trace_parser_treats_harbor_trial_exception_as_env_failure(
                 "id": "job-1",
                 "stats": {
                     "evals": {
-                        "verifier": {
-                            "metrics": [{"name": "reward", "mean": 0.0}]
-                        }
+                        "verifier": {"metrics": [{"name": "reward", "mean": 0.0}]}
                     }
                 },
             }
@@ -700,6 +750,8 @@ def test_declared_prebuilt_image_is_rebuilt_when_harbor_cleanup_removed_it(
     (environment_dir / "Dockerfile").write_text(
         f"FROM {skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE}\n",
     )
+    build_script = tmp_path / "build-base.sh"
+    build_script.write_text("#!/usr/bin/env bash\n")
     calls: list[list[str]] = []
 
     def fake_run(command, **kwargs):
@@ -712,27 +764,22 @@ def test_declared_prebuilt_image_is_rebuilt_when_harbor_cleanup_removed_it(
             "docker",
             "image",
             "inspect",
-            skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE,
-        ]:
-            return _Completed(returncode=1, stdout="", stderr="missing")
-        if command == [
-            "docker",
-            "image",
-            "inspect",
             skillflow_benchmark.SKILLFLOW_HARBOR_BASE_IMAGE,
         ]:
-            return _Completed(returncode=0, stdout="", stderr="")
+            return _Completed(returncode=1, stdout="", stderr="missing")
         return _Completed(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("mediated_coevo.benchmarks.skillflow.subprocess.run", fake_run)
 
-    skillflow_benchmark._ensure_declared_prebuilt_image(task_dir)
+    skillflow_benchmark._ensure_declared_prebuilt_image(
+        task_dir,
+        base_image_build_script=build_script,
+    )
 
     assert [
-        "docker",
-        "tag",
+        "bash",
+        str(build_script),
         skillflow_benchmark.SKILLFLOW_HARBOR_BASE_IMAGE,
-        skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE,
     ] in calls
     assert [
         "docker",
@@ -744,6 +791,9 @@ def test_declared_prebuilt_image_is_rebuilt_when_harbor_cleanup_removed_it(
         image_name,
         str(environment_dir),
     ] in calls
+    assert (environment_dir / "Dockerfile").read_text() == (
+        f"FROM {skillflow_benchmark.SKILLFLOW_HARBOR_BASE_IMAGE}\n"
+    )
 
 
 @pytest.mark.asyncio

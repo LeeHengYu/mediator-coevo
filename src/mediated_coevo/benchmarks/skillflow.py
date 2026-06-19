@@ -36,7 +36,11 @@ HF_FAMILY_RANKING_FILENAME = "ALL_TASK_DIFFICULTY_RANKING.json"
 HARBOR_PREBUILT_IMAGE_PREFIX = "harbor-prebuilt:"
 LEGACY_HARBOR_BASE_IMAGE = "skillevlove/harbor-cli-openhands:ubuntu24.04"
 SKILLFLOW_HARBOR_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
-DOCKERFILE_FROM_IMAGE_RE = re.compile(r"^\s*FROM\s+(?P<image>[^\s]+)", re.IGNORECASE)
+DEFAULT_LEGACY_HARBOR_BASE_IMAGES = (LEGACY_HARBOR_BASE_IMAGE,)
+DOCKERFILE_FROM_IMAGE_RE = re.compile(
+    r"^(?P<prefix>\s*FROM\s+(?:(?:--[^\s]+)\s+)*)(?P<image>[^\s]+)(?P<suffix>.*)$",
+    re.IGNORECASE,
+)
 
 
 class HarborNotFoundError(RuntimeError):
@@ -111,10 +115,14 @@ class SkillFlowRepository:
         root_dir: Path,
         task_dirs: list[str],
         sync: SkillFlowSyncConfig | None = None,
+        harbor_base_image: str = SKILLFLOW_HARBOR_BASE_IMAGE,
+        legacy_harbor_base_images: Iterable[str] = DEFAULT_LEGACY_HARBOR_BASE_IMAGES,
     ) -> None:
         self.root_dir = root_dir
         self.task_dirs = task_dirs
         self.sync = sync or SkillFlowSyncConfig()
+        self.harbor_base_image = harbor_base_image
+        self.legacy_harbor_base_images = _dedupe_nonempty(legacy_harbor_base_images)
 
     def default_local_cache_dir(self) -> Path:
         """Return the local directory where task folders are cached."""
@@ -165,11 +173,7 @@ class SkillFlowRepository:
             task_ids = self._list_remote_task_ids_from_hf()
         if family is None:
             return task_ids
-        return [
-            task_id
-            for task_id in task_ids
-            if task_id.split("/", 1)[0] == family
-        ]
+        return [task_id for task_id in task_ids if task_id.split("/", 1)[0] == family]
 
     def _cached_remote_task_ids(self) -> list[str] | None:
         if self.sync.remote_task_cache_path is None:
@@ -241,8 +245,7 @@ class SkillFlowRepository:
                     family_id = task_id.split("/", 1)[0]
                     include_patterns.append(f"{HF_TEST_TASKS_ROOT}/{task_id}/**")
                     include_patterns.append(
-                        f"{HF_TEST_TASKS_ROOT}/{family_id}/"
-                        f"{HF_FAMILY_RANKING_FILENAME}"
+                        f"{HF_TEST_TASKS_ROOT}/{family_id}/{HF_FAMILY_RANKING_FILENAME}"
                     )
                 include_patterns = _dedupe(include_patterns)
             for include_pattern in include_patterns:
@@ -256,6 +259,12 @@ class SkillFlowRepository:
                 source_root=staging_dir / HF_TEST_TASKS_ROOT,
                 destination=destination,
             )
+            for dockerfile in sorted(destination.rglob("environment/Dockerfile")):
+                _normalize_dockerfile_base_images(
+                    dockerfile,
+                    harbor_base_image=self.harbor_base_image,
+                    legacy_harbor_base_images=self.legacy_harbor_base_images,
+                )
         return destination
 
     @staticmethod
@@ -300,6 +309,13 @@ class SkillFlowRepository:
         )
         run_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(task.task_dir, run_dir)
+        dockerfile = run_dir / "environment" / "Dockerfile"
+        if dockerfile.is_file():
+            _normalize_dockerfile_base_images(
+                dockerfile,
+                harbor_base_image=self.harbor_base_image,
+                legacy_harbor_base_images=self.legacy_harbor_base_images,
+            )
 
         instruction_path = run_dir / "instruction.md"
         instruction_path.write_text(
@@ -414,10 +430,18 @@ class HarborRunner:
         jobs_dir: Path,
         timeout_sec: float = 1800.0,
         agent_setup_timeout_multiplier: float | None = None,
+        harbor_base_image: str = SKILLFLOW_HARBOR_BASE_IMAGE,
+        legacy_harbor_base_images: Iterable[str] = DEFAULT_LEGACY_HARBOR_BASE_IMAGES,
+        base_image_build_script: Path | None = None,
     ) -> None:
         self.jobs_dir = jobs_dir
         self.timeout_sec = timeout_sec
         self.agent_setup_timeout_multiplier = agent_setup_timeout_multiplier
+        self.harbor_base_image = harbor_base_image
+        self.legacy_harbor_base_images = _dedupe_nonempty(legacy_harbor_base_images)
+        self.base_image_build_script = (
+            base_image_build_script or _default_base_image_build_script()
+        )
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._harbor_path: str | None = None
 
@@ -434,13 +458,21 @@ class HarborRunner:
         return self._harbor_path
 
     async def run(self, task_dir: Path, model: str) -> HarborRunResult:
-        await asyncio.to_thread(_ensure_declared_prebuilt_image, task_dir)
+        await asyncio.to_thread(self._ensure_declared_prebuilt_image, task_dir)
         result = await self._run_once(task_dir, model)
         if harbor_run_missing_prebuilt_image(result):
             raise HarborPrebuiltImageMissingError(
                 harbor_missing_prebuilt_image_message(result, task_dir)
             )
         return result
+
+    def _ensure_declared_prebuilt_image(self, task_dir: Path) -> None:
+        _ensure_declared_prebuilt_image(
+            task_dir,
+            harbor_base_image=self.harbor_base_image,
+            legacy_harbor_base_images=self.legacy_harbor_base_images,
+            base_image_build_script=self.base_image_build_script,
+        )
 
     async def _run_once(
         self,
@@ -628,11 +660,7 @@ class SkillFlowTraceParser:
         else:
             reward_source = "verifier_reward_file"
         ctrf_path = self.run_result.trial_dir / "verifier" / "ctrf.json"
-        test_results = (
-            _load_json_or_empty(ctrf_path)
-            if ctrf_path.exists()
-            else None
-        )
+        test_results = _load_json_or_empty(ctrf_path) if ctrf_path.exists() else None
         return ExecutionTrace(
             task_id=self.task_id,
             iteration=self.iteration,
@@ -679,7 +707,9 @@ def _skillflow_task_resources(run_dir: Path) -> tuple[str, ...]:
             "Task-local resources are available under `environment/skills`: "
             f"{', '.join(resource_names)}.",
         )
-    return ("Inspect the task files, environment, tests, and expected outputs directly.",)
+    return (
+        "Inspect the task files, environment, tests, and expected outputs directly.",
+    )
 
 
 def _skillflow_task_resource_names(run_dir: Path) -> tuple[str, ...]:
@@ -693,7 +723,13 @@ def _skillflow_task_resource_names(run_dir: Path) -> tuple[str, ...]:
     )
 
 
-def _ensure_declared_prebuilt_image(task_dir: Path) -> None:
+def _ensure_declared_prebuilt_image(
+    task_dir: Path,
+    *,
+    harbor_base_image: str = SKILLFLOW_HARBOR_BASE_IMAGE,
+    legacy_harbor_base_images: Iterable[str] = DEFAULT_LEGACY_HARBOR_BASE_IMAGES,
+    base_image_build_script: Path | None = None,
+) -> None:
     image_name = _declared_task_docker_image(task_dir)
     if image_name is None or not image_name.startswith(HARBOR_PREBUILT_IMAGE_PREFIX):
         return
@@ -709,12 +745,30 @@ def _ensure_declared_prebuilt_image(task_dir: Path) -> None:
         )
         return
 
+    legacy_base_images = _dedupe_nonempty(legacy_harbor_base_images)
+    _normalize_dockerfile_base_images(
+        dockerfile,
+        harbor_base_image=harbor_base_image,
+        legacy_harbor_base_images=legacy_base_images,
+    )
+    base_images = _dockerfile_base_images(dockerfile)
+    if harbor_base_image in base_images:
+        _ensure_harbor_base_image(
+            harbor_base_image,
+            base_image_build_script=base_image_build_script,
+        )
+    _ensure_legacy_base_image_alias(
+        dockerfile,
+        harbor_base_image=harbor_base_image,
+        legacy_harbor_base_images=legacy_base_images,
+        base_image_build_script=base_image_build_script,
+    )
+
     logger.info(
         "Prebuilt image %s is missing; rebuilding from %s",
         image_name,
         dockerfile,
     )
-    _ensure_legacy_base_image_alias(dockerfile)
     _run_docker_command(
         [
             "docker",
@@ -754,29 +808,58 @@ def _docker_image_exists(image_name: str) -> bool:
     return completed.returncode == 0
 
 
-def _ensure_legacy_base_image_alias(dockerfile: Path) -> None:
-    if LEGACY_HARBOR_BASE_IMAGE not in _dockerfile_base_images(dockerfile):
-        return
-    if _docker_image_exists(LEGACY_HARBOR_BASE_IMAGE):
-        return
-    if not _docker_image_exists(SKILLFLOW_HARBOR_BASE_IMAGE):
-        logger.warning(
-            "Task Dockerfile uses legacy Harbor base image %s, but local base "
-            "image %s is missing. Run `uv run medcoevo build-base-image` first.",
-            LEGACY_HARBOR_BASE_IMAGE,
-            SKILLFLOW_HARBOR_BASE_IMAGE,
+def _ensure_legacy_base_image_alias(
+    dockerfile: Path,
+    *,
+    harbor_base_image: str = SKILLFLOW_HARBOR_BASE_IMAGE,
+    legacy_harbor_base_images: Iterable[str] = DEFAULT_LEGACY_HARBOR_BASE_IMAGES,
+    base_image_build_script: Path | None = None,
+) -> None:
+    base_images = _dockerfile_base_images(dockerfile)
+    for legacy_base_image in _dedupe_nonempty(legacy_harbor_base_images):
+        if legacy_base_image not in base_images:
+            continue
+        if _docker_image_exists(legacy_base_image):
+            continue
+        _ensure_harbor_base_image(
+            harbor_base_image,
+            base_image_build_script=base_image_build_script,
         )
+        _run_docker_command(
+            [
+                "docker",
+                "tag",
+                harbor_base_image,
+                legacy_base_image,
+            ],
+            failure_message=(
+                f"Failed to tag {harbor_base_image} as {legacy_base_image}"
+            ),
+        )
+
+
+def _ensure_harbor_base_image(
+    harbor_base_image: str,
+    *,
+    base_image_build_script: Path | None = None,
+) -> None:
+    if _docker_image_exists(harbor_base_image):
         return
+    build_script = base_image_build_script or _default_base_image_build_script()
+    if not build_script.is_file():
+        raise HarborPrebuiltImageMissingError(
+            f"Required SkillFlow Harbor base image `{harbor_base_image}` is missing "
+            f"and the build script is absent: {build_script}"
+        )
     _run_docker_command(
         [
-            "docker",
-            "tag",
-            SKILLFLOW_HARBOR_BASE_IMAGE,
-            LEGACY_HARBOR_BASE_IMAGE,
+            "bash",
+            str(build_script),
+            harbor_base_image,
         ],
         failure_message=(
-            f"Failed to tag {SKILLFLOW_HARBOR_BASE_IMAGE} as "
-            f"{LEGACY_HARBOR_BASE_IMAGE}"
+            f"Required SkillFlow Harbor base image `{harbor_base_image}` is "
+            f"missing and automatic build failed"
         ),
     )
 
@@ -788,6 +871,49 @@ def _dockerfile_base_images(dockerfile: Path) -> set[str]:
         if match:
             images.add(match.group("image"))
     return images
+
+
+def _normalize_dockerfile_base_images(
+    dockerfile: Path,
+    *,
+    harbor_base_image: str,
+    legacy_harbor_base_images: Iterable[str],
+) -> bool:
+    legacy_images = set(_dedupe_nonempty(legacy_harbor_base_images))
+    if not legacy_images:
+        return False
+
+    text = dockerfile.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    changed = False
+    normalized_lines: list[str] = []
+    for line in lines:
+        match = DOCKERFILE_FROM_IMAGE_RE.match(line)
+        if match is not None and match.group("image") in legacy_images:
+            line = f"{match.group('prefix')}{harbor_base_image}{match.group('suffix')}"
+            changed = True
+        normalized_lines.append(line)
+
+    if not changed:
+        return False
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    normalized_text = newline.join(normalized_lines)
+    if text.endswith(("\n", "\r\n")):
+        normalized_text += newline
+    dockerfile.write_text(normalized_text, encoding="utf-8")
+    logger.info(
+        "Normalized legacy Harbor base image references in %s to %s",
+        dockerfile,
+        harbor_base_image,
+    )
+    return True
+
+
+def _default_base_image_build_script() -> Path:
+    return (
+        Path(__file__).resolve().parents[3] / "docker" / "harbor-cli-base" / "build.sh"
+    )
 
 
 def _run_docker_command(command: list[str], *, failure_message: str) -> None:
@@ -843,7 +969,9 @@ def _is_task_dir(path: Path) -> bool:
 
 
 def _is_safe_task_id(task_id: str) -> bool:
-    return bool(task_id) and not any(part in {"", ".", ".."} for part in task_id.split("/"))
+    return bool(task_id) and not any(
+        part in {"", ".", ".."} for part in task_id.split("/")
+    )
 
 
 def _validated_remote_task_ids(task_ids: list[str] | None) -> list[str] | None:
@@ -892,6 +1020,10 @@ def _dedupe(task_ids: Iterable[str]) -> list[str]:
             unique.append(cleaned)
             seen.add(cleaned)
     return unique
+
+
+def _dedupe_nonempty(values: Iterable[str]) -> tuple[str, ...]:
+    return tuple(_dedupe(values))
 
 
 def _latest_path(paths: Iterable[Path]) -> Path | None:
@@ -1033,15 +1165,11 @@ def _executor_token_usage(
         metadata = {
             "executor_session_input_tokens": str(session_tokens.input_tokens),
             "executor_session_output_tokens": str(session_tokens.output_tokens),
-            "executor_session_cache_read_tokens": str(
-                session_tokens.cache_read_tokens
-            ),
+            "executor_session_cache_read_tokens": str(session_tokens.cache_read_tokens),
             "executor_session_cache_write_tokens": str(
                 session_tokens.cache_write_tokens
             ),
-            "executor_session_reasoning_tokens": str(
-                session_tokens.reasoning_tokens
-            ),
+            "executor_session_reasoning_tokens": str(session_tokens.reasoning_tokens),
             "executor_session_records": str(session_tokens.records),
         }
 

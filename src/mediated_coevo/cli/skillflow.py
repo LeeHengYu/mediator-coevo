@@ -19,12 +19,13 @@ from mediated_coevo.cli.config import (
 )
 from mediated_coevo.cli.experiment import PROJECT_ROOT, setup_logging
 from mediated_coevo.cli.output import console
+from mediated_coevo.core.config import DEFAULT_SKILLFLOW_HARBOR_BASE_IMAGE
 from mediated_coevo.experiment.runtime_factory import build_benchmark_repo
 
 
 def build_skillflow_base_image(
     base_image_tag: str = typer.Option(
-        "skillflow/harbor-cli-base:ubuntu24.04",
+        DEFAULT_SKILLFLOW_HARBOR_BASE_IMAGE,
         help="Docker tag to build for the SkillFlow Harbor CLI base image.",
     ),
     dry_run: bool = typer.Option(
@@ -38,7 +39,9 @@ def build_skillflow_base_image(
     build_script = PROJECT_ROOT / "docker" / "harbor-cli-base" / "build.sh"
 
     if not build_script.is_file():
-        console.print(f"[bold red]ERROR:[/] missing SkillFlow build script: {build_script}")
+        console.print(
+            f"[bold red]ERROR:[/] missing SkillFlow build script: {build_script}"
+        )
         raise typer.Exit(code=1)
 
     base_command = ["bash", str(build_script), base_image_tag]

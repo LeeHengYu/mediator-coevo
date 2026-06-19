@@ -113,10 +113,7 @@ class ExperimentFactory:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = run_id or f"{seed}-baseline-matrix"
         matrix_dir = (
-            self._project_root
-            / data_dir
-            / "experiments"
-            / f"{timestamp}-{suffix}"
+            self._project_root / data_dir / "experiments" / f"{timestamp}-{suffix}"
         )
         matrix_dir.mkdir(parents=True, exist_ok=True)
         return matrix_dir
@@ -133,6 +130,8 @@ def build_benchmark_repo(project_root: Path, config: Config) -> SkillFlowReposit
             local_dir=config.executor_runtime.task_dirs[0],
             remote_task_cache_path=project_root / "docs" / "skillflow_tasks.txt",
         ),
+        harbor_base_image=config.executor_runtime.harbor_base_image,
+        legacy_harbor_base_images=config.executor_runtime.legacy_harbor_base_images,
     )
 
 
@@ -176,6 +175,10 @@ def build_experiment_runtime(
                 jobs_dir=jobs_dir,
                 timeout_sec=timeout_sec,
                 agent_setup_timeout_multiplier=setup_timeout_multiplier,
+                harbor_base_image=config.executor_runtime.harbor_base_image,
+                legacy_harbor_base_images=(
+                    config.executor_runtime.legacy_harbor_base_images
+                ),
             )
 
     planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
@@ -248,9 +251,7 @@ def build_matrix_runtimes(
     for preset_name in selected_preset_names:
         preset = get_baseline_preset(preset_name)
         row_config = preset.build_config(base_config, seed=seed)
-        experiment_dir = (
-            matrix_dir if flatten_single_row else matrix_dir / preset_name
-        )
+        experiment_dir = matrix_dir if flatten_single_row else matrix_dir / preset_name
         runtime = factory.build(
             config=row_config,
             seed=seed,
