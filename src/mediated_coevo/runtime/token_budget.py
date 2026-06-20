@@ -185,7 +185,8 @@ def pack_sections(
 
     packed: list[tuple[BudgetSection, str]] = []
     for section in sections:
-        content = section.content.strip()
+        raw_content = section.content.strip()
+        content = raw_content
         if section.max_tokens is not None:
             content = _fit_text_to_tokens_with_strategy(
                 model,
@@ -193,6 +194,12 @@ def pack_sections(
                 section.max_tokens,
                 section.overflow_strategy,
             )
+            if section.required and raw_content and not content:
+                raise TokenBudgetExceeded(
+                    f"Required section {section.name!r} cannot fit "
+                    f"max_tokens={section.max_tokens} with "
+                    f"overflow_strategy={section.overflow_strategy!r}"
+                )
         packed.append((section, content))
 
     required_text = separator.join(
@@ -210,7 +217,7 @@ def pack_sections(
             continue
         candidate = separator.join([*selected, content])
         if count_text_tokens(model, candidate) <= budget_limit:
-            if section.required or _candidate_preserves_later_required_budget(
+            if section.required or _optional_candidate_fits(
                 model,
                 selected,
                 content,
@@ -225,25 +232,17 @@ def pack_sections(
                 f"Required section {section.name!r} exceeds remaining budget"
             )
 
-        remaining = _remaining_text_budget_for_optional(
+        truncated = _fit_optional_content_to_remaining_budget(
             model,
             selected,
+            content,
             packed[index + 1 :],
             budget_limit,
             separator,
-        )
-        if remaining <= 0:
-            continue
-        truncated = _fit_text_to_tokens_with_strategy(
-            model,
-            content,
-            remaining,
             section.overflow_strategy,
         )
         if truncated:
-            candidate = separator.join([*selected, truncated])
-            if count_text_tokens(model, candidate) <= budget_limit:
-                selected.append(truncated)
+            selected.append(truncated)
 
     return separator.join(selected)
 
@@ -367,7 +366,50 @@ def _fit_section_units_to_tokens(model: str, text: str, max_tokens: int) -> str:
     return "\n".join(selected)
 
 
-def _candidate_preserves_later_required_budget(
+def _fit_optional_content_to_remaining_budget(
+    model: str,
+    selected: list[str],
+    content: str,
+    remaining_packed: list[tuple[BudgetSection, str]],
+    budget_limit: int,
+    separator: str,
+    strategy: OverflowStrategy,
+) -> str:
+    remaining = _remaining_text_budget_for_optional(
+        model,
+        selected,
+        remaining_packed,
+        budget_limit,
+        separator,
+    )
+    if remaining <= 0:
+        return ""
+
+    lo = 0
+    hi = remaining
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = _fit_text_to_tokens_with_strategy(model, content, mid, strategy)
+        if not candidate:
+            lo = mid + 1
+            continue
+        if _optional_candidate_fits(
+            model,
+            selected,
+            candidate,
+            remaining_packed,
+            budget_limit,
+            separator,
+        ):
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def _optional_candidate_fits(
     model: str,
     selected: list[str],
     candidate_content: str,
@@ -375,14 +417,11 @@ def _candidate_preserves_later_required_budget(
     budget_limit: int,
     separator: str,
 ) -> bool:
-    candidate_selected = [*selected, candidate_content]
     later_required = [
         content for section, content in remaining_packed if section.required and content
     ]
-    if not later_required:
-        return True
-    required_candidate = separator.join([*candidate_selected, *later_required])
-    return count_text_tokens(model, required_candidate) <= budget_limit
+    candidate = separator.join([*selected, candidate_content, *later_required])
+    return count_text_tokens(model, candidate) <= budget_limit
 
 
 def _remaining_text_budget_for_optional(
@@ -402,5 +441,5 @@ def _remaining_text_budget_for_optional(
     reserved_tokens = count_text_tokens(model, required_baseline)
     if reserved_tokens >= budget_limit:
         return 0
-    sep_tokens = count_text_tokens(model, separator) if selected else 0
+    sep_tokens = count_text_tokens(model, separator)
     return max(0, budget_limit - reserved_tokens - sep_tokens)
