@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from mediated_coevo.runtime.token_budget import BudgetSection
+from mediated_coevo.runtime.token_budget import BudgetSection, OverflowStrategy
 
 PromptSectionKind = Literal[
     "scaffold",
@@ -26,13 +26,19 @@ class PromptSection:
     content: str
     required: bool = False
     max_tokens: int | None = None
+    overflow_strategy: OverflowStrategy = "head_tail"
 
-    def to_budget_section(self) -> BudgetSection:
+    def to_budget_section(
+        self,
+        *,
+        overflow_strategy: OverflowStrategy | None = None,
+    ) -> BudgetSection:
         return BudgetSection(
             self.name,
             self.content,
             required=self.required,
             max_tokens=self.max_tokens,
+            overflow_strategy=overflow_strategy or self.overflow_strategy,
         )
 
 

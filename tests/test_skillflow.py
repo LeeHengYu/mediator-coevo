@@ -526,6 +526,52 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
     assert trace.token_usage.output_tokens == 3
 
 
+def test_trace_parser_reports_source_that_supplied_parsed_reward(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "trials" / "trial-1"
+    trial_dir.mkdir(parents=True)
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "id": "job-1",
+                "stats": {
+                    "evals": {
+                        "verifier": {"metrics": [{"name": "reward", "mean": "n/a"}]}
+                    }
+                },
+            }
+        )
+    )
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "id": "trial-1",
+                "verifier_result": {"reward": 0.42},
+            }
+        )
+    )
+    run_result = HarborRunResult(
+        job_dir=job_dir,
+        trial_dir=trial_dir,
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    trace = parse_skillflow_execution_trace(
+        run_result=run_result,
+        task_id="demo",
+        iteration=0,
+        duration_sec=0.1,
+    )
+
+    assert trace.status == "ok"
+    assert trace.reward == 0.42
+    assert trace.harbor_metadata["reward_source"] == "trial_verifier_result"
+
+
 def test_trace_parser_falls_back_to_hermes_session_tokens(
     tmp_path: Path,
 ) -> None:

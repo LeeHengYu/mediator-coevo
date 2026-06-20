@@ -216,12 +216,18 @@ class HistoryStore:
         if outcome_metadata:
             metadata.update(outcome_metadata)
 
+        entries_updated = False
         for entry_id in tagged_entry_ids:
-            self.tag_outcome_by_id(
-                entry_id,
-                reward=reward,
-                metadata=metadata,
+            entries_updated = (
+                self._tag_outcome_entry_by_id(
+                    entry_id,
+                    reward=reward,
+                    metadata=metadata,
+                )
+                or entries_updated
             )
+        if entries_updated:
+            self._save()
         for proposal in proposals or []:
             if proposal.iteration == trace.iteration and proposal.task_id == task_id:
                 proposal.reward = reward
@@ -238,6 +244,23 @@ class HistoryStore:
                 else:
                     proposal.judge_reward = None
 
+    def _tag_outcome_entry_by_id(
+        self,
+        entry_id: str,
+        reward: float,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Mutate a specific entry by stable ID without persisting."""
+        for entry in reversed(self._entries):
+            if entry.entry_id == entry_id:
+                entry.reward = reward
+                if metadata:
+                    entry.metadata.update(metadata)
+                return True
+        logger.warning("No history entry found for entry_id=%s", entry_id)
+        return False
+
     def tag_outcome_by_id(
         self,
         entry_id: str,
@@ -246,14 +269,12 @@ class HistoryStore:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Tag a specific entry by its stable ID."""
-        for entry in reversed(self._entries):
-            if entry.entry_id == entry_id:
-                entry.reward = reward
-                if metadata:
-                    entry.metadata.update(metadata)
-                self._save()
-                return
-        logger.warning("No history entry found for entry_id=%s", entry_id)
+        if self._tag_outcome_entry_by_id(
+            entry_id,
+            reward=reward,
+            metadata=metadata,
+        ):
+            self._save()
 
     def annotate_judge_reward(
         self,
@@ -442,4 +463,3 @@ class HistoryStore:
 
         pool.sort(key=lambda pair: pair.relative_reward_gap, reverse=True)
         return pool[:max_pairs]
-

@@ -154,6 +154,39 @@ def test_tag_outcome_updates_current_iteration_proposals(tmp_path):
     assert previous.reward is None
 
 
+def test_tag_outcome_persists_multiple_entry_tags_with_one_save(
+    tmp_path,
+    monkeypatch,
+):
+    store = HistoryStore(history_dir=tmp_path / "history")
+    first = _add_entry(store, task_id="task-A", reward=None, iteration=0)
+    second = _add_entry(store, task_id="task-A", reward=None, iteration=0)
+    save_calls = 0
+    original_save = store._save
+
+    def counted_save():
+        nonlocal save_calls
+        save_calls += 1
+        original_save()
+
+    monkeypatch.setattr(store, "_save", counted_save)
+
+    store.tag_outcome(
+        "task-A",
+        _trace("task-A", iteration=0, reward=1.0),
+        entry_ids=[first, second],
+    )
+
+    assert save_calls == 1
+    reloaded = HistoryStore(history_dir=tmp_path / "history")
+    rewards = [
+        entry.reward
+        for entry in reloaded.query(recent=10)
+        if entry.entry_id in {first, second}
+    ]
+    assert rewards == [1.0, 1.0]
+
+
 def test_tagged_task_counts_group_by_role_and_task(tmp_path):
     store = HistoryStore(history_dir=tmp_path / "history")
     _add_entry(store, task_id="task-A", reward=0.1, iteration=0)

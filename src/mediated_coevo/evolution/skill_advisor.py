@@ -50,6 +50,7 @@ class SkillAdvisorPrompt:
                         user_content,
                         required=True,
                         max_tokens=prompt_budget,
+                        overflow_strategy="section_pack",
                     )
                 ],
                 prompt_budget,
