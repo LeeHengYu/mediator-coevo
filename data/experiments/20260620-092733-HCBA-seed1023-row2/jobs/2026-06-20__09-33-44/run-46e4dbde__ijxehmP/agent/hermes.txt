@@ -1,0 +1,144 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,220 @@
++#!/usr/bin/env python3
++import csv
++import json
++from pathlib import Path
++
++ROOT = Path('/root')
++
++PANEL_MANIFEST = ROOT / 'panel_manifest.json'
++SHIPPER_COST = ROOT / 'shipper_cost.csv'
++CONTRACT_TERMS = ROOT / 'contract_terms.csv'
++NETWORK_ADJUSTMENTS = ROOT / 'network_adjustments.csv'
++LAB_CAPACITY_OVERRIDES = ROOT / 'lab_capacity_overrides.csv'
++HOLDOUTS = ROOT / 'holdouts.json'
++REPORT_TEMPLATE = ROOT / 'report_template.json'
++REPORT_OUT = ROOT / 'diagpanel_policy_report.json'
++SUMMARY_OUT = ROOT / 'diagpanel_policy_summary.md'
++
++RUNS_PER_YEAR_14_DAY = 26
++RUNS_PER_YEAR_28_DAY = 13
++DECISION_THRESHOLD_USD = 6000
++
++
++def load_json(path):
++    with path.open('r', encoding='utf-8') as f:
++        return json.load(f)
++
++
++def load_csv(path):
++    with path.open('r', encoding='utf-8', newline='') as f:
++        return list(csv.DictReader(f))
++
++
++def as_float(value, default=0.0):
++    if value is None:
++        return default
++    text = str(value).strip()
++    if text == '':
++        return default
++    return float(text)
++
++
++def as_int(value):
++    return int(float(str(value).strip()))
++
++
++def round_currency(value):
++    return round(float(value) + 0.0, 2)
++
++
++def extract_panels(manifest):
++    """Accept both the task's expected list and the actual clustered manifest."""
++    if isinstance(manifest, list):
++        return manifest
++    panels = []
++    for cluster in manifest.get('service_clusters', []):
++        panels.extend(cluster.get('panels', []))
++    return panels
++
++
++def extract_holdouts(holdouts_doc):
++    """Accept both the task's expected list and the actual wrapped holdouts file."""
++    if isinstance(holdouts_doc, list):
++        return holdouts_doc
++    return holdouts_doc.get('holdouts', [])
++
++
++def find_contract(panel, contract_rows):
++    labels = {panel.get('panel_name')}
++    labels.update(panel.get('alias_labels') or [])
++    candidates = [
++        row for row in contract_rows
++        if row.get('status_flag') == 'current' and row.get('panel_ref') in labels
++    ]
++    if not candidates:
++        raise ValueError(f"No current contract row found for {panel.get('panel_code')}")
++    # effective_week values are ISO-like (e.g. 2026-W22), so lexical ordering is correct.
++    return max(candidates, key=lambda row: row.get('effective_week', ''))
++
+… omitted 142 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -45,6 +45,43 @@
+ 
+ def round_currency(value):
+     return round(float(value) + 0.0, 2)
++
++
++def dump_json_with_two_decimal_floats(obj, path):
++    """Write valid JSON while rendering all float values with exactly two decimals."""
++    encoder = json.JSONEncoder(indent=2, ensure_ascii=False)
++
++    def floatstr(value, allow_nan=encoder.allow_nan):
++        if value != value:
++            text = 'NaN'
++        elif value == float('inf'):
++            text = 'Infinity'
++        elif value == float('-inf'):
++            text = '-Infinity'
++        else:
++            return f'{value:.2f}'
++        if not allow_nan:
++            raise ValueError('Out of range float values are not JSON compliant: ' + repr(value))
++        return text
++
++    markers = {} if encoder.check_circular else None
++    _encoder = json.encoder.encode_basestring_ascii if encoder.ensure_ascii else json.encoder.encode_basestring
++    iterencode = json.encoder._make_iterencode(
++        markers,
++        encoder.default,
++        _encoder,
++        encoder.indent,
++        floatstr,
++        encoder.key_separator,
++        encoder.item_separator,
++        encoder.sort_keys,
++        encoder.skipkeys,
++        False,
++    )
++    with path.open('w', encoding='utf-8') as f:
++        for chunk in iterencode(obj, 0):
++            f.write(chunk)
++        f.write('\n')
+ 
+ 
+ def extract_panels(manifest):
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -239,9 +239,7 @@
+         },
+     }
+ 
+-    with REPORT_OUT.open('w', encoding='utf-8') as f:
+-        json.dump(output, f, indent=2, ensure_ascii=False)
+-        f.write('\n')
++    dump_json_with_two_decimal_floats(output, REPORT_OUT)
+ 
+     summary_lines = [
+         f"Total 14-day margin (USD): {total_margin_14:.2f}",
+
+session_id: 20260620_013704_5d0fb5

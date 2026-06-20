@@ -1,0 +1,115 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,203 @@
++import json
++import csv
++
++# Load inputs
++with open('/root/assay_manifest.json') as f:
++    manifest = json.load(f)
++
++with open('/root/carrier_cost.csv') as f:
++    carrier_rows = list(csv.DictReader(f))
++
++with open('/root/billing.csv') as f:
++    billing_rows = list(csv.DictReader(f))
++
++with open('/root/lab_overrides.csv') as f:
++    override_rows = list(csv.DictReader(f))
++
++with open('/root/report_template.json') as f:
++    template = json.load(f)
++
++# Build carrier cost lookup. carrier_cost_usd values are per shipment, so annual
++# carrier cost is carrier_cost * active_labs * runs_per_year.
++carrier_cost_map = {}
++for row in carrier_rows:
++    carrier_cost_map[row['carrier_type'].strip()] = float(row['carrier_cost_usd'])
++
++# Flatten assays from regional manifest structure, then filter in-scope assays
++all_assays = []
++if 'assays' in manifest:
++    all_assays = manifest['assays']
++else:
++    for region in manifest.get('regions', []):
++        all_assays.extend(region.get('assays', []))
++
++in_scope_assays = [a for a in all_assays if a.get('in_scope') is True]
++
++# Build alias -> assay_id mapping
++alias_to_assay_id = {}
++for a in in_scope_assays:
++    alias_to_assay_id[a['assay_name'].strip().lower()] = a['assay_id']
++    for alias in a.get('aliases', []):
++        alias_to_assay_id[alias.strip().lower()] = a['assay_id']
++
++# Resolve billing: latest active effective_month per assay
++billing_best = {}
++for row in billing_rows:
++    if row.get('is_active', '').strip().lower() != 'true':
++        continue
++    label = row['assay_label'].strip().lower()
++    assay_id = alias_to_assay_id.get(label)
++    if assay_id is None:
++        continue
++    em = row['effective_month'].strip()
++    if assay_id not in billing_best or em > billing_best[assay_id]['effective_month']:
++        billing_best[assay_id] = {
++            'effective_month': em,
++            'payment_per_run_per_lab_usd': float(row['payment_per_run_per_lab_usd'])
++        }
++
++# Resolve lab overrides: highest approved revision per assay_id
++override_best = {}
++for row in override_rows:
++    if row.get('status', '').strip().lower() != 'approved':
++        continue
++    aid = row['assay_id'].strip()
++    rev = int(row['revision'])
++    if aid not in override_best or rev > override_best[aid]['revision']:
++        override_best[aid] = {
++            'revision': rev,
++            'active_labs': int(row['active_labs'])
++        }
++
++# Build per-assay analysis
++assay_results = []
++for a in in_scope_assays:
++    aid = a['assay_id']
++    aname = a['assay_name']
++    
++    # Active labs
+… omitted 125 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260620_045222_1bdc44
+Completed successfully.
+
+I inspected all five input files first. Notable structure: /root/assay_manifest.json stores assays under regions, so I adjusted /root/solve.py to flatten region assays before filtering in-scope assays. The carrier cost file contains per-carrier-type costs with no annual indicators, so I used the expected formula:
+
+carrier_cost * active_labs * runs_per_year
+
+Created and ran:
+
+/root/solve.py
+
+Produced both output files:
+
+/root/reagent_policy_report.json
+/root/reagent_policy_summary.md
+
+Verification results:
+
+JSON valid
+metadata OK
+sorted OK, assay_ids: ['CHEM-ION', 'CHEM-LIVER', 'ENDO-TSH', 'IMMUNE-C3', 'INF-PCR', 'TOX-SER']
+summary non-empty line count: 6
+decision slug present: adopt_bulk_kit
+
+Script output:
+
+Total small-kit margin: -7106.39
+Total bulk-kit margin: -5758.79
+Total difference: 1347.6
+Absolute difference: 1347.6
+Decision: adopt_bulk_kit
