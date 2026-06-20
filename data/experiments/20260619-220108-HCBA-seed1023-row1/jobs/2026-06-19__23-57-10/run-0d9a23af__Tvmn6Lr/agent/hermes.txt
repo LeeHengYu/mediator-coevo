@@ -1,0 +1,85 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,225 @@
++import json, csv
++from decimal import Decimal, ROUND_HALF_UP
++
++# --- Load inputs ---
++with open('/root/assay_manifest.json') as f:
++    manifest = json.load(f)
++
++with open('/root/carrier_cost.csv') as f:
++    carrier_rows = list(csv.DictReader(f))
++
++with open('/root/billing.csv') as f:
++    billing_rows = list(csv.DictReader(f))
++
++with open('/root/lab_overrides.csv') as f:
++    override_rows = list(csv.DictReader(f))
++
++with open('/root/report_template.json') as f:
++    template = json.load(f)
++
++# --- Build carrier cost lookup ---
++carrier_cost_map = {}
++for row in carrier_rows:
++    carrier_cost_map[row['carrier_type'].strip()] = float(row['carrier_cost_usd'])
++
++# --- Filter in-scope assays ---
++def extract_assays(obj):
++    """Return a flat list of assay dicts from common manifest shapes."""
++    if isinstance(obj, list):
++        if all(isinstance(x, dict) and 'assay_id' in x for x in obj):
++            return obj
++        assays = []
++        for item in obj:
++            assays.extend(extract_assays(item))
++        return assays
++    if isinstance(obj, dict):
++        if isinstance(obj.get('assays'), list):
++            return extract_assays(obj['assays'])
++        if isinstance(obj.get('assay_manifest'), list):
++            return extract_assays(obj['assay_manifest'])
++        assays = []
++        for value in obj.values():
++            if isinstance(value, (list, dict)):
++                assays.extend(extract_assays(value))
++        return assays
++    return []
++
++assays = extract_assays(manifest)
++
++in_scope = [a for a in assays if a.get('in_scope') == True or a.get('in_scope') == 'true']
++
++# --- Build alias map: alias/name -> assay_id ---
++alias_to_assay = {}
++for a in in_scope:
++    aid = a['assay_id']
++    alias_to_assay[a['assay_name'].strip().lower()] = aid
++    for alias in a.get('aliases', []):
++        alias_to_assay[alias.strip().lower()] = aid
++
++# --- Resolve billing: active rows, match to assay, keep latest effective_month per assay ---
++billing_by_assay = {}
++for row in billing_rows:
++    if row.get('is_active', '').strip().lower() != 'true':
++        continue
++    label = row['assay_label'].strip().lower()
++    aid = alias_to_assay.get(label)
++    if aid is None:
++        continue
++    em = row['effective_month'].strip()
++    if aid not in billing_by_assay or em > billing_by_assay[aid]['effective_month']:
++        billing_by_assay[aid] = {
++            'effective_month': em,
++            'payment_per_run_per_lab_usd': float(row['payment_per_run_per_lab_usd'])
++        }
++
++# --- Resolve lab overrides: approved, highest revision per assay_id ---
++override_by_assay = {}
++for row in override_rows:
++    if row.get('status', '').strip().lower() != 'approved':
+… omitted 147 diff line(s) across 1 additional file(s)/section(s)
+
+session_id: 20260619_160059_29a2c7
