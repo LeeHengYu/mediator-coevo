@@ -1,0 +1,147 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/run_syncpack_analysis.py → b/run_syncpack_analysis.py
+@@ -0,0 +1,149 @@
++import json
++from pathlib import Path
++
++import pandas as pd
++
++INGREDIENT_PATH = Path('/root/ingredient_cost.csv')
++CARD_PATH = Path('/root/card_cost.csv')
++REIMBURSEMENT_PATH = Path('/root/reimbursement.csv')
++JSON_OUT = Path('/root/syncpack_analysis.json')
++MD_OUT = Path('/root/syncpack_summary.md')
++
++patients = 180
++fills_28 = 12
++fills_56 = 6
++caps_28 = 56
++caps_56 = 112
++switch_threshold_usd = 9000
++
++currency_cols = [
++    'price_per_1000_capsules_usd',
++    'card_cost_usd',
++    'reimbursement_per_cycle_180_patients_usd',
++    'annual_drug_cost_28_day_usd',
++    'annual_drug_cost_56_day_usd',
++    'annual_packaging_cost_28_day_usd',
++    'annual_packaging_cost_56_day_usd',
++    'annual_reimbursement_28_day_usd',
++    'annual_reimbursement_56_day_usd',
++    'annual_margin_28_day_usd',
++    'annual_margin_56_day_usd',
++    'annual_margin_difference_56_minus_28_usd',
++]
++
++medication_keys = [
++    'medication',
++    'price_per_1000_capsules_usd',
++    'blister_card_count',
++    'card_cost_usd',
++    'reimbursement_per_cycle_180_patients_usd',
++    'annual_drug_cost_28_day_usd',
++    'annual_drug_cost_56_day_usd',
++    'annual_packaging_cost_28_day_usd',
++    'annual_packaging_cost_56_day_usd',
++    'annual_reimbursement_28_day_usd',
++    'annual_reimbursement_56_day_usd',
++    'annual_margin_28_day_usd',
++    'annual_margin_56_day_usd',
++    'annual_margin_difference_56_minus_28_usd',
++]
++
++def round_currency(value):
++    return round(float(value), 2)
++
++# Load all three CSVs using pandas.
++ingredient = pd.read_csv(INGREDIENT_PATH)
++card = pd.read_csv(CARD_PATH)
++reimbursement = pd.read_csv(REIMBURSEMENT_PATH)
++
++print('ingredient_cost.csv')
++print(ingredient.to_string(index=False))
++print('\ncard_cost.csv')
++print(card.to_string(index=False))
++print('\nreimbursement.csv')
++print(reimbursement.to_string(index=False))
++
++# Normalize the reimbursement column to the required output key if necessary.
++if 'reimbursement_per_cycle_180_patients_usd' not in reimbursement.columns:
++    candidates = [c for c in reimbursement.columns if c != 'medication' and 'reimbursement' in c.lower()]
++    if not candidates:
++        raise ValueError(f'Could not find reimbursement column in {list(reimbursement.columns)}')
++    reimbursement = reimbursement.rename(columns={candidates[0]: 'reimbursement_per_cycle_180_patients_usd'})
++
++# Merge medication data, joining card costs through the blister card count because card_cost.csv has no medication column.
++df = ingredient.merge(card, on='blister_card_count', how='left', validate='many_to_one')
++df = df.merge(reimbursement[['medication', 'reimbursement_per_cycle_180_patients_usd']], on='medication', how='left', validate='one_to_one')
++
++if df.isna().any().any():
++    raise ValueError('Merged data contains missing values:\n' + df[df.isna().any(axis=1)].to_string(index=False))
+… omitted 71 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a/verify_syncpack_outputs.py → b/verify_syncpack_outputs.py
+@@ -0,0 +1,59 @@
++import json
++import re
++from pathlib import Path
++
++json_path = Path('/root/syncpack_analysis.json')
++md_path = Path('/root/syncpack_summary.md')
++
++with json_path.open('r', encoding='utf-8') as f:
++    data = json.load(f)
++print('JSON valid: yes')
++print('Top-level keys:', list(data.keys()))
++
++expected_assumptions = {
++    'patients_per_medication': 180,
++    'fills_per_year_28_day': 12,
++    'fills_per_year_56_day': 6,
++    'capsules_per_fill_28_day': 56,
++    'capsules_per_fill_56_day': 112,
++    'switch_threshold_usd': 9000,
++}
++assert data['assumptions'] == expected_assumptions
++
++expected_med_keys = [
++    'medication',
++    'price_per_1000_capsules_usd',
++    'blister_card_count',
++    'card_cost_usd',
++    'reimbursement_per_cycle_180_patients_usd',
++    'annual_drug_cost_28_day_usd',
++    'annual_drug_cost_56_day_usd',
++    'annual_packaging_cost_28_day_usd',
++    'annual_packaging_cost_56_day_usd',
++    'annual_reimbursement_28_day_usd',
++    'annual_reimbursement_56_day_usd',
++    'annual_margin_28_day_usd',
++    'annual_margin_56_day_usd',
++    'annual_margin_difference_56_minus_28_usd',
++]
++for med in data['medications']:
++    assert list(med.keys()) == expected_med_keys, med
++    assert isinstance(med['blister_card_count'], int), med
++    for k, v in med.items():
++        if k.endswith('_usd'):
++            assert isinstance(v, float), (k, v, type(v))
++            assert round(v, 2) == v, (k, v)
++assert [m['medication'] for m in data['medications']] == sorted(m['medication'] for m in data['medications'])
++
++md_text = md_path.read_text(encoding='utf-8')
++non_empty = [line for line in md_text.splitlines() if line.strip()]
++print('Markdown non-empty line count:', len(non_empty))
++assert 4 <= len(non_empty) <= 8
++
++currency_values = re.findall(r'\$-?\d[\d,]*\.\d{2}', md_text)
++print('Markdown currency values:', currency_values)
++assert len(currency_values) >= 3
++assert all(',' in value for value in currency_values), currency_values
++print('Markdown currency comma separators: yes')
++print('Decision:', data['decision'])
++print('All verification checks passed')
+
+session_id: 20260620_142317_404c09

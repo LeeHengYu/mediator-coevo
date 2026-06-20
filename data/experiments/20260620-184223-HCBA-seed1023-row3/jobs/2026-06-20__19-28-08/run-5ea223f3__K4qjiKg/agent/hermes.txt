@@ -1,0 +1,118 @@
+  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+  ┊ review diff
+a/solve.py → b/solve.py
+@@ -0,0 +1,195 @@
++#!/usr/bin/env python3
++import csv
++import json
++from pathlib import Path
++
++ROOT = Path('/root')
++
++RUNS_PER_YEAR_SMALL = 24
++RUNS_PER_YEAR_BULK = 12
++
++
++def truthy(value):
++    if isinstance(value, bool):
++        return value
++    if value is None:
++        return False
++    return str(value).strip().lower() in {'true', '1', 'yes', 'y'}
++
++
++def clean_row(row):
++    return {str(k).strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
++
++
++def load_csv(path):
++    with open(path, newline='') as f:
++        reader = csv.DictReader(f)
++        reader.fieldnames = [name.strip() for name in reader.fieldnames]
++        return [clean_row(row) for row in reader]
++
++
++def money(value):
++    return round(float(value) + 1e-9, 2)
++
++
++def flatten_assays(manifest):
++    assays = []
++    for region in manifest.get('regions', []):
++        for assay in region.get('assays', []):
++            assays.append(assay)
++    return assays
++
++
++def latest_billing_for_assay(assay, billing_rows):
++    labels = [assay.get('assay_name')]
++    aliases = assay.get('aliases') or []
++    if isinstance(aliases, list):
++        labels.extend(aliases)
++    labels = {label for label in labels if label}
++
++    matches = [
++        row for row in billing_rows
++        if row.get('assay_label') in labels and truthy(row.get('is_active'))
++    ]
++    if not matches:
++        raise ValueError(f"No active billing row found for {assay.get('assay_id')} labels={sorted(labels)}")
++    return max(matches, key=lambda row: row.get('effective_month', ''))
++
++
++def active_labs_for_assay(assay, override_rows):
++    assay_id = assay.get('assay_id')
++    approved = [
++        row for row in override_rows
++        if row.get('assay_id') == assay_id and str(row.get('status', '')).strip().lower() == 'approved'
++    ]
++    if approved:
++        best = max(approved, key=lambda row: int(float(row.get('revision') or 0)))
++        # Prefer exactly active_labs, but tolerate equivalent column naming.
++        for key in best:
++            if key.strip().lower() in {'active_labs', 'active_lab_count', 'labs_active'}:
++                return int(float(best[key]))
++        raise ValueError(f"Approved override for {assay_id} lacks active labs column")
++    return int(float(assay.get('default_active_labs')))
++
++
++def main():
++    manifest = json.load(open(ROOT / 'assay_manifest.json'))
++    carrier_rows = load_csv(ROOT / 'carrier_cost.csv')
++    billing_rows = load_csv(ROOT / 'billing.csv')
+… omitted 117 diff line(s) across 1 additional file(s)/section(s)
+  ┊ review diff
+a//root/solve.py → b//root/solve.py
+@@ -110,8 +110,6 @@
+         assay_outputs.append({
+             'assay_id': assay_id,
+             'assay_name': assay['assay_name'],
+-            'billing_label_used': billing['assay_label'],
+-            'billing_effective_month': billing['effective_month'],
+             'payment_per_run_per_lab_usd': money(payment),
+             'active_labs': active_labs,
+             'carrier_type': carrier_type,
+
+session_id: 20260620_113313_4cc717
+Completed.
+
+Created:
+- /root/solve.py
+- /root/reagent_policy_report.json
+- /root/reagent_policy_summary.md
+
+Verified:
+- Ran `python3 /root/solve.py` successfully.
+- Sanity check printed carrier-cost scaling for CHEM-ION:
+  `annual_carrier_small=5740.8`, `annual_carrier_bulk=2870.4`
+- Confirmed metadata matches `/root/report_template.json`.
+- Confirmed assays are sorted by `assay_id`.
+- Confirmed decision logic.
+- Confirmed JSON parses successfully with:
+  `python3 -c "import json; json.load(open('/root/reagent_policy_report.json'))"`
+
+Key results:
+- Total annual margin (small-kit): $-7106.39 USD
+- Total annual margin (bulk-kit): $-5758.79 USD
+- Absolute margin difference: $1347.60 USD
+- Decision: adopt_bulk_kit
