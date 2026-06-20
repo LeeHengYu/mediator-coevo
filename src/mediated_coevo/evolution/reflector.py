@@ -518,6 +518,7 @@ class Reflector:
                     ),
                     required=True,
                     max_tokens=budgets.max_skill_tokens,
+                    overflow_strategy="section_pack",
                 ),
                 BudgetSection(
                     "contrastive_evidence",
@@ -527,6 +528,7 @@ class Reflector:
                     ),
                     required=True,
                     max_tokens=budgets.historical_summary_tokens,
+                    overflow_strategy="section_pack",
                 ),
             ]
             if rejected_section:
@@ -536,6 +538,7 @@ class Reflector:
                         rejected_section.strip(),
                         required=True,
                         max_tokens=min(1200, budgets.historical_summary_tokens),
+                        overflow_strategy="section_pack",
                     )
                 )
             sections.append(
@@ -543,6 +546,7 @@ class Reflector:
                     "instructions",
                     PromptText.reflection_instructions_section(instructions),
                     required=True,
+                    overflow_strategy="section_pack",
                 )
             )
             user_content = pack_sections(

@@ -604,28 +604,41 @@ class SkillFlowTraceParser:
                 run_id=as_nonempty_string(job_result_json.get("id")),
                 harbor_metadata=_harbor_metadata(trial_result_json),
             )
-        reward_values: list[Any] = []
+        reward_candidates: list[tuple[str, Any]] = []
         stats = as_mapping(job_result_json.get("stats"))
         evals = as_mapping(stats.get("evals"))
         for eval_result in evals.values():
             metrics = as_mapping(eval_result).get("metrics")
             if isinstance(metrics, list):
                 for metric in metrics:
-                    reward_values.append(as_mapping(metric).get("mean"))
-        reward_values.append(trial_result_json.get("reward"))
+                    reward_candidates.append(
+                        ("job_stats", as_mapping(metric).get("mean"))
+                    )
+        reward_candidates.append(("trial_result", trial_result_json.get("reward")))
         verifier_result = as_mapping(trial_result_json.get("verifier_result"))
-        reward_values.append(verifier_result.get("reward"))
-        reward_values.append(as_mapping(verifier_result.get("rewards")).get("reward"))
+        reward_candidates.append(
+            ("trial_verifier_result", verifier_result.get("reward"))
+        )
+        reward_candidates.append(
+            (
+                "trial_verifier_rewards",
+                as_mapping(verifier_result.get("rewards")).get("reward"),
+            )
+        )
         reward_path = self.run_result.trial_dir / "verifier" / "reward.txt"
         if reward_path.exists():
-            reward_values.append(reward_path.read_text().strip())
+            reward_candidates.append(
+                ("verifier_reward_file", reward_path.read_text().strip())
+            )
 
         reward = None
-        for value in reward_values:
+        reward_source: str | None = None
+        for source, value in reward_candidates:
             try:
                 reward = float(value)
             except (TypeError, ValueError):
                 continue
+            reward_source = source
             break
         if reward is None:
             return ExecutionTrace(
@@ -649,16 +662,7 @@ class SkillFlowTraceParser:
             trial_dir=self.run_result.trial_dir,
             agent_result=agent_result,
         )
-        if evals:
-            reward_source = "job_stats"
-        elif "reward" in trial_result_json:
-            reward_source = "trial_result"
-        elif verifier_result.get("reward") is not None:
-            reward_source = "trial_verifier_result"
-        elif as_mapping(verifier_result.get("rewards")).get("reward") is not None:
-            reward_source = "trial_verifier_rewards"
-        else:
-            reward_source = "verifier_reward_file"
+        assert reward_source is not None
         ctrf_path = self.run_result.trial_dir / "verifier" / "ctrf.json"
         test_results = _load_json_or_empty(ctrf_path) if ctrf_path.exists() else None
         return ExecutionTrace(

@@ -133,7 +133,10 @@ class MediatorAgent(BaseAgent):
         if self._budgets and user_budget:
             user_content = pack_sections(
                 model,
-                [section.to_budget_section() for section in sections],
+                [
+                    section.to_budget_section(overflow_strategy="section_pack")
+                    for section in sections
+                ],
                 user_budget,
             )
         else:
@@ -364,6 +367,7 @@ class MediatorAgent(BaseAgent):
                             feedback,
                             required=True,
                             max_tokens=self._budgets.mediator_report_tokens,
+                            overflow_strategy="head_tail",
                         )
                     ],
                     max(1, self._budgets.mediator_prompt_tokens - 500),

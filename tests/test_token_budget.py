@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import pytest
 
+from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.core.config import Config
 from mediated_coevo.evolution.compactor import compact_text_for_context
 from mediated_coevo.experiment.conditions import get_prior_context
+from mediated_coevo.evolution.reflector import Reflector
+from mediated_coevo.evolution.skill_advisor import SkillAdvisorPrompt
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
+from mediated_coevo.models.skill import SkillProposal
+from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.runtime.token_budget import (
@@ -163,6 +168,107 @@ def test_pack_sections_truncates_optional_section_to_fit():
     assert count_text_tokens("test-model", packed) <= 30
 
 
+def test_pack_sections_drop_oldest_keeps_newest_complete_lines():
+    packed = pack_sections(
+        "test-model",
+        [
+            BudgetSection("required", "Required instruction.", required=True),
+            BudgetSection(
+                "optional",
+                "\n".join([f"event-{idx}" for idx in range(20)]),
+                overflow_strategy="drop_oldest",
+            ),
+        ],
+        budget_limit=20,
+    )
+
+    assert "Required instruction." in packed
+    assert "event-0" not in packed
+    assert "event-19" in packed
+    assert "..." not in packed
+    assert count_text_tokens("test-model", packed) <= 20
+
+
+def test_pack_sections_drop_oldest_salvages_overlong_newest_line():
+    packed = pack_sections(
+        "test-model",
+        [
+            BudgetSection("required", "Required instruction.", required=True),
+            BudgetSection(
+                "optional",
+                "old event\n" + ("NEWEST_SIGNAL " * 200),
+                overflow_strategy="drop_oldest",
+            ),
+        ],
+        budget_limit=20,
+    )
+
+    assert "Required instruction." in packed
+    assert "old event" not in packed
+    assert "NEWEST_SIGNAL" in packed
+    assert count_text_tokens("test-model", packed) <= 20
+
+
+def test_pack_sections_section_pack_keeps_complete_lines_without_tail_marker():
+    packed = pack_sections(
+        "test-model",
+        [
+            BudgetSection("required", "Required instruction.", required=True),
+            BudgetSection(
+                "examples",
+                "\n".join([f"example-{idx}" for idx in range(20)]),
+                overflow_strategy="section_pack",
+            ),
+        ],
+        budget_limit=20,
+    )
+
+    assert "Required instruction." in packed
+    assert "example-0" in packed
+    assert "example-19" not in packed
+    assert "..." not in packed
+    assert count_text_tokens("test-model", packed) <= 20
+
+
+def test_pack_sections_section_pack_salvages_overlong_first_line_without_marker():
+    packed = pack_sections(
+        "test-model",
+        [
+            BudgetSection("required", "Required instruction.", required=True),
+            BudgetSection(
+                "examples",
+                "OVERSIZED_EXAMPLE " * 200,
+                overflow_strategy="section_pack",
+            ),
+        ],
+        budget_limit=20,
+    )
+
+    assert "Required instruction." in packed
+    assert "OVERSIZED_EXAMPLE" in packed
+    assert "..." not in packed
+    assert count_text_tokens("test-model", packed) <= 20
+
+
+def test_pack_sections_none_omits_overflowing_optional_section():
+    packed = pack_sections(
+        "test-model",
+        [
+            BudgetSection("required", "Required instruction.", required=True),
+            BudgetSection(
+                "optional",
+                "OPTIONAL " * 500,
+                overflow_strategy="none",
+            ),
+        ],
+        budget_limit=30,
+    )
+
+    assert "Required instruction." in packed
+    assert "OPTIONAL" not in packed
+    assert count_text_tokens("test-model", packed) <= 30
+
+
 def test_pack_sections_reserves_budget_for_later_required_sections():
     packed = pack_sections(
         "test-model",
@@ -177,6 +283,99 @@ def test_pack_sections_reserves_budget_for_later_required_sections():
     assert "Required start." in packed
     assert "Required end." in packed
     assert count_text_tokens("test-model", packed) <= 20
+
+
+def test_budgeted_section_pack_callers_wire_matching_section_strategy(monkeypatch):
+    calls: list[list[BudgetSection]] = []
+
+    def fake_pack_sections(
+        model: str,
+        sections: list[BudgetSection],
+        budget_limit: int,
+        *,
+        separator: str = "\n\n",
+    ) -> str:
+        calls.append(list(sections))
+        return f"packed:{model}:{budget_limit}:{separator!r}"
+
+    monkeypatch.setattr(
+        "mediated_coevo.runtime.token_budget.pack_sections",
+        fake_pack_sections,
+    )
+    budgets = budgets_config()
+
+    PlannerAgent._build_plan_prompt(
+        {
+            "task_id": "task-A",
+            "base_instruction": "Fix the build.",
+            "prior_context": "prior signal",
+        },
+        model="test-model",
+        budgets=budgets,
+        budget=200,
+    )
+    PlannerAgent._build_update_prompt(
+        {
+            "current_skill": "# Executor\n",
+            "feedback": "runtime feedback",
+            "task_ids": ["task-A"],
+            "edit_history": ["prior edit"],
+            "rejected_update_history": ["bad edit"],
+        },
+        response_schema='Respond with JSON: {"ok": true}',
+        batch_mode=True,
+        model="test-model",
+        budgets=budgets,
+        budget=200,
+    )
+
+    mediator = MediatorAgent(LLMClient(model="test-model"))
+    mediator.configure_token_budget(budgets, condition_name="learned_mediator")
+    mediator.load_protocol("# Protocol\n")
+    mediator.construct_messages(
+        {
+            "trace": ExecutionTrace(
+                task_id="task-A",
+                iteration=0,
+                status="ok",
+                reward=1.0,
+                stdout="stdout",
+            ),
+            "task_context": TaskSpec(
+                task_id="task-A",
+                instruction="Fix the build.",
+                iteration=0,
+            ),
+        }
+    )
+
+    Reflector._build_mediator_prompt(
+        "# Coordination protocol\n",
+        [],
+        model="test-model",
+        budgets=budgets,
+    )
+    SkillAdvisorPrompt(
+        current_skill="# Executor\n",
+        proposals=[
+            SkillProposal(
+                old_content="old",
+                new_content="new",
+                reasoning="reason",
+                iteration=0,
+                task_id="task-A",
+            )
+        ],
+        model="test-model",
+        budgets=budgets,
+    ).render()
+
+    assert calls
+    assert all(
+        section.overflow_strategy == "section_pack"
+        for sections in calls
+        for section in sections
+    )
 
 
 @pytest.mark.asyncio

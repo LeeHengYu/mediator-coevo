@@ -471,7 +471,7 @@ class PlannerAgent(BaseAgent):
                     "scaffold",
                     task_header,
                     required=True,
-                ).to_budget_section()
+                ).to_budget_section(overflow_strategy="section_pack")
             ]
             if instruction := context.get("base_instruction"):
                 sections.append(
@@ -481,10 +481,10 @@ class PlannerAgent(BaseAgent):
                         PromptText.benchmark_instruction(instruction),
                         required=True,
                         max_tokens=instruction_budget,
-                    ).to_budget_section()
+                    ).to_budget_section(overflow_strategy="section_pack")
                 )
             sections.extend(
-                section.to_budget_section()
+                section.to_budget_section(overflow_strategy="section_pack")
                 for section in PlannerAgent._prior_context_sections(context)
             )
             sections.append(
@@ -493,7 +493,7 @@ class PlannerAgent(BaseAgent):
                     "response_schema",
                     response_schema,
                     required=True,
-                ).to_budget_section()
+                ).to_budget_section(overflow_strategy="section_pack")
             )
             return pack_sections(model, sections, budget)
 
@@ -546,6 +546,7 @@ class PlannerAgent(BaseAgent):
                     PromptText.current_skill(context.get("current_skill", "(none)")),
                     required=True,
                     max_tokens=budgets.max_skill_tokens,
+                    overflow_strategy="section_pack",
                 )
             ]
             if feedback := context.get("feedback"):
@@ -554,6 +555,7 @@ class PlannerAgent(BaseAgent):
                         "execution_feedback",
                         PromptText.execution_feedback(feedback),
                         max_tokens=budgets.mediator_report_tokens,
+                        overflow_strategy="section_pack",
                     )
                 )
             if batch_mode and (task_ids := context.get("task_ids")):
@@ -561,6 +563,7 @@ class PlannerAgent(BaseAgent):
                     BudgetSection(
                         "candidate_scope",
                         PromptText.candidate_scope(task_ids),
+                        overflow_strategy="section_pack",
                     )
                 )
             if history := context.get("edit_history"):
@@ -569,6 +572,7 @@ class PlannerAgent(BaseAgent):
                         "recent_edit_history",
                         PromptText.recent_edit_history(history),
                         max_tokens=budgets.historical_summary_tokens,
+                        overflow_strategy="section_pack",
                     )
                 )
             if rejected_history := context.get("rejected_update_history"):
@@ -577,6 +581,7 @@ class PlannerAgent(BaseAgent):
                         "rejected_update_history",
                         PromptText.rejected_skill_updates(rejected_history),
                         max_tokens=budgets.historical_summary_tokens,
+                        overflow_strategy="section_pack",
                     )
                 )
             sections.append(
@@ -584,6 +589,7 @@ class PlannerAgent(BaseAgent):
                     "response_schema",
                     response_schema,
                     required=True,
+                    overflow_strategy="section_pack",
                 )
             )
             return pack_sections(model, sections, budget)

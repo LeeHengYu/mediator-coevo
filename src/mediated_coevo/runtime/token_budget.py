@@ -187,7 +187,12 @@ def pack_sections(
     for section in sections:
         content = section.content.strip()
         if section.max_tokens is not None:
-            content = fit_text_to_tokens(model, content, section.max_tokens)
+            content = _fit_text_to_tokens_with_strategy(
+                model,
+                content,
+                section.max_tokens,
+                section.overflow_strategy,
+            )
         packed.append((section, content))
 
     required_text = separator.join(
@@ -229,7 +234,12 @@ def pack_sections(
         )
         if remaining <= 0:
             continue
-        truncated = fit_text_to_tokens(model, content, remaining)
+        truncated = _fit_text_to_tokens_with_strategy(
+            model,
+            content,
+            remaining,
+            section.overflow_strategy,
+        )
         if truncated:
             candidate = separator.join([*selected, truncated])
             if count_text_tokens(model, candidate) <= budget_limit:
@@ -263,6 +273,98 @@ def _remaining_text_budget(
     used = count_text_tokens(model, separator.join(selected)) if selected else 0
     sep_tokens = count_text_tokens(model, separator) if selected else 0
     return max(0, budget_limit - used - sep_tokens)
+
+
+def _fit_text_to_tokens_with_strategy(
+    model: str,
+    text: str,
+    max_tokens: int,
+    strategy: OverflowStrategy,
+) -> str:
+    if max_tokens <= 0 or not text:
+        return ""
+    if count_text_tokens(model, text) <= max_tokens:
+        return text
+    if strategy == "head_tail":
+        return fit_text_to_tokens(model, text, max_tokens)
+    if strategy == "section_pack":
+        return _fit_section_units_to_tokens(model, text, max_tokens)
+    if strategy == "drop_oldest":
+        return _fit_drop_oldest_text_to_tokens(model, text, max_tokens)
+    if strategy == "none":
+        return ""
+    return fit_text_to_tokens(model, text, max_tokens)
+
+
+def _fit_drop_oldest_text_to_tokens(model: str, text: str, max_tokens: int) -> str:
+    """Drop oldest line-level units first, preserving the newest suffix."""
+    units = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if len(units) > 1:
+        selected: list[str] = []
+        for unit in reversed(units):
+            candidate = "\n".join([unit, *selected])
+            if count_text_tokens(model, candidate) > max_tokens:
+                if not selected:
+                    return _fit_suffix_to_tokens(model, unit, max_tokens)
+                break
+            selected.insert(0, unit)
+        return "\n".join(selected)
+
+    return _fit_suffix_to_tokens(model, text, max_tokens)
+
+
+def _fit_prefix_after_units(
+    model: str,
+    selected: list[str],
+    unit: str,
+    max_tokens: int,
+) -> str:
+    lo = 0
+    hi = len(unit)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        prefix = unit[:mid].rstrip()
+        candidate = "\n".join([*selected, prefix]) if prefix else "\n".join(selected)
+        if count_text_tokens(model, candidate) <= max_tokens:
+            best = prefix
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def _fit_suffix_to_tokens(model: str, text: str, max_tokens: int) -> str:
+    lo = 0
+    hi = len(text)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = text[-mid:].lstrip() if mid else ""
+        if count_text_tokens(model, candidate) <= max_tokens:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def _fit_section_units_to_tokens(model: str, text: str, max_tokens: int) -> str:
+    """Pack complete line-level units from the front of a section."""
+    units = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not units:
+        return ""
+
+    selected: list[str] = []
+    for unit in units:
+        candidate = "\n".join([*selected, unit])
+        if count_text_tokens(model, candidate) > max_tokens:
+            prefix = _fit_prefix_after_units(model, selected, unit, max_tokens)
+            if prefix:
+                selected.append(prefix)
+            break
+        selected.append(unit)
+    return "\n".join(selected)
 
 
 def _candidate_preserves_later_required_budget(
@@ -302,4 +404,3 @@ def _remaining_text_budget_for_optional(
         return 0
     sep_tokens = count_text_tokens(model, separator) if selected else 0
     return max(0, budget_limit - reserved_tokens - sep_tokens)
-
