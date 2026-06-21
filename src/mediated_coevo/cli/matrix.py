@@ -150,6 +150,28 @@ def matrix(
             ),
         ),
     ] = None,
+    save_artifacts: Annotated[
+        bool,
+        typer.Option(
+            "--save",
+            help="Save each completed diffusion artifact store locally.",
+        ),
+    ] = False,
+    artifact_store: Annotated[
+        Path | None,
+        typer.Option(
+            "--artifact",
+            help="Saved diffusion artifact store to preload into each row.",
+        ),
+    ] = None,
+    freeze_artifacts: Annotated[
+        bool,
+        typer.Option(
+            "--freeze",
+            "-f",
+            help="Freeze the preloaded diffusion artifact store.",
+        ),
+    ] = False,
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -193,6 +215,12 @@ def matrix(
         preset_names = list(BASELINE_PRESET_NAMES)
     else:
         preset_names = [BASELINE_PRESET_NAMES[index] for index in selected_indexes]
+    _validate_artifact_store_options(
+        preset_names=preset_names,
+        save_artifacts=save_artifacts,
+        artifact_store=artifact_store,
+        freeze_artifacts=freeze_artifacts,
+    )
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides=_run_config_overrides(
@@ -252,8 +280,26 @@ def matrix(
     console.print(f"[bold]Rows:[/] {', '.join(preset_names)}")
     console.print("[bold]Row-local diffusion:[/] enabled, policy, graph")
 
+    artifact_store = artifact_store.expanduser() if artifact_store is not None else None
+    saved_store_root = PROJECT_ROOT / config.paths.data_dir / "artifact-stores"
     for row in rows:
         row_config = row.runtime.orchestrator.config
+        if artifact_store is not None:
+            try:
+                imported_count = row.runtime.orchestrator._diffusion_store.import_artifact_store(
+                    artifact_store
+                )
+            except (OSError, ValueError) as exc:
+                console.print(
+                    "[bold red]ERROR:[/] failed to preload artifact store: "
+                    f"{exc}"
+                )
+                raise typer.Exit(code=1) from exc
+            row.runtime.orchestrator.freeze_diffusion_artifact_store = freeze_artifacts
+            console.print(
+                f"[bold]Preloaded diffusion artifacts:[/] {imported_count} "
+                f"from {artifact_store}"
+            )
         random.seed(seed)
         try:
             materialize_task_graph_for_diffusion(
@@ -291,6 +337,25 @@ def matrix(
             config=row_config,
             history_store=row.runtime.orchestrator.history_store,
         )
+        if save_artifacts:
+            destination = saved_store_root / row.runtime.experiment_dir.name
+            try:
+                saved_count = (
+                    row.runtime.orchestrator._diffusion_store.save_artifact_store(
+                        destination,
+                        store_id=row.runtime.experiment_dir.name,
+                    )
+                )
+            except (OSError, ValueError) as exc:
+                console.print(
+                    "[bold red]ERROR:[/] failed to save artifact store: "
+                    f"{exc}"
+                )
+                raise typer.Exit(code=1) from exc
+            console.print(
+                f"[bold]Saved diffusion artifact store:[/] {destination} "
+                f"({saved_count} artifacts)"
+            )
     console.print(f"\n[bold]Matrix data:[/] {matrix_dir}")
 
 
@@ -317,6 +382,30 @@ def _parse_matrix_row_indexes(value: str | None) -> list[int] | None:
             raise typer.BadParameter("matrix row indexes cannot repeat")
         indexes.append(index)
     return indexes
+
+
+def _validate_artifact_store_options(
+    *,
+    preset_names: list[str],
+    save_artifacts: bool,
+    artifact_store: Path | None,
+    freeze_artifacts: bool,
+) -> None:
+    if freeze_artifacts and artifact_store is None:
+        raise typer.BadParameter("--freeze requires --artifact")
+    if not (save_artifacts or artifact_store is not None or freeze_artifacts):
+        return
+
+    disabled = [
+        preset_name
+        for preset_name in preset_names
+        if not get_baseline_preset(preset_name).diffusion_enabled
+    ]
+    if disabled:
+        raise typer.BadParameter(
+            "artifact store options require diffusion-enabled rows; "
+            f"disabled rows: {', '.join(disabled)}"
+        )
 
 
 def register_matrix_command(app: typer.Typer) -> None:

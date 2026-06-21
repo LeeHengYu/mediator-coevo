@@ -42,7 +42,7 @@ class DiffusionArtifact(BaseModel):
 
     artifact_id: str = Field(default_factory=lambda: uuid4().hex)
     source_task_id: str
-    source_iteration: int = Field(ge=0)
+    source_iteration: int = Field(ge=-1)
     source_run_id: str | None = None
     artifact_type: DiffusionArtifactType
     risk_level: DiffusionRiskLevel
@@ -78,7 +78,7 @@ class DiffusedRecord(BaseModel):
     record_id: str = Field(default_factory=lambda: uuid4().hex)
     artifact_id: str
     source_task_id: str
-    source_iteration: int = Field(ge=0)
+    source_iteration: int = Field(ge=-1)
     target_task_id: str
     target_iteration: int = Field(ge=0)
     source_run_id: str | None = None

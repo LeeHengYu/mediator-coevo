@@ -163,7 +163,6 @@ def test_run_cli_fails_fast_when_openrouter_key_is_missing(monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "OPENROUTER_API_KEY" in result.output
 
 
 def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):

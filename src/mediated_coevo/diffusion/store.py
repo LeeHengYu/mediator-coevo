@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -25,6 +26,7 @@ class DiffusionStore:
     """Persists diffusion artifacts, graph snapshots, and audit ledgers."""
 
     _DIFFUSED_RECORDS_FILE = "diffused_records.jsonl"
+    _MANIFEST_FILE = "manifest.json"
 
     def __init__(self, base_dir: Path) -> None:
         self._base_dir = base_dir
@@ -72,6 +74,68 @@ class DiffusionStore:
     def append_diffused_record(self, record: DiffusedRecord) -> Path:
         """Append one unified diffusion audit record."""
         return append_jsonl(self._diffused_records_path, record)
+
+    def save_artifact_store(self, destination: Path, *, store_id: str) -> int:
+        """Save planner-visible artifacts into a portable artifact store."""
+        return self.export_artifact_store(
+            self._base_dir,
+            destination,
+            store_id=store_id,
+        )
+
+    def import_artifact_store(
+        self,
+        source: Path,
+        *,
+        initial_source_iteration: int = -1,
+    ) -> int:
+        """Import saved artifacts as pre-warmup artifacts."""
+        artifacts = _load_saved_artifacts(source)
+        for artifact in artifacts:
+            metadata = dict(artifact.metadata)
+            metadata["preloaded_from_artifact_store"] = str(source)
+            metadata["original_source_iteration"] = artifact.source_iteration
+            preloaded = artifact.model_copy(
+                update={
+                    "source_iteration": initial_source_iteration,
+                    "metadata": metadata,
+                }
+            )
+            self.store_artifact(preloaded, overwrite=True)
+        return len(artifacts)
+
+    @classmethod
+    def export_artifact_store(
+        cls,
+        source: Path,
+        destination: Path,
+        *,
+        store_id: str,
+    ) -> int:
+        """Copy the final artifact state from one diffusion store to another."""
+        artifacts = _load_saved_artifacts(source)
+        if (destination / cls._MANIFEST_FILE).exists():
+            raise FileExistsError(f"artifact store already exists: {destination}")
+        artifacts_dir = destination / "artifacts"
+        if artifacts_dir.exists() and any(artifacts_dir.glob("*.json")):
+            raise FileExistsError(
+                f"artifact store already has artifacts: {destination}"
+            )
+        destination.mkdir(parents=True, exist_ok=True)
+
+        target = cls(destination)
+        for artifact in artifacts:
+            target.store_artifact(artifact, overwrite=True)
+        manifest = {
+            "id": store_id,
+            "artifact_count": len(artifacts),
+            "source": str(source),
+        }
+        (destination / cls._MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return len(artifacts)
 
     def load_artifact(self, artifact_id: str) -> DiffusionArtifact | None:
         """Load one persisted artifact by stable artifact ID."""
@@ -179,3 +243,17 @@ class DiffusionStore:
         if recent is None:
             return filtered
         return filtered[:recent]
+
+
+def _load_saved_artifacts(source: Path) -> list[DiffusionArtifact]:
+    artifacts_dir = source / "artifacts"
+    if not artifacts_dir.is_dir():
+        raise ValueError(f"artifact store has no artifacts directory: {source}")
+    artifacts = load_directory_models(
+        artifacts_dir,
+        DiffusionArtifact,
+        logger=logger,
+    )
+    if not artifacts:
+        raise ValueError(f"artifact store contains no diffusion artifacts: {source}")
+    return artifacts

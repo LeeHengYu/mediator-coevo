@@ -166,6 +166,7 @@ class Orchestrator:
             tuple[int, str],
             list[DiffusionSubscription],
         ] = {}
+        self.freeze_diffusion_artifact_store = False
         self._diffusion_prepared_iterations: set[int] = set()
         self._diffusion_snapshot_by_iteration: dict[int, TaskGraphSnapshot] = {}
         self._diffusion_target_task_ids: list[str] = []
@@ -746,7 +747,10 @@ class Orchestrator:
         judge_reward: float | None,
     ) -> None:
         self._ensure_diffusion_runtime_state()
-        if not self.config.diffusion.enabled:
+        if (
+            not self.config.diffusion.enabled
+            or self.freeze_diffusion_artifact_store
+        ):
             return
 
         artifacts = await emit_diffusion_artifacts(
@@ -1158,6 +1162,8 @@ class Orchestrator:
             self._prior_context_by_target = {}
         if not hasattr(self, "_diffusion_sub_board"):
             self._diffusion_sub_board = {}
+        if not hasattr(self, "freeze_diffusion_artifact_store"):
+            self.freeze_diffusion_artifact_store = False
         if not hasattr(self, "_diffusion_prepared_iterations"):
             self._diffusion_prepared_iterations = set()
         if not hasattr(self, "_diffusion_snapshot_by_iteration"):

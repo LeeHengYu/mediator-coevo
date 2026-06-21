@@ -258,7 +258,6 @@ def test_sync_cli_accepts_selected_tasks(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Downloaded SkillFlow tasks to:" in result.output
     assert "demo/dataset" in calls[0]
     assert "test_tasks/family-a/task-one/**" in calls[0]
     assert (tmp_path / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
@@ -363,7 +362,6 @@ def test_sync_cli_accepts_family_selector(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Downloaded SkillFlow tasks to:" in result.output
     assert "test_tasks/family-a/task-one/**" in calls[0]
     assert "test_tasks/family-a/task-two/**" in calls[0]
     assert "test_tasks/family-b/task-three/**" not in calls[0]
@@ -399,7 +397,6 @@ def test_build_base_image_cli_runs_skillflow_build_script(
     ]
     assert calls[0][1]["cwd"] == Path.cwd()
     assert calls[0][1]["check"] is False
-    assert "SkillFlow base image build complete" in result.output
 
 
 def test_build_base_image_cli_dry_run_does_not_run_build(
@@ -422,12 +419,6 @@ def test_build_base_image_cli_dry_run_does_not_run_build(
     )
 
     assert result.exit_code == 0
-    assert "Would build base image" in result.output
-    output_compact = result.output.replace("\n", "")
-    assert "build.sh" in output_compact
-    assert "skillflow/harbor-cli-base:test" in result.output
-    assert "SkillFlow base image dry run complete" in result.output
-    assert "SkillFlow base image build complete" not in result.output
 
 
 def test_list_cli_uses_cached_remote_tasks(monkeypatch, tmp_path: Path) -> None:

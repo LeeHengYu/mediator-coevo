@@ -496,18 +496,20 @@ def test_inspect_command_prints_diffusion_context_summary(tmp_path):
         )
     )
 
-    result = CliRunner().invoke(app, ["inspect", str(run_dir)])
+    payload = _inspection_payload(run_dir)
 
-    assert result.exit_code == 0
-    assert "Enabled: true" in result.stdout
-    assert "Policy: top_k_similarity" in result.stdout
-    assert "Metrics:" in result.stdout
-    assert "Diffusion records:" in result.stdout
-    assert "Rows with rendered context: 1" in result.stdout
-    assert "Transfer tokens: total=12 mean=12 max=12" in result.stdout
-    assert "Source tasks: 1 (task-b)" in result.stdout
-    assert "Reward after context: count=1 mean=0 min=0 max=0" in result.stdout
-    assert "Regressions after context: 1 rate=1" in result.stdout
+    diffusion = payload["diffusion"]
+    metrics = diffusion["metrics"]
+    context = metrics["context"]
+    assert metrics["diffusion_enabled"] is True
+    assert metrics["diffusion_policy"] == "top_k_similarity"
+    assert context["rows_with_rendered_context"] == 1
+    assert context["transfer_context_tokens"]["total"] == 12
+    assert context["transfer_context_tokens"]["mean"] == 12
+    assert context["transfer_context_tokens"]["max"] == 12
+    assert context["source_task_ids"] == ["task-b"]
+    assert context["reward_after_diffusion_context"]["count"] == 1
+    assert context["regression_after_diffusion_context"]["count"] == 1
 
 
 def test_matrix_inspection_payload_reports_row_summaries(tmp_path):

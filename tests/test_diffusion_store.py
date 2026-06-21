@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from mediated_coevo.diffusion import (
@@ -165,3 +167,32 @@ def test_query_diffused_records_skips_malformed_jsonl_lines(tmp_path, caplog):
 
     assert [record.artifact_id for record in records] == ["artifact-1"]
     assert "Failed to load DiffusedRecord" in caplog.text
+
+
+def test_saved_artifact_store_round_trips_as_preloaded_iteration(tmp_path):
+    source = DiffusionStore(tmp_path / "source")
+    source.store_artifact(_artifact("artifact-1", source_iteration=2))
+    saved = tmp_path / "saved-store"
+
+    saved_count = source.save_artifact_store(saved, store_id="experiment-1")
+    manifest = json.loads((saved / "manifest.json").read_text())
+    target = DiffusionStore(tmp_path / "target")
+    imported_count = target.import_artifact_store(saved)
+    loaded = target.load_artifact("artifact-1")
+    visible = target.query_artifacts(before_source_iteration=0)
+
+    assert saved_count == 1
+    assert manifest["id"] == "experiment-1"
+    assert manifest["artifact_count"] == 1
+    assert imported_count == 1
+    assert loaded is not None
+    assert loaded.source_iteration == -1
+    assert loaded.metadata["original_source_iteration"] == 2
+    assert [artifact.artifact_id for artifact in visible] == ["artifact-1"]
+
+
+def test_save_artifact_store_rejects_empty_store(tmp_path):
+    store = DiffusionStore(tmp_path / "empty")
+
+    with pytest.raises(ValueError, match="contains no diffusion artifacts"):
+        store.save_artifact_store(tmp_path / "saved", store_id="empty-run")

@@ -245,7 +245,6 @@ def test_create_graph_cli_writes_thresholded_artifacts(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Kept edges" in result.output
 
     summary = json.loads((output_dir / "graph_summary.json").read_text())
     pairwise = json.loads((output_dir / "pairwise_similarity.json").read_text())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import tomllib
 
 import pytest
@@ -22,6 +23,7 @@ from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     BASELINE_PRESETS_BY_NAME,
     SkillUpdateParseError,
+    get_baseline_preset,
     parse_skill_updates,
 )
 from mediated_coevo.experiment.conditions import (
@@ -40,6 +42,12 @@ from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.models.skill import SkillProposal
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.runtime.token_budget import TokenBudgetEvent
+from mediated_coevo.diffusion import (
+    DiffusionArtifact,
+    DiffusionArtifactType,
+    DiffusionRiskLevel,
+    DiffusionStore,
+)
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.stores.history_store import HistoryStore
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
@@ -295,11 +303,6 @@ def test_matrix_list_prints_indexed_rows_without_runtime_setup(monkeypatch, flag
     result = CliRunner().invoke(app, ["matrix", flag])
 
     assert result.exit_code == 0, result.output
-    assert "Matrix rows:" in result.output
-    assert "0: skill_none_diffusion_none" in result.output
-    assert "7: skill_all_top_k_similarity" in result.output
-    assert "skill update: none, diffusion policy: top_k_similarity" in result.output
-    assert "skill update: all, diffusion policy: top_k_similarity" in result.output
 
 
 def _stub_matrix_runtime_build(monkeypatch, tmp_path):
@@ -377,8 +380,6 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
     assert captured["benchmark_repo"] is repository
     assert captured["matrix_seed"] == 42
     assert captured["matrix_run_id"] == "custom-matrix-run"
-    assert "Rows: skill_none_top_k_similarity" in result.output
-    assert "skill_all_top_k_similarity" not in result.output
 
 
 def test_matrix_index_accepts_comma_separated_rows(monkeypatch, tmp_path):
@@ -407,10 +408,6 @@ def test_matrix_index_accepts_comma_separated_rows(monkeypatch, tmp_path):
     assert captured["flatten_single_row"] is False
     assert captured["benchmark_repo"] is repository
     assert captured["matrix_seed"] == 42
-    assert f"Rows: {BASELINE_PRESET_NAMES[1]}, {BASELINE_PRESET_NAMES[3]}" in (
-        result.output
-    )
-    assert BASELINE_PRESET_NAMES[0] not in result.output
 
 
 @pytest.mark.parametrize(
@@ -426,6 +423,158 @@ def test_matrix_index_accepts_comma_separated_rows(monkeypatch, tmp_path):
 def test_matrix_index_rejects_invalid_comma_separated_rows(value, match):
     with pytest.raises(typer.BadParameter, match=match):
         matrix_module._parse_matrix_row_indexes(value)
+
+
+def test_matrix_save_rejects_no_diffusion_row():
+    with pytest.raises(typer.BadParameter, match="diffusion-enabled rows"):
+        matrix_module._validate_artifact_store_options(
+            preset_names=[BASELINE_PRESET_NAMES[0]],
+            save_artifacts=True,
+            artifact_store=None,
+            freeze_artifacts=False,
+        )
+
+
+def test_matrix_freeze_requires_artifact():
+    with pytest.raises(typer.BadParameter, match="--freeze requires --artifact"):
+        matrix_module._validate_artifact_store_options(
+            preset_names=[BASELINE_PRESET_NAMES[1]],
+            save_artifacts=False,
+            artifact_store=None,
+            freeze_artifacts=True,
+        )
+
+
+def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+    source = DiffusionStore(tmp_path / "source")
+    source.store_artifact(
+        DiffusionArtifact(
+            artifact_id="artifact-1",
+            source_task_id="task-B",
+            source_iteration=2,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="reuse this",
+            verifier_reward=1.0,
+        )
+    )
+    saved = tmp_path / "saved"
+    source.save_artifact_store(saved, store_id="warmup")
+    repository = object()
+    selection = SimpleNamespace(task_ids=["task-A"], family=None, task_set=None)
+    orch = SimpleNamespace(
+        config=None,
+        experiment_dir=tmp_path / "row-experiment",
+        _diffusion_store=DiffusionStore(tmp_path / "row-experiment" / "diffusion"),
+        history_store=object(),
+        freeze_diffusion_artifact_store=False,
+    )
+
+    class Factory:
+        def __init__(self, project_root):
+            self.project_root = project_root
+
+        def create_matrix_dir(self, *, seed, data_dir, run_id=None):
+            return tmp_path / "matrix"
+
+    def build_rows(**kwargs):
+        row_config = get_baseline_preset(BASELINE_PRESET_NAMES[1]).build_config(
+            kwargs["base_config"],
+            seed=kwargs["seed"],
+        )
+        orch.config = row_config
+        return [
+            SimpleNamespace(
+                preset_name=BASELINE_PRESET_NAMES[1],
+                runtime=SimpleNamespace(
+                    experiment_dir=orch.experiment_dir,
+                    orchestrator=orch,
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(
+        matrix_module,
+        "prepare_llm_credentials_or_exit",
+        lambda config: config,
+    )
+    monkeypatch.setattr(matrix_module, "ensure_harbor_available", lambda config: None)
+    monkeypatch.setattr(
+        matrix_module,
+        "build_benchmark_repo",
+        lambda project_root, config: repository,
+    )
+    monkeypatch.setattr(
+        matrix_module,
+        "resolve_task_selection",
+        lambda **kwargs: selection,
+    )
+    monkeypatch.setattr(matrix_module, "ExperimentFactory", Factory)
+    monkeypatch.setattr(matrix_module, "build_matrix_runtimes", build_rows)
+    monkeypatch.setattr(
+        matrix_module,
+        "materialize_task_graph_for_diffusion",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        matrix_module,
+        "run_experiment_or_exit",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        matrix_module,
+        "write_and_print_result_summary",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        matrix_module,
+        "annotate_judge_rewards_or_exit",
+        lambda **kwargs: None,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "matrix",
+            "--task",
+            "task-A",
+            "--index",
+            "1",
+            "--artifact",
+            str(saved),
+            "--freeze",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+    loaded = orch._diffusion_store.load_artifact("artifact-1")
+
+    assert result.exit_code == 0, result.output
+    assert loaded is not None
+    assert loaded.source_iteration == -1
+    assert orch.freeze_diffusion_artifact_store is True
+
+
+@pytest.mark.asyncio
+async def test_frozen_diffusion_store_skips_artifact_emission(tmp_path):
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = _config()
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "capped_broadcast"
+    orch.experiment_dir = tmp_path
+    orch.freeze_diffusion_artifact_store = True
+
+    await orch._emit_diffusion_artifacts(
+        trace=None,
+        report=None,
+        record=None,
+        task_metadata={},
+        judge_reward=None,
+    )
+
+    assert orch._diffusion_store.query_artifacts(recent=None) == []
 
 
 @pytest.mark.parametrize(

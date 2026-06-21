@@ -203,23 +203,21 @@ environment variables. Local Harbor subprocesses deliberately drop
 
 ## Quick Start
 
-Inspect the CLI:
+Use `--help` for flag details. README only provides some quick commands.
 
 ```bash
+export OPENROUTER_API_KEY=...
+uv sync --dev
 uv run medcoevo --help
 ```
 
-Build the required SkillFlow base image. This wraps the upstream
-`docker/harbor-cli-base/build.sh` quick-start step:
+Build the local Harbor base image once:
 
 ```bash
 uv run medcoevo build-base-image
 ```
 
-SkillFlow's task-image prebuild script is optional upstream and is not part of
-the default MedCoevo setup path.
-
-Run a short local SkillFlow smoke experiment:
+Run the local smoke task:
 
 ```bash
 uv run medcoevo run \
@@ -230,7 +228,7 @@ uv run medcoevo run \
   --run-id smoke
 ```
 
-Run the current Hermes-backed Weighted-Risk-Assessment diffusion experiment:
+Run one family with graph diffusion:
 
 ```bash
 uv run medcoevo run \
@@ -246,10 +244,27 @@ uv run medcoevo run \
   --run-id all-wra-top-k-similarity
 ```
 
+Or set those parameters in `config/default.toml`
+
 Experiment outputs are written under:
 
 ```text
 data/experiments/<timestamp>-<run-id>/
+```
+
+Saved warmup stores are written under:
+
+```text
+data/artifact-stores/<experiment-folder>/
+```
+
+Use the CLI for the full flag list:
+
+```bash
+uv run medcoevo run --help
+uv run medcoevo matrix --help
+uv run medcoevo extract --help
+uv run medcoevo inspect --help
 ```
 
 ## Local Smoke Task
@@ -265,174 +280,11 @@ remote dataset.
 
 ## CLI Overview
 
-Top-level commands:
+Pick tasks with one of:
 
-```bash
-uv run medcoevo run
-uv run medcoevo matrix
-uv run medcoevo inspect <run-path>
-uv run medcoevo compare-context-budgets <run-a-path> <run-b-path>
-uv run medcoevo create-graph
-uv run medcoevo build-base-image
-uv run medcoevo list
-uv run medcoevo sync
-```
-
-Shell completion helpers:
-
-```bash
-uv run medcoevo --install-completion
-uv run medcoevo --show-completion
-```
-
-## `run`
-
-`run` executes one SkillFlow co-evolution experiment. It requires at least one
-task selector.
-
-Task selectors:
-
-- `--task <id>`: repeatable; comma-separated IDs are also accepted.
-- `--family <name>`: run all local tasks with matching SkillFlow family
-  metadata.
-- `--task-set <name>`: read `benchmarks/skillflow/task_sets/<name>.txt`.
-
-Examples:
-
-```bash
-uv run medcoevo run --task Weighted-Risk-Assessment/hospital-capacity-at-risk-calc
-
-uv run medcoevo run \
-  --task Weighted-Risk-Assessment/hospital-capacity-at-risk-calc \
-  --task Weighted-Risk-Assessment/api-sla-at-risk-calc
-
-uv run medcoevo run \
-  --family Weighted-Risk-Assessment \
-  --iterations 3 \
-  --seed 42
-```
-
-Core run options:
-
-| Option                                          | Default      | Meaning                                                             |
-| ----------------------------------------------- | ------------ | ------------------------------------------------------------------- |
-| `--iterations`                                  | config value | Number of experiment iterations.                                    |
-| `--seed`                                        | config value | Random seed.                                                        |
-| `--condition`                                   | config value | Feedback routing condition.                                         |
-| `--skill-updates`                               | config value | Which skill families may be committed.                              |
-| `--advisor-buffer-max`                          | config value | Executor proposal batch size override.                              |
-| `--coevo-interval`                              | config value | Planner/Mediator reflection interval override.                      |
-| `--diffusion-enabled`, `--no-diffusion-enabled` | config value | Override diffusion emission and routing.                            |
-| `--diffusion-policy`                            | config value | Override artifact selection policy.                                 |
-| `--diffusion-graph`                             | config value | Override graph policy/name.                                         |
-| `--diffusion-max-artifacts`                     | config value | Maximum artifacts rendered for a target context.                    |
-| `--diffusion-top-k-neighbors`                   | config value | Neighbor cap for `top_k_similarity`.                                |
-| `--harbor-agent-setup-timeout-multiplier`       | config value | Forward a Harbor setup timeout multiplier for slow agent setup.     |
-| `--run-id`                                      | auto suffix  | Optional run id suffix for the timestamp-prefixed output directory. |
-| `--config-dir`                                  | `config/`    | Directory containing `default.toml`.                                |
-| `--cloud`                                       | false        | Run Harbor jobs on the configured GCP VM.                           |
-| `--cloud-env-file`                              | `.env`       | Dotenv file containing GCP VM Harbor settings.                      |
-| `--verbose`, `-v`                               | false        | Enable debug logging.                                               |
-
-`run` writes to `data/experiments/<timestamp>-<run-id>/`. If `--run-id` is not
-set, the suffix defaults to `<seed>-skillflow`.
-
-Executor agent selection is configured in `[executor_runtime]`, not as a CLI
-flag:
-
-```toml
-[executor_runtime]
-agent_name = "hermes"
-agent_env = {}
-```
-
-To try Harbor's Claude Code agent through an Anthropic-compatible OpenRouter
-endpoint, use a separate config directory or config copy with:
-
-```toml
-[executor_runtime]
-agent_name = "claude-code"
-
-[executor_runtime.agent_env]
-ANTHROPIC_API_KEY = ""
-ANTHROPIC_AUTH_TOKEN = "${OPENROUTER_API_KEY}"
-ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
-```
-
-The executor model still comes from `[models].executor`; for Harbor it is
-normalized from `openrouter/provider/model` to `provider/model`. When
-`agent_name = "claude-code"` and `ANTHROPIC_BASE_URL` is set, the runner also
-passes Claude Code's `ANTHROPIC_MODEL` aliases from the normalized executor
-model so OpenRouter receives the full `provider/model` id. Claude Code should
-use `ANTHROPIC_AUTH_TOKEN` for OpenRouter and leave `ANTHROPIC_API_KEY`
-explicitly empty to avoid Anthropic auth conflicts.
-
-Diffusion values:
-
-- `--diffusion-policy` accepts `none`, `capped_broadcast`, `random_k`, or
-  `top_k_similarity`.
-- `--diffusion-graph none` is valid for non-graph policies.
-- `--diffusion-graph task_similarity` and `precomputed_similarity` are valid
-  graph sources for `top_k_similarity`.
-- `--diffusion-max-artifacts` and `--diffusion-top-k-neighbors` must be at
-  least `1`.
-
-Feedback conditions:
-
-- `no_feedback`: no prior feedback; cannot enable skill updates.
-- `full_traces`: Planner receives compact trace summaries from prior runs.
-- `shared_notes`: Planner receives shared notes configured in the config file.
-- `static_mediator`: Mediator reports are used, but Mediator skill updates are
-  invalid.
-- `learned_mediator`: Mediator reports are used, and Mediator/Planner
-  co-evolution can be enabled.
-
-Skill update values:
-
-- `none`
-- `executor`
-- `planner`
-- `mediator`
-- `all`
-- comma-separated role combinations such as `executor,planner`
-
-`none` and `all` cannot be combined with other values.
-
-Common recipes:
-
-No-feedback baseline:
-
-```bash
-uv run medcoevo run \
-  --family Weighted-Risk-Assessment \
-  --iterations 3 \
-  --condition no_feedback \
-  --skill-updates none \
-  --coevo-interval 99 \
-  --advisor-buffer-max 99 \
-  --no-diffusion-enabled \
-  --diffusion-policy none \
-  --diffusion-graph none \
-  --run-id wra-no-feedback
-```
-
-Graph-aware diffusion run:
-
-```bash
-uv run medcoevo run \
-  --family Weighted-Risk-Assessment \
-  --iterations 3 \
-  --condition no_feedback \
-  --skill-updates none \
-  --coevo-interval 99 \
-  --advisor-buffer-max 99 \
-  --diffusion-enabled \
-  --diffusion-policy top_k_similarity \
-  --diffusion-graph task_similarity \
-  --diffusion-max-artifacts 3 \
-  --diffusion-top-k-neighbors 3 \
-  --run-id all-wra-top-k-similarity-hermes
-```
+- `--task <id>`: one task; repeat the flag or use commas.
+- `--family <name>`: all cached tasks in a family.
+- `--task-set <name>`: file under `benchmarks/skillflow/task_sets/`.
 
 Remote Harbor run on the configured GCP VM:
 
@@ -448,42 +300,10 @@ uv run medcoevo run \
 
 ## `matrix`
 
-`matrix` runs the eight-row learned-mediator diffusion matrix against the same
-SkillFlow task selection, seed, model config, and budget config. Use it when you
-want the fixed `skill_updates x diffusion_policy` design rather than one manual
-`run` condition.
+`matrix` runs fixed `skill_updates x diffusion_policy` rows. Use `--list` to
+see row indexes.
 
-Task selectors are the same as `run`: `--task`, `--family`, and `--task-set`.
-
-Matrix options:
-
-| Option                        | Default      | Meaning                                                     |
-| ----------------------------- | ------------ | ----------------------------------------------------------- |
-| `--iterations`                | config value | Number of iterations per row.                               |
-| `--seed`                      | config value | Random seed reused for every selected row.                  |
-| `--coevo-interval`            | config value | Shared co-evolution interval for every row.                 |
-| `--advisor-buffer-max`        | config value | Shared executor proposal batch size for every row.          |
-| `--diffusion-max-artifacts`   | config value | Shared artifact render cap for every row.                   |
-| `--diffusion-top-k-neighbors` | config value | Shared neighbor cap for graph-aware rows.                   |
-| `--list`, `-l`                | false        | Print row indexes and row-local settings, then exit.        |
-| `--index`, `-i`               | all rows     | Run selected zero-based row indexes, for example `1,3`.     |
-| `--run-id`                    | auto suffix  | Parent matrix directory suffix.                             |
-| `--config-dir`                | `config/`    | Directory containing `default.toml`.                        |
-| `--verbose`, `-v`             | false        | Enable debug logging.                                       |
-
-Matrix does not accept `--condition`, `--skill-updates`,
-`--diffusion-enabled`, `--diffusion-policy`, or `--diffusion-graph` as mutable
-run controls. Those values are owned by each fixed row preset. Passing those
-flags intentionally fails so a matrix cannot silently become a custom design.
-
-Use `-l` or `--list` to display all row setup:
-
-```bash
-uv run medcoevo matrix --list
-```
-
-Run only one indexed row while keeping the usual task selectors and shared
-controls:
+Run one row:
 
 ```bash
 uv run medcoevo matrix \
@@ -494,33 +314,7 @@ uv run medcoevo matrix \
   --run-id csm-matrix-skill-none-diffusion-none
 ```
 
-Run multiple selected rows:
-
-```bash
-uv run medcoevo matrix \
-  --family Weighted-Risk-Assessment \
-  --iterations 3 \
-  --seed 42 \
-  --index 0,3,7 \
-  --run-id wra-selected-matrix
-```
-
-Omit `--index` to run all eight rows:
-
-```bash
-uv run medcoevo matrix \
-  --family Weighted-Risk-Assessment \
-  --iterations 3 \
-  --seed 42 \
-  --run-id wra-full-matrix
-```
-
-With `--run-id`, the parent matrix directory is timestamp-prefixed, for example
-`data/experiments/<timestamp>-csm-matrix-skill-none-diffusion-none/`. The
-selected row still writes under its preset child directory, such as
-`skill_none_diffusion_none/`.
-
-For a cheap smoke check, use a single local task and one iteration:
+Cheap matrix smoke:
 
 ```bash
 uv run medcoevo matrix \
@@ -529,22 +323,49 @@ uv run medcoevo matrix \
   --seed 1
 ```
 
-Matrix rows:
+## Warmup Artifact Stores
 
-| Index | Preset                        | Condition          | Skill updates               | Diffusion policy   | Diffusion graph   |
-| ----- | ----------------------------- | ------------------ | --------------------------- | ------------------ | ----------------- |
-| `0`   | `skill_none_diffusion_none`   | `learned_mediator` | `none`                      | `none`             | `none`            |
-| `1`   | `skill_none_capped_broadcast` | `learned_mediator` | `none`                      | `capped_broadcast` | `none`            |
-| `2`   | `skill_none_random_k`         | `learned_mediator` | `none`                      | `random_k`         | `none`            |
-| `3`   | `skill_none_top_k_similarity` | `learned_mediator` | `none`                      | `top_k_similarity` | `task_similarity` |
-| `4`   | `skill_all_diffusion_none`    | `learned_mediator` | `executor,planner,mediator` | `none`             | `none`            |
-| `5`   | `skill_all_capped_broadcast`  | `learned_mediator` | `executor,planner,mediator` | `capped_broadcast` | `none`            |
-| `6`   | `skill_all_random_k`          | `learned_mediator` | `executor,planner,mediator` | `random_k`         | `none`            |
-| `7`   | `skill_all_top_k_similarity`  | `learned_mediator` | `executor,planner,mediator` | `top_k_similarity` | `task_similarity` |
+Save a first-batch diffusion store:
 
-Each row gets an isolated copy of the skill tree under its experiment
-directory and writes its own `config.toml`, metrics, summaries, diffusion
-artifacts, and graph snapshots.
+```bash
+uv run medcoevo matrix \
+  --family Weighted-Risk-Assessment \
+  --iterations 1 \
+  --index 1 \
+  --save \
+  --run-id wra-warmup
+```
+
+This writes `data/artifact-stores/<experiment-folder>/`.
+
+Start from that saved store:
+
+```bash
+uv run medcoevo matrix \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --index 1 \
+  --artifact data/artifact-stores/<experiment-folder> \
+  --run-id wra-preloaded
+```
+
+Freeze the store so only the preloaded artifacts can diffuse:
+
+```bash
+uv run medcoevo matrix \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --index 1 \
+  --artifact data/artifact-stores/<experiment-folder> \
+  --freeze \
+  --run-id wra-frozen
+```
+
+Rebuild a store from an old experiment that already has `diffusion/artifacts/`:
+
+```bash
+uv run medcoevo extract -p data/experiments/<old-run>
+```
 
 ## `inspect`
 
@@ -575,12 +396,7 @@ newest experiment from the configured `paths.data_dir`.
 
 ## `compare-context-budgets`
 
-`compare-context-budgets` is a read-only evaluation command for two completed
-experiment directories. It does not call Harbor or any LLM. It reads
-`config.toml`, `metrics.jsonl`, and diffusion audit artifacts, then reports
-whether the runs are comparable, which budget fields differ, how realized
-prior-context tokens changed, and whether rendered diffusion records pass
-basic provenance checks.
+`compare-context-budgets` is read-only. It does not call Harbor or an LLM.
 
 ```bash
 uv run medcoevo compare-context-budgets \
@@ -603,9 +419,7 @@ planner prior-context tokens as observed metrics, not config knobs. Changes to
 are experiment setup differences; changes in the token fields are outcomes of
 that setup.
 
-Audit skill-update provenance, adjacent reward effects, Mediator report
-effects, committed-update ledger entries, rejected reflection evidence, diff
-artifact paths, and adjacent reward regressions from an experiment metrics file:
+Audit skill-update provenance from an experiment metrics file:
 
 ```bash
 uv run python -m mediated_coevo.analysis.evolution_audit data/experiments/<run-dir>
@@ -625,17 +439,6 @@ uv run medcoevo create-graph \
 The graph artifacts include task profiles, directed edge components, score
 weights, active thresholds, kept/cut edges, and connected components.
 
-`create-graph` options:
-
-| Option         | Default                            | Meaning                                            |
-| -------------- | ---------------------------------- | -------------------------------------------------- |
-| `--threshold`  | `0.05`                             | Minimum similarity score required to keep an edge. |
-| `--tasks-root` | `benchmarks/skillflow/tasks`       | Local SkillFlow task directory to analyze.         |
-| `--output-dir` | `data/task_graphs/skillflow-local` | Directory where JSON graph artifacts are written.  |
-
-The command writes `task_profiles.json`, `pairwise_similarity.json`, and
-`graph_summary.json`.
-
 ## `build-base-image`
 
 Build the required SkillFlow Harbor CLI base image:
@@ -644,13 +447,11 @@ Build the required SkillFlow Harbor CLI base image:
 uv run medcoevo build-base-image
 ```
 
-Options:
+Preview the build command:
 
-| Option             | Default                                 | Meaning                                     |
-| ------------------ | --------------------------------------- | ------------------------------------------- |
-| `--base-image-tag` | `skillflow/harbor-cli-base:ubuntu24.04` | Docker tag for the base image.              |
-| `--dry-run`        | false                                   | Print the build command without running it. |
-| `--verbose`, `-v`  | false                                   | Enable debug logging.                       |
+```bash
+uv run medcoevo build-base-image --dry-run
+```
 
 ## `sync`
 
@@ -687,15 +488,8 @@ IDs are available directly under `tasks/<Family>/<Task>/`:
 uv run medcoevo run --task Distribution-Center-Auditing/harbor_returns_disposition_audit
 ```
 
-`list` options:
-
-| Option            | Default                     | Meaning                                                       |
-| ----------------- | --------------------------- | ------------------------------------------------------------- |
-| `--family`        | none                        | Filter task IDs by SkillFlow family.                          |
-| `--local`         | false                       | List cached local tasks instead of remote Hugging Face tasks. |
-| `--dataset`       | `zhang-ziao/SkillFlow-Task` | Hugging Face dataset ID for remote listing.                   |
-| `--config-dir`    | `config/`                   | Directory containing `default.toml`.                          |
-| `--verbose`, `-v` | false                       | Enable debug logging.                                         |
+| `--config-dir` | `config/` | Directory containing `default.toml`. |
+| `--verbose`, `-v` | false | Enable debug logging. |
 
 `sync` options:
 
