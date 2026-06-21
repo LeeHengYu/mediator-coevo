@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -82,3 +82,29 @@ def load_jsonl_models(
         except Exception as exc:
             logger.warning("Failed to load %s %s: %s", model_cls.__name__, path, exc)
     return models
+
+
+def load_jsonl_dicts(
+    path: Path,
+    *,
+    missing_ok: bool = False,
+    skip_non_dict: bool = False,
+) -> list[dict[str, Any]]:
+    """Load JSONL object rows."""
+    if not path.exists():
+        if missing_ok:
+            return []
+        raise FileNotFoundError(path)
+
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        data = json.loads(line)
+        if isinstance(data, dict):
+            rows.append(data)
+        elif not skip_non_dict:
+            raise ValueError(f"{path}:{line_number} expected a JSON object row")
+    return rows

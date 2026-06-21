@@ -28,6 +28,7 @@ from mediated_coevo.models.judge import (
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.prompt_text import PromptText
 from mediated_coevo.stores.history_store import HistoryStore
+from mediated_coevo.stores.json_store import load_jsonl_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -250,9 +251,7 @@ async def judge_reward_for_trace(
 def judge_reward_metadata(record: JudgeRewardRecord) -> dict[str, Any]:
     """Return compact provenance for a judge-derived evolution reward."""
     reward_source = (
-        "verifier_fallback"
-        if record.metadata.get("judge_reward_fallback")
-        else "judge"
+        "verifier_fallback" if record.metadata.get("judge_reward_fallback") else "judge"
     )
     return {
         "reward_source": reward_source,
@@ -293,13 +292,22 @@ def compute_judge_reward(response: JudgeLLMResponse) -> tuple[float, float, str 
 
     reward = base_reward
     applied_cap = None
-    if response.flags.no_meaningful_progress and reward > CAP_VALUES["no_meaningful_progress"]:
+    if (
+        response.flags.no_meaningful_progress
+        and reward > CAP_VALUES["no_meaningful_progress"]
+    ):
         reward = CAP_VALUES["no_meaningful_progress"]
         applied_cap = "no_meaningful_progress"
-    if response.flags.brittle_or_one_off_patch and reward > CAP_VALUES["brittle_or_one_off_patch"]:
+    if (
+        response.flags.brittle_or_one_off_patch
+        and reward > CAP_VALUES["brittle_or_one_off_patch"]
+    ):
         reward = CAP_VALUES["brittle_or_one_off_patch"]
         applied_cap = "brittle_or_one_off_patch"
-    if response.flags.unverifiable_outcome and reward > CAP_VALUES["unverifiable_outcome"]:
+    if (
+        response.flags.unverifiable_outcome
+        and reward > CAP_VALUES["unverifiable_outcome"]
+    ):
         reward = CAP_VALUES["unverifiable_outcome"]
         applied_cap = "unverifiable_outcome"
     return reward, base_reward, applied_cap
@@ -567,10 +575,7 @@ def _candidates_from_traces(*, traces_path: Path) -> list[_JudgeCandidate]:
 def _load_existing_records(path: Path) -> list[JudgeRewardRecord]:
     if not path.exists():
         return []
-    return [
-        JudgeRewardRecord.model_validate(row)
-        for row in _read_jsonl(path)
-    ]
+    return [JudgeRewardRecord.model_validate(row) for row in _read_jsonl(path)]
 
 
 def _append_records(path: Path, records: list[JudgeRewardRecord]) -> None:
@@ -634,14 +639,7 @@ def _annotate_history_entries(
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows = []
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        loaded = json.loads(line)
-        if isinstance(loaded, dict):
-            rows.append(loaded)
-    return rows
+    return load_jsonl_dicts(path, skip_non_dict=True)
 
 
 def _resolve_trace_path(data_dir: Path, row: dict[str, Any]) -> Path | None:

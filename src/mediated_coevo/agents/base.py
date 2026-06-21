@@ -8,7 +8,6 @@ point — there is no uniform `process` contract across roles.
 from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class BaseAgent(ABC):
+class BaseAgent:
     """Base class for all agents in the mediated co-evolution system."""
 
     def __init__(self, name: str, llm_client: LLMClient) -> None:
@@ -36,12 +35,6 @@ class BaseAgent(ABC):
     @property
     def step(self) -> int:
         return self._step
-
-    @property
-    @abstractmethod
-    def role(self) -> str:
-        """One of 'planner', 'executor', 'mediator'."""
-        ...
 
     async def get_llm_response(
         self,

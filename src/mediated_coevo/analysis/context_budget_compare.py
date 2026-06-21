@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -12,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from mediated_coevo.core.utils import string_list_values
 from mediated_coevo.diffusion.models import DiffusedRecord
+from mediated_coevo.stores.json_store import load_jsonl_dicts
 
 CONTEXT_TOKEN_FIELDS: tuple[str, ...] = (
     "same_task_prior_tokens",
@@ -123,10 +123,14 @@ def compare_context_budget_runs(
     """Compare two completed experiment directories without mutating them."""
     run_a_dir = run_a_dir.resolve()
     run_b_dir = run_b_dir.resolve()
-    rows_a = _load_jsonl_dicts(run_a_dir / "metrics.jsonl")
-    rows_b = _load_jsonl_dicts(run_b_dir / "metrics.jsonl")
-    records_a = _load_diffused_records(run_a_dir / "diffusion" / "diffused_records.jsonl")
-    records_b = _load_diffused_records(run_b_dir / "diffusion" / "diffused_records.jsonl")
+    rows_a = load_jsonl_dicts(run_a_dir / "metrics.jsonl", missing_ok=True)
+    rows_b = load_jsonl_dicts(run_b_dir / "metrics.jsonl", missing_ok=True)
+    records_a = _load_diffused_records(
+        run_a_dir / "diffusion" / "diffused_records.jsonl"
+    )
+    records_b = _load_diffused_records(
+        run_b_dir / "diffusion" / "diffused_records.jsonl"
+    )
     config_a = _load_toml(run_a_dir / "config.toml")
     config_b = _load_toml(run_b_dir / "config.toml")
 
@@ -154,9 +158,7 @@ def compare_context_budget_runs(
             token_delta_percent[field] = None
             continue
         if value_a == 0:
-            token_delta_percent[field] = (
-                0.0 if abs(value_b) <= tolerance else None
-            )
+            token_delta_percent[field] = 0.0 if abs(value_b) <= tolerance else None
             continue
         token_delta_percent[field] = (value_b - value_a) / value_a
     if setup_mismatches or artifact_failures:
@@ -207,20 +209,6 @@ def _load_toml(path: Path) -> dict[str, Any]:
         raise ValueError(f"missing experiment config: {path}")
     with open(path, "rb") as file:
         return tomllib.load(file)
-
-
-def _load_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text().splitlines(), start=1):
-        if not line.strip():
-            continue
-        data = json.loads(line)
-        if not isinstance(data, dict):
-            raise ValueError(f"metrics row must be an object: {path}:{line_number}")
-        rows.append(data)
-    return rows
 
 
 def _load_diffused_records(path: Path) -> list[DiffusedRecord]:
@@ -279,11 +267,17 @@ def _artifact_validity_failures(
             description = "diffusion record leaks same-task context"
         elif record.source_iteration >= record.target_iteration:
             description = "source iteration is not strictly before target iteration"
-        elif record.rendered and not (artifacts_dir / f"{record.artifact_id}.json").exists():
+        elif (
+            record.rendered
+            and not (artifacts_dir / f"{record.artifact_id}.json").exists()
+        ):
             description = "rendered artifact file is missing"
         elif record.rendered and not record.citation_text.strip():
             description = "rendered record lacks citation text"
-        elif record.rendered and f"artifact_id={record.artifact_id}" not in record.citation_text:
+        elif (
+            record.rendered
+            and f"artifact_id={record.artifact_id}" not in record.citation_text
+        ):
             description = "citation text does not include the rendered artifact ID"
         elif record.selected and not record.rendered and not record.reason.strip():
             description = "selected unrendered record lacks a drop reason"

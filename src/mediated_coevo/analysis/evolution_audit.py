@@ -11,6 +11,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from mediated_coevo.stores.json_store import load_jsonl_dicts
+
 COEVOLUTION_TASK_ID = "__coevolution__"
 ENV_FAILURE_STATUSES = {"env_failure", "parse_error", "harbor_failed"}
 
@@ -179,57 +181,33 @@ class EvolutionAudit(BaseModel):
 
 def read_metrics_rows(metrics_path: Path) -> list[dict[str, Any]]:
     """Read compact metrics JSONL rows from an experiment."""
-    return _read_jsonl_objects(metrics_path)
+    return load_jsonl_dicts(metrics_path)
 
 
 def read_skill_update_ledger_rows(experiment_dir: Path) -> list[dict[str, Any]]:
     """Read committed skill-update ledger rows when the artifact exists."""
     ledger_path = (
-        experiment_dir
-        / "artifacts"
-        / "skill_updates"
-        / "skill_update_history.jsonl"
+        experiment_dir / "artifacts" / "skill_updates" / "skill_update_history.jsonl"
     )
-    if not ledger_path.exists():
-        return []
-    return _read_jsonl_objects(ledger_path)
+    return load_jsonl_dicts(ledger_path, missing_ok=True)
 
 
 def read_rejected_reflection_rows(experiment_dir: Path) -> list[dict[str, Any]]:
     """Read rejected planner/mediator reflection rows when present."""
     rejected_path = experiment_dir / "history" / "rejected_reflections.jsonl"
-    if not rejected_path.exists():
-        return []
-    return _read_jsonl_objects(rejected_path)
+    return load_jsonl_dicts(rejected_path, missing_ok=True)
 
 
 def read_history_rows(experiment_dir: Path) -> list[dict[str, Any]]:
     """Read outcome-tagged history rows when present."""
     history_path = experiment_dir / "history" / "history.jsonl"
-    if not history_path.exists():
-        return []
-    return _read_jsonl_objects(history_path)
+    return load_jsonl_dicts(history_path, missing_ok=True)
 
 
 def read_judge_reward_rows(experiment_dir: Path) -> list[dict[str, Any]]:
     """Read judge reward rows when present."""
     judge_path = experiment_dir / "artifacts" / "judge_rewards.jsonl"
-    if not judge_path.exists():
-        return []
-    return _read_jsonl_objects(judge_path)
-
-
-def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as metrics_file:
-        for line_number, line in enumerate(metrics_file, start=1):
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise ValueError(f"{path}:{line_number} expected a JSON object row")
-            rows.append(row)
-    return rows
+    return load_jsonl_dicts(judge_path, missing_ok=True)
 
 
 def audit_metrics_file(
@@ -252,19 +230,6 @@ def audit_metrics_file(
         judge_reward_rows=read_judge_reward_rows(resolved_experiment_dir),
         metrics_path=metrics_path,
         experiment_dir=resolved_experiment_dir,
-        regression_tolerance=regression_tolerance,
-    )
-
-
-def audit_experiment(
-    experiment_dir: Path,
-    *,
-    regression_tolerance: float = 1e-9,
-) -> EvolutionAudit:
-    """Build an evolution audit from an experiment directory."""
-    return audit_metrics_file(
-        experiment_dir / "metrics.jsonl",
-        experiment_dir=experiment_dir,
         regression_tolerance=regression_tolerance,
     )
 
@@ -352,9 +317,9 @@ def _iteration_reward_audits(
             continue
 
         rewards_by_iteration.setdefault(iteration, []).append(reward)
-        task_rewards_by_iteration.setdefault(iteration, {}).setdefault(task_id, []).append(
-            reward
-        )
+        task_rewards_by_iteration.setdefault(iteration, {}).setdefault(
+            task_id, []
+        ).append(reward)
 
     summaries = []
     for iteration in sorted(total_runs_by_iteration):
@@ -422,12 +387,8 @@ def _skill_update_ledger_audits(
                 skill_version=_as_str_or_none(row.get("skill_version")),
                 record_task_id=record_task_id,
                 update_task_id=_as_str(row.get("update_task_id")),
-                selected_candidate_id=_as_str_or_none(
-                    row.get("selected_candidate_id")
-                ),
-                selected_update_kind=_as_str_or_none(
-                    row.get("selected_update_kind")
-                ),
+                selected_candidate_id=_as_str_or_none(row.get("selected_candidate_id")),
+                selected_update_kind=_as_str_or_none(row.get("selected_update_kind")),
                 validation_decision=_as_str_or_none(row.get("validation_decision")),
                 validation_reason=_as_str_or_none(row.get("validation_reason")),
                 validation_mean_delta=_as_float(row.get("validation_mean_delta")),
@@ -608,23 +569,15 @@ def _rejected_reflection_audits(
                 agent_role=agent_role,
                 task_ids=task_ids,
                 reason=_as_str(row.get("reason")),
-                selected_candidate_id=_as_str_or_none(
-                    row.get("selected_candidate_id")
-                ),
-                selected_update_kind=_as_str_or_none(
-                    row.get("selected_update_kind")
-                ),
+                selected_candidate_id=_as_str_or_none(row.get("selected_candidate_id")),
+                selected_update_kind=_as_str_or_none(row.get("selected_update_kind")),
                 candidate_batch_id=_as_str_or_none(row.get("candidate_batch_id")),
                 candidate_batch_path=_as_str_or_none(row.get("candidate_batch_path")),
                 validation_decision=(
-                    _as_str_or_none(validation.get("decision"))
-                    if validation
-                    else None
+                    _as_str_or_none(validation.get("decision")) if validation else None
                 ),
                 validation_reason=(
-                    _as_str_or_none(validation.get("reason"))
-                    if validation
-                    else None
+                    _as_str_or_none(validation.get("reason")) if validation else None
                 ),
                 validation_mean_delta=(
                     _as_float(validation.get("mean_delta")) if validation else None
@@ -681,11 +634,15 @@ def _mediator_report_effect_audits(
         if previous_iteration is not None:
             if reward_source == "judge":
                 previous_reward = judge_rewards.get((task_id, previous_iteration))
-                previous_reward_source = "judge" if previous_reward is not None else None
+                previous_reward_source = (
+                    "judge" if previous_reward is not None else None
+                )
             if previous_reward is None:
                 previous_summary = by_iteration[previous_iteration]
                 previous_reward = previous_summary.task_mean_rewards.get(task_id)
-                previous_reward_source = "metrics" if previous_reward is not None else None
+                previous_reward_source = (
+                    "metrics" if previous_reward is not None else None
+                )
 
         payload = _mapping_or_none(row.get("payload"))
         headline = _as_str(payload.get("headline")) if payload is not None else ""
@@ -779,7 +736,9 @@ def _skill_update_audit(
         validation_decision=(
             _as_str_or_none(validation.get("decision")) if validation else None
         ),
-        validation_reason=_as_str_or_none(validation.get("reason")) if validation else None,
+        validation_reason=_as_str_or_none(validation.get("reason"))
+        if validation
+        else None,
         current_mean_reward=(
             _as_float(validation.get("current_mean_reward")) if validation else None
         ),
@@ -873,7 +832,9 @@ def _evolution_warnings(
         if current is None or current.mean_reward is None:
             continue
 
-        previous_iteration = _neighbor_iteration(sorted_iterations, update.iteration, -1)
+        previous_iteration = _neighbor_iteration(
+            sorted_iterations, update.iteration, -1
+        )
         if previous_iteration is not None:
             previous = by_iteration[previous_iteration]
             warning = _regression_warning(

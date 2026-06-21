@@ -34,10 +34,6 @@ UPDATE_BATCH_RESPONSE_SCHEMA = PromptText.UPDATE_BATCH_RESPONSE_SCHEMA
 class PlannerAgent(BaseAgent):
     """Claude-backed planner. Plans tasks and decides skill updates."""
 
-    @property
-    def role(self) -> str:
-        return "planner"
-
     def __init__(
         self,
         llm_client: LLMClient,

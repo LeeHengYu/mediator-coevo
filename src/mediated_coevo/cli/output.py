@@ -3,24 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from rich.console import Console
 from rich.table import Table
 
 from mediated_coevo.analysis.reporting import ExperimentScoreSummary
 from mediated_coevo.core.config import Config
-
-
-class TaskSelectionDisplay(Protocol):
-    @property
-    def task_ids(self) -> list[str]: ...
-
-    @property
-    def family(self) -> str | None: ...
-
-    @property
-    def task_set(self) -> str | None: ...
 
 
 console = Console()
@@ -231,8 +220,7 @@ def print_inspection_payload(payload: dict[str, Any]) -> None:
         )
     else:
         source_tasks = (
-            f"{context_summary['source_task_count']} "
-            f"({', '.join(source_task_ids)})"
+            f"{context_summary['source_task_count']} ({', '.join(source_task_ids)})"
         )
     console.print("    Context:")
     console.print(
@@ -285,23 +273,19 @@ def print_context_budget_comparison(comparison: Any) -> None:
         console.print("  [red]Setup mismatches:[/]")
         for mismatch in comparison.setup_mismatches:
             console.print(
-                f"    {mismatch.path}: "
-                f"{mismatch.run_a!r} != {mismatch.run_b!r}"
+                f"    {mismatch.path}: {mismatch.run_a!r} != {mismatch.run_b!r}"
             )
     if comparison.budget_differences:
         console.print("  Budget differences:")
         for difference in comparison.budget_differences:
             console.print(
-                f"    {difference.path}: "
-                f"{difference.run_a!r} != {difference.run_b!r}"
+                f"    {difference.path}: {difference.run_a!r} != {difference.run_b!r}"
             )
     if comparison.artifact_validity_failures:
         console.print("  [red]Artifact validity failures:[/]")
         for failure in comparison.artifact_validity_failures[:10]:
             console.print(
-                "    "
-                f"{failure.run_label} {failure.artifact_id}: "
-                f"{failure.description}"
+                f"    {failure.run_label} {failure.artifact_id}: {failure.description}"
             )
         remaining = len(comparison.artifact_validity_failures) - 10
         if remaining > 0:
@@ -309,7 +293,7 @@ def print_context_budget_comparison(comparison: Any) -> None:
     console.print(f"  Interpretation: {comparison.recommended_interpretation}")
 
 
-def print_task_selection(selection: TaskSelectionDisplay) -> None:
+def print_task_selection(selection: Any) -> None:
     console.print(f"[bold]SkillFlow tasks:[/] {selection.task_ids}")
     if selection.family is not None:
         console.print(f"[bold]Family:[/] {selection.family}")

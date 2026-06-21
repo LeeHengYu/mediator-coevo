@@ -188,7 +188,24 @@ def test_saved_artifact_store_round_trips_as_preloaded_iteration(tmp_path):
     assert loaded is not None
     assert loaded.source_iteration == -1
     assert loaded.metadata["original_source_iteration"] == 2
+    assert loaded.metadata["preloaded_artifact_store_frozen"] is False
     assert [artifact.artifact_id for artifact in visible] == ["artifact-1"]
+
+
+def test_import_artifact_store_records_frozen_preload_metadata(tmp_path):
+    source = DiffusionStore(tmp_path / "source")
+    source.store_artifact(_artifact("artifact-1", source_iteration=2))
+    saved = tmp_path / "saved-store"
+    source.save_artifact_store(saved, store_id="experiment-1")
+    target = DiffusionStore(tmp_path / "target")
+
+    target.import_artifact_store(saved, frozen=True)
+    loaded = target.load_artifact("artifact-1")
+
+    assert loaded is not None
+    assert loaded.metadata["preloaded_from_artifact_store"] == str(saved)
+    assert loaded.metadata["original_source_iteration"] == 2
+    assert loaded.metadata["preloaded_artifact_store_frozen"] is True
 
 
 def test_save_artifact_store_rejects_empty_store(tmp_path):

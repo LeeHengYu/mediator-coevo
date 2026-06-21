@@ -50,10 +50,6 @@ class MediatorAgent(BaseAgent):
     - Has a self-evolving system prompt (coordination-protocol.md)
     """
 
-    @property
-    def role(self) -> str:
-        return "mediator"
-
     def __init__(
         self,
         llm_client: LLMClient,

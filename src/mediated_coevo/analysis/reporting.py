@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
+import random
+import statistics
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 from pydantic import BaseModel, Field
 
-from mediated_coevo.core.utils import as_optional_float
 from mediated_coevo.models.iteration import IterationRecord
 
 ENV_FAILURE_STATUSES = {"env_failure", "parse_error", "harbor_failed"}
@@ -16,19 +18,6 @@ DEFAULT_BOOTSTRAP_SAMPLES = 10**4
 DEFAULT_BOOTSTRAP_SEED = 0
 DEFAULT_CONFIDENCE_LEVEL = 0.95
 DEFAULT_DOMINANCE_THRESHOLD = 0.50
-RECORD_COLUMNS = [
-    "task_id",
-    "reward",
-    "status",
-    "is_env_failure",
-    "is_scored",
-    "scored_reward",
-    "total_tokens",
-    "task_category",
-    "task_difficulty",
-    "expected_reward_range",
-    "verifier_type",
-]
 
 
 class BootstrapConfidenceInterval(BaseModel):
@@ -99,22 +88,19 @@ def build_score_summary(
     dominance_threshold: float = DEFAULT_DOMINANCE_THRESHOLD,
 ) -> ExperimentScoreSummary:
     """Build aggregate and per-task score summaries."""
-    frame = _records_frame(records)
-    scored_rewards = _scored_rewards(frame)
-    total_runs = len(frame)
+    rows = _record_rows(records)
+    scored_rewards = _scored_rewards(rows)
+    total_runs = len(rows)
     total_scored = len(scored_rewards)
 
     per_task = _build_task_summaries(
-        frame=frame,
+        rows=rows,
         total_scored=total_scored,
         bootstrap_samples=bootstrap_samples,
         bootstrap_seed=bootstrap_seed,
         confidence_level=confidence_level,
     )
-    task_means = pd.Series(
-        [task.mean_reward for task in per_task if task.mean_reward is not None],
-        dtype="float64",
-    )
+    task_means = [task.mean_reward for task in per_task if task.mean_reward is not None]
     dominant_task = None
     if total_scored:
         dominant_task = max(per_task, key=lambda task: task.scored_share, default=None)
@@ -128,12 +114,10 @@ def build_score_summary(
         total_runs=total_runs,
         scored_count=total_scored,
         unscored_count=total_runs - total_scored,
-        env_failure_count=int(frame["is_env_failure"].sum()) if not frame.empty else 0,
-        mean_reward=_series_mean(scored_rewards),
-        median_reward=(
-            float(scored_rewards.median()) if not scored_rewards.empty else None
-        ),
-        macro_mean_reward=_series_mean(task_means),
+        env_failure_count=sum(1 for row in rows if row["is_env_failure"]),
+        mean_reward=_mean(scored_rewards),
+        median_reward=_median(scored_rewards),
+        macro_mean_reward=_mean(task_means),
         bootstrap_ci=_bootstrap_mean_ci(
             scored_rewards,
             samples=bootstrap_samples,
@@ -141,7 +125,7 @@ def build_score_summary(
             confidence_level=confidence_level,
         ),
         per_task=per_task,
-        total_tokens=int(frame["total_tokens"].sum()) if total_runs else 0,
+        total_tokens=sum(int(row["total_tokens"]) for row in rows),
         dominance_threshold=dominance_threshold,
         dominant_task_id=dominant_task.task_id if dominant_task else None,
         max_task_scored_share=max_task_scored_share,
@@ -159,49 +143,37 @@ def write_score_summary(summary: ExperimentScoreSummary, path: Path) -> None:
 
 def _build_task_summaries(
     *,
-    frame: pd.DataFrame,
+    rows: list[dict[str, Any]],
     total_scored: int,
     bootstrap_samples: int,
     bootstrap_seed: int,
     confidence_level: float,
 ) -> list[TaskScoreSummary]:
-    if frame.empty:
+    if not rows:
         return []
 
-    base_stats = frame.groupby("task_id", sort=True).agg(
-        total_runs=("task_id", "size"),
-        env_failure_count=("is_env_failure", "sum"),
-    )
-    reward_stats = (
-        frame[frame["is_scored"]]
-        .groupby("task_id")["scored_reward"]
-        .agg(
-            scored_count="count",
-            mean_reward="mean",
-            median_reward="median",
-        )
-    )
-    task_stats = base_stats.join(reward_stats, how="left")
-    task_stats["scored_count"] = task_stats["scored_count"].fillna(0).astype(int)
+    rows_by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_task[str(row["task_id"])].append(row)
 
     summaries = []
-    for offset, (task_id, stats) in enumerate(task_stats.iterrows()):
-        task_frame = frame[frame["task_id"] == task_id]
-        rewards = _scored_rewards(task_frame)
-        scored_count = int(stats["scored_count"])
-        total_runs = int(stats["total_runs"])
+    for offset, task_id in enumerate(sorted(rows_by_task)):
+        task_rows = rows_by_task[task_id]
+        rewards = _scored_rewards(task_rows)
+        scored_count = len(rewards)
+        total_runs = len(task_rows)
         scored_share = scored_count / total_scored if total_scored else 0.0
-        expected_reward_range = _first_present(task_frame, "expected_reward_range")
+        expected_reward_range = _first_present(task_rows, "expected_reward_range")
 
         summaries.append(
             TaskScoreSummary(
-                task_id=str(task_id),
+                task_id=task_id,
                 total_runs=total_runs,
                 scored_count=scored_count,
                 unscored_count=total_runs - scored_count,
-                env_failure_count=int(stats["env_failure_count"]),
-                mean_reward=as_optional_float(stats["mean_reward"]),
-                median_reward=as_optional_float(stats["median_reward"]),
+                env_failure_count=sum(1 for row in task_rows if row["is_env_failure"]),
+                mean_reward=_mean(rewards),
+                median_reward=_median(rewards),
                 bootstrap_ci=_bootstrap_mean_ci(
                     rewards,
                     samples=bootstrap_samples,
@@ -209,20 +181,20 @@ def _build_task_summaries(
                     confidence_level=confidence_level,
                 ),
                 scored_share=scored_share,
-                task_category=_first_string(task_frame, "task_category"),
-                task_difficulty=_first_string(task_frame, "task_difficulty"),
+                task_category=_first_string(task_rows, "task_category"),
+                task_difficulty=_first_string(task_rows, "task_difficulty"),
                 expected_reward_range=(
                     expected_reward_range
                     if isinstance(expected_reward_range, tuple)
                     else None
                 ),
-                verifier_type=_first_string(task_frame, "verifier_type"),
+                verifier_type=_first_string(task_rows, "verifier_type"),
             )
         )
     return summaries
 
 
-def _records_frame(records: list[IterationRecord]) -> pd.DataFrame:
+def _record_rows(records: list[IterationRecord]) -> list[dict[str, Any]]:
     rows = []
     for record in records:
         if record.task_id == COEVOLUTION_TASK_ID:
@@ -248,41 +220,45 @@ def _records_frame(records: list[IterationRecord]) -> pd.DataFrame:
                 "is_env_failure": is_env_failure,
                 "is_scored": is_scored,
                 "scored_reward": scored_reward,
-                "total_tokens": record.total_tokens,
+                "total_tokens": _numeric_or_zero(record.total_tokens),
                 "task_category": record.task_category,
                 "task_difficulty": record.task_difficulty,
                 "expected_reward_range": record.expected_reward_range,
                 "verifier_type": record.verifier_type,
             }
         )
-
-    frame = pd.DataFrame(rows, columns=RECORD_COLUMNS)
-    frame["scored_reward"] = pd.to_numeric(frame["scored_reward"], errors="coerce")
-    frame["total_tokens"] = pd.to_numeric(
-        frame["total_tokens"], errors="coerce"
-    ).fillna(0)
-    return frame
+    return rows
 
 
-def _scored_rewards(frame: pd.DataFrame) -> pd.Series:
-    return frame.loc[frame["is_scored"], "scored_reward"].dropna().astype(float)
+def _scored_rewards(rows: list[dict[str, Any]]) -> list[float]:
+    return [
+        float(row["scored_reward"])
+        for row in rows
+        if row["is_scored"] and row["scored_reward"] is not None
+    ]
 
 
-def _series_mean(values: pd.Series) -> float | None:
-    if values.empty:
+def _mean(values: list[float]) -> float | None:
+    if not values:
         return None
-    return float(values.mean())
+    return float(statistics.fmean(values))
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(statistics.median(values))
 
 
 def _bootstrap_mean_ci(
-    values: pd.Series,
+    values: list[float],
     *,
     samples: int,
     seed: int,
     confidence_level: float,
 ) -> BootstrapConfidenceInterval:
-    values = values.dropna().astype(float).reset_index(drop=True)
-    if values.empty:
+    values = [value for value in values if not math.isnan(value)]
+    if not values or samples <= 0:
         return BootstrapConfidenceInterval(
             confidence_level=confidence_level,
             samples=samples,
@@ -290,40 +266,61 @@ def _bootstrap_mean_ci(
         )
 
     sample_size = len(values)
-    bootstrap_means = pd.Series(
-        [
-            float(
-                values.sample(
-                    n=sample_size,
-                    replace=True,
-                    random_state=seed + sample_index,
-                ).mean()
-            )
-            for sample_index in range(samples)
-        ],
-        dtype="float64",
-    )
+    bootstrap_means = [
+        statistics.fmean(
+            random.Random(seed + sample_index).choices(values, k=sample_size)
+        )
+        for sample_index in range(samples)
+    ]
     lower_percentile = (1.0 - confidence_level) / 2.0
     upper_percentile = 1.0 - lower_percentile
 
     return BootstrapConfidenceInterval(
         confidence_level=confidence_level,
-        lower=float(bootstrap_means.quantile(lower_percentile)),
-        upper=float(bootstrap_means.quantile(upper_percentile)),
+        lower=float(_quantile(bootstrap_means, lower_percentile)),
+        upper=float(_quantile(bootstrap_means, upper_percentile)),
         samples=samples,
         seed=seed,
     )
 
 
-def _first_string(frame: pd.DataFrame, column: str) -> str | None:
-    value = _first_present(frame, column)
+def _quantile(values: list[float], percentile: float) -> float:
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile
+    lower_index = math.floor(position)
+    upper_index = math.ceil(position)
+    if lower_index == upper_index:
+        return ordered[lower_index]
+    lower = ordered[lower_index]
+    upper = ordered[upper_index]
+    return lower + (upper - lower) * (position - lower_index)
+
+
+def _first_string(rows: list[dict[str, Any]], column: str) -> str | None:
+    value = _first_present(rows, column)
     if isinstance(value, str):
         return value
     return None
 
 
-def _first_present(frame: pd.DataFrame, column: str) -> Any:
-    values = frame[column].dropna()
-    if values.empty:
-        return None
-    return values.iloc[0]
+def _first_present(rows: list[dict[str, Any]], column: str) -> Any:
+    for row in rows:
+        value = row.get(column)
+        if value is None:
+            continue
+        if isinstance(value, float) and math.isnan(value):
+            continue
+        return value
+    return None
+
+
+def _numeric_or_zero(value: object) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and not math.isnan(value):
+        return int(value)
+    return 0
