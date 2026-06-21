@@ -951,6 +951,60 @@ async def test_harbor_runner_raises_for_missing_prebuilt(
     assert "OPENAI_API_KEY" not in captured_envs[0]
 
 
+@pytest.mark.asyncio
+async def test_harbor_runner_retries_transient_claude_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    captured_commands: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        captured_commands.append(list(command))
+        job_dir = jobs_dir / f"job-{len(captured_commands)}"
+        trial_dir = job_dir / "trials" / "trial-1"
+        trial_dir.mkdir(parents=True)
+        result = (
+            {
+                "exception_info": {
+                    "exception_type": "NonZeroAgentExitCodeError",
+                    "exception_message": (
+                        "curl -fsSL https://claude.ai/install.sh | bash -s --\n"
+                        "The socket connection was closed unexpectedly."
+                    ),
+                }
+            }
+            if len(captured_commands) == 1
+            else {"reward": 1.0, "verifier_result": {"rewards": {"reward": 1.0}}}
+        )
+        (trial_dir / "result.json").write_text(json.dumps(result))
+        return _Proc()
+
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.shutil.which",
+        lambda name: "/usr/local/bin/harbor",
+    )
+    monkeypatch.setattr(
+        "mediated_coevo.benchmarks.skillflow.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    runner = HarborRunner(jobs_dir=jobs_dir, agent_name="claude-code")
+
+    result = await runner.run(task_dir, "provider/model")
+
+    assert len(captured_commands) == 2
+    assert result.job_dir == jobs_dir / "job-2"
+
+
 def test_claude_code_openrouter_agent_env_preserves_explicit_model_aliases() -> None:
     agent_env = skillflow_benchmark.harbor_agent_env_for_model(
         agent_name="claude-code",

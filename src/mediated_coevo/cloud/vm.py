@@ -478,8 +478,7 @@ def _iter_task_files(task_dir: Path) -> Iterator[tuple[Path, PurePosixPath]]:
 def _exclude_task_path(relative_path: PurePosixPath) -> bool:
     parts = relative_path.parts
     return any(part == "__pycache__" for part in parts) or (
-        bool(parts)
-        and (parts[-1] == ".DS_Store" or parts[-1].endswith(".pyc"))
+        bool(parts) and (parts[-1] == ".DS_Store" or parts[-1].endswith(".pyc"))
     )
 
 
@@ -496,8 +495,7 @@ def _quote_command_preserving_vars(
     variable_args: set[str],
 ) -> str:
     return " ".join(
-        arg if arg in variable_args else shlex.quote(arg)
-        for arg in command
+        arg if arg in variable_args else shlex.quote(arg) for arg in command
     )
 
 

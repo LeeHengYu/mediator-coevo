@@ -489,6 +489,13 @@ class HarborRunner:
     async def run(self, task_dir: Path, model: str) -> HarborRunResult:
         await asyncio.to_thread(self._ensure_declared_prebuilt_image, task_dir)
         result = await self._run_once(task_dir, model)
+        if harbor_run_retryable_claude_setup_failure(result):
+            # ponytail: one retry for flaky installer downloads; add backoff only if logs prove it.
+            logger.warning(
+                "Retrying Harbor run after transient Claude Code setup failure: %s",
+                task_dir,
+            )
+            result = await self._run_once(task_dir, model)
         if harbor_run_missing_prebuilt_image(result):
             raise HarborPrebuiltImageMissingError(
                 harbor_missing_prebuilt_image_message(result, task_dir)
@@ -1130,6 +1137,31 @@ def harbor_run_missing_prebuilt_image(run_result: HarborRunResult) -> bool:
         return _trial_exception_error_kind(exception_info) == "missing_prebuilt_image"
     combined_output = f"{run_result.stdout}\n{run_result.stderr}".lower()
     return "pull access denied" in combined_output and "prebuilt" in combined_output
+
+
+def harbor_run_retryable_claude_setup_failure(run_result: HarborRunResult) -> bool:
+    """Return True for transient Claude Code installer/download failures."""
+    if run_result.trial_dir is None:
+        return False
+    trial_result_json = _load_json_or_empty(run_result.trial_dir / "result.json")
+    exception_info = as_mapping(trial_result_json.get("exception_info"))
+    detail = (
+        f"{exception_info.get('exception_message') or ''}\n"
+        f"{exception_info.get('exception_traceback') or ''}"
+    ).lower()
+    if (
+        "claude.ai/install.sh" not in detail
+        and "@anthropic-ai/claude-code" not in detail
+    ):
+        return False
+    return any(
+        marker in detail
+        for marker in (
+            "socket connection was closed unexpectedly",
+            "transferred a partial file",
+            "download failed",
+        )
+    )
 
 
 def harbor_missing_prebuilt_image_message(
