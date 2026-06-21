@@ -168,12 +168,16 @@ def build_experiment_runtime(
                 config=remote_harbor_config,
                 jobs_dir=jobs_dir,
                 timeout_sec=timeout_sec,
+                agent_name=config.executor_runtime.agent_name,
+                agent_env=config.executor_runtime.agent_env,
                 agent_setup_timeout_multiplier=setup_timeout_multiplier,
             )
         else:
             harbor_runner = HarborRunner(
                 jobs_dir=jobs_dir,
                 timeout_sec=timeout_sec,
+                agent_name=config.executor_runtime.agent_name,
+                agent_env=config.executor_runtime.agent_env,
                 agent_setup_timeout_multiplier=setup_timeout_multiplier,
                 harbor_base_image=config.executor_runtime.harbor_base_image,
                 legacy_harbor_base_images=(

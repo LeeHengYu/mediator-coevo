@@ -223,6 +223,8 @@ class ExecutorRuntimeConfig(BaseModel):
 
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
+    agent_name: str = Field(default="hermes", min_length=1)
+    agent_env: dict[str, str] = Field(default_factory=dict)
     injected_skill_name: str = "executor"
     sync_enabled: bool = False
     dataset: str = Field(default=DEFAULT_SKILLFLOW_DATASET, min_length=1)

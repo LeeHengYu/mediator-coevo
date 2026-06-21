@@ -843,9 +843,48 @@ def test_declared_prebuilt_image_is_rebuilt_when_harbor_cleanup_removed_it(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_name", "agent_env", "expected_agent_flags"),
+    [
+        (
+            "hermes",
+            {},
+            [],
+        ),
+        (
+            "claude-code",
+            {
+                "ANTHROPIC_API_KEY": "",
+                "ANTHROPIC_AUTH_TOKEN": "${OPENROUTER_API_KEY}",
+                "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+            },
+            [
+                "--agent-env",
+                "ANTHROPIC_API_KEY=",
+                "--agent-env",
+                "ANTHROPIC_AUTH_TOKEN=${OPENROUTER_API_KEY}",
+                "--agent-env",
+                "ANTHROPIC_BASE_URL=https://openrouter.ai/api",
+                "--agent-env",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL=provider/model",
+                "--agent-env",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL=provider/model",
+                "--agent-env",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL=provider/model",
+                "--agent-env",
+                "ANTHROPIC_MODEL=provider/model",
+                "--agent-env",
+                "CLAUDE_CODE_SUBAGENT_MODEL=provider/model",
+            ],
+        ),
+    ],
+)
 async def test_harbor_runner_raises_for_missing_prebuilt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    agent_name: str,
+    agent_env: dict[str, str],
+    expected_agent_flags: list[str],
 ) -> None:
     jobs_dir = tmp_path / "jobs"
     task_dir = tmp_path / "task"
@@ -887,7 +926,11 @@ async def test_harbor_runner_raises_for_missing_prebuilt(
         fake_create_subprocess_exec,
     )
 
-    runner = HarborRunner(jobs_dir=jobs_dir)
+    runner = HarborRunner(
+        jobs_dir=jobs_dir,
+        agent_name=agent_name,
+        agent_env=agent_env,
+    )
 
     with pytest.raises(HarborPrebuiltImageMissingError) as exc_info:
         await runner.run(task_dir, "provider/model")
@@ -905,15 +948,31 @@ async def test_harbor_runner_raises_for_missing_prebuilt(
             "-p",
             str(task_dir),
             "-a",
-            "hermes",
+            agent_name,
             "-m",
             "provider/model",
             "-o",
             str(jobs_dir),
             "--yes",
+            *expected_agent_flags,
         ]
     ]
     assert "OPENAI_API_KEY" not in captured_envs[0]
+
+
+def test_claude_code_openrouter_agent_env_preserves_explicit_model_aliases() -> None:
+    agent_env = skillflow_benchmark.harbor_agent_env_for_model(
+        agent_name="claude-code",
+        agent_env={
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+            "ANTHROPIC_MODEL": "custom/model",
+        },
+        model="provider/model",
+    )
+
+    assert agent_env["ANTHROPIC_MODEL"] == "custom/model"
+    assert agent_env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "custom/model"
+    assert agent_env["CLAUDE_CODE_SUBAGENT_MODEL"] == "custom/model"
 
 
 def _write_task(task_dir: Path, *, family: str) -> None:

@@ -37,6 +37,14 @@ HARBOR_PREBUILT_IMAGE_PREFIX = "harbor-prebuilt:"
 LEGACY_HARBOR_BASE_IMAGE = "skillevlove/harbor-cli-openhands:ubuntu24.04"
 SKILLFLOW_HARBOR_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
 DEFAULT_LEGACY_HARBOR_BASE_IMAGES = (LEGACY_HARBOR_BASE_IMAGE,)
+CLAUDE_CODE_AGENT_NAME = "claude-code"
+CLAUDE_CODE_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
 DOCKERFILE_FROM_IMAGE_RE = re.compile(
     r"^(?P<prefix>\s*FROM\s+(?:(?:--[^\s]+)\s+)*)(?P<image>[^\s]+)(?P<suffix>.*)$",
     re.IGNORECASE,
@@ -57,6 +65,23 @@ class HarborPrebuiltImageMissingError(RuntimeError):
 
 class SkillFlowSyncError(RuntimeError):
     """Raised when SkillFlow task synchronization fails."""
+
+
+def harbor_agent_env_for_model(
+    *,
+    agent_name: str,
+    agent_env: Mapping[str, str],
+    model: str,
+) -> dict[str, str]:
+    """Return Harbor agent env with Claude Code OpenRouter model aliases filled."""
+    env = dict(agent_env)
+    if agent_name != CLAUDE_CODE_AGENT_NAME or "ANTHROPIC_BASE_URL" not in env:
+        return env
+
+    claude_model = env.get("ANTHROPIC_MODEL", model)
+    for key in CLAUDE_CODE_MODEL_ENV_KEYS:
+        env.setdefault(key, claude_model)
+    return env
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,6 +454,8 @@ class HarborRunner:
         self,
         jobs_dir: Path,
         timeout_sec: float = 1800.0,
+        agent_name: str = HERMES_AGENT_NAME,
+        agent_env: Mapping[str, str] | None = None,
         agent_setup_timeout_multiplier: float | None = None,
         harbor_base_image: str = SKILLFLOW_HARBOR_BASE_IMAGE,
         legacy_harbor_base_images: Iterable[str] = DEFAULT_LEGACY_HARBOR_BASE_IMAGES,
@@ -436,6 +463,8 @@ class HarborRunner:
     ) -> None:
         self.jobs_dir = jobs_dir
         self.timeout_sec = timeout_sec
+        self.agent_name = agent_name
+        self.agent_env = dict(agent_env or {})
         self.agent_setup_timeout_multiplier = agent_setup_timeout_multiplier
         self.harbor_base_image = harbor_base_image
         self.legacy_harbor_base_images = _dedupe_nonempty(legacy_harbor_base_images)
@@ -487,13 +516,20 @@ class HarborRunner:
             "-p",
             str(task_dir),
             "-a",
-            HERMES_AGENT_NAME,
+            self.agent_name,
             "-m",
             model,
             "-o",
             str(self.jobs_dir),
             "--yes",
         ]
+        agent_env = harbor_agent_env_for_model(
+            agent_name=self.agent_name,
+            agent_env=self.agent_env,
+            model=model,
+        )
+        for key, value in sorted(agent_env.items()):
+            command.extend(["--agent-env", f"{key}={value}"])
         if self.agent_setup_timeout_multiplier is not None:
             command.extend(
                 [

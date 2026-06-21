@@ -193,12 +193,13 @@ alone.
 - `uv`
 - Harbor CLI on `PATH`
 - Docker for local Harbor execution
-- `OPENROUTER_API_KEY` for planner, mediator, judge, and the Hermes executor
+- `OPENROUTER_API_KEY` for planner, mediator, judge, and the default Hermes executor
 
-MedCoevo always runs SkillFlow tasks through Harbor's `hermes` agent. The
-executor agent is not configurable in `config/default.toml`; local Harbor
-subprocesses deliberately drop `OPENAI_API_KEY` so Hermes routes through
-`OPENROUTER_API_KEY`.
+MedCoevo runs SkillFlow tasks through Harbor's `hermes` agent by default.
+`executor_runtime.agent_name` can select another Harbor agent such as
+`claude-code`, and `executor_runtime.agent_env` can pass agent-specific
+environment variables. Local Harbor subprocesses deliberately drop
+`OPENAI_API_KEY` so the default Hermes path routes through `OPENROUTER_API_KEY`.
 
 ## Quick Start
 
@@ -289,12 +290,27 @@ uv run medcoevo --show-completion
 `run` executes one SkillFlow co-evolution experiment. It requires at least one
 task selector.
 
-Selectors:
+Task selectors:
 
 - `--task <id>`: repeatable; comma-separated IDs are also accepted.
 - `--family <name>`: run all local tasks with matching SkillFlow family
   metadata.
 - `--task-set <name>`: read `benchmarks/skillflow/task_sets/<name>.txt`.
+
+Examples:
+
+```bash
+uv run medcoevo run --task Weighted-Risk-Assessment/hospital-capacity-at-risk-calc
+
+uv run medcoevo run \
+  --task Weighted-Risk-Assessment/hospital-capacity-at-risk-calc \
+  --task Weighted-Risk-Assessment/api-sla-at-risk-calc
+
+uv run medcoevo run \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --seed 42
+```
 
 Core run options:
 
@@ -318,15 +334,46 @@ Core run options:
 | `--cloud-env-file`                              | `.env`       | Dotenv file containing GCP VM Harbor settings.                      |
 | `--verbose`, `-v`                               | false        | Enable debug logging.                                               |
 
-Diffusion override values:
+`run` writes to `data/experiments/<timestamp>-<run-id>/`. If `--run-id` is not
+set, the suffix defaults to `<seed>-skillflow`.
+
+Executor agent selection is configured in `[executor_runtime]`, not as a CLI
+flag:
+
+```toml
+[executor_runtime]
+agent_name = "hermes"
+agent_env = {}
+```
+
+To try Harbor's Claude Code agent through an Anthropic-compatible OpenRouter
+endpoint, use a separate config directory or config copy with:
+
+```toml
+[executor_runtime]
+agent_name = "claude-code"
+
+[executor_runtime.agent_env]
+ANTHROPIC_API_KEY = ""
+ANTHROPIC_AUTH_TOKEN = "${OPENROUTER_API_KEY}"
+ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
+```
+
+The executor model still comes from `[models].executor`; for Harbor it is
+normalized from `openrouter/provider/model` to `provider/model`. When
+`agent_name = "claude-code"` and `ANTHROPIC_BASE_URL` is set, the runner also
+passes Claude Code's `ANTHROPIC_MODEL` aliases from the normalized executor
+model so OpenRouter receives the full `provider/model` id. Claude Code should
+use `ANTHROPIC_AUTH_TOKEN` for OpenRouter and leave `ANTHROPIC_API_KEY`
+explicitly empty to avoid Anthropic auth conflicts.
+
+Diffusion values:
 
 - `--diffusion-policy` accepts `none`, `capped_broadcast`, `random_k`, or
   `top_k_similarity`.
-- `--diffusion-graph none` records broadcast-style snapshots for non-graph
-  policies.
-- `--diffusion-graph task_similarity` and
-  `--diffusion-graph precomputed_similarity` use run-local precomputed
-  similarity artifacts when graph-aware diffusion is enabled.
+- `--diffusion-graph none` is valid for non-graph policies.
+- `--diffusion-graph task_similarity` and `precomputed_similarity` are valid
+  graph sources for `top_k_similarity`.
 - `--diffusion-max-artifacts` and `--diffusion-top-k-neighbors` must be at
   least `1`.
 
@@ -351,7 +398,25 @@ Skill update values:
 
 `none` and `all` cannot be combined with other values.
 
-Current full-family experiment command:
+Common recipes:
+
+No-feedback baseline:
+
+```bash
+uv run medcoevo run \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --condition no_feedback \
+  --skill-updates none \
+  --coevo-interval 99 \
+  --advisor-buffer-max 99 \
+  --no-diffusion-enabled \
+  --diffusion-policy none \
+  --diffusion-graph none \
+  --run-id wra-no-feedback
+```
+
+Graph-aware diffusion run:
 
 ```bash
 uv run medcoevo run \
@@ -369,6 +434,18 @@ uv run medcoevo run \
   --run-id all-wra-top-k-similarity-hermes
 ```
 
+Remote Harbor run on the configured GCP VM:
+
+```bash
+uv run medcoevo run \
+  --task smoke-skillflow \
+  --iterations 1 \
+  --seed 1 \
+  --cloud \
+  --cloud-env-file .env \
+  --run-id remote-smoke
+```
+
 ## `matrix`
 
 `matrix` runs the eight-row learned-mediator diffusion matrix against the same
@@ -376,10 +453,37 @@ SkillFlow task selection, seed, model config, and budget config. Use it when you
 want the fixed `skill_updates x diffusion_policy` design rather than one manual
 `run` condition.
 
-Use `-l` or `--list` to display all row setup.
+Task selectors are the same as `run`: `--task`, `--family`, and `--task-set`.
+
+Matrix options:
+
+| Option                        | Default      | Meaning                                                     |
+| ----------------------------- | ------------ | ----------------------------------------------------------- |
+| `--iterations`                | config value | Number of iterations per row.                               |
+| `--seed`                      | config value | Random seed reused for every selected row.                  |
+| `--coevo-interval`            | config value | Shared co-evolution interval for every row.                 |
+| `--advisor-buffer-max`        | config value | Shared executor proposal batch size for every row.          |
+| `--diffusion-max-artifacts`   | config value | Shared artifact render cap for every row.                   |
+| `--diffusion-top-k-neighbors` | config value | Shared neighbor cap for graph-aware rows.                   |
+| `--list`, `-l`                | false        | Print row indexes and row-local settings, then exit.        |
+| `--index`, `-i`               | all rows     | Run selected zero-based row indexes, for example `1,3`.     |
+| `--run-id`                    | auto suffix  | Parent matrix directory suffix.                             |
+| `--config-dir`                | `config/`    | Directory containing `default.toml`.                        |
+| `--verbose`, `-v`             | false        | Enable debug logging.                                       |
+
+Matrix does not accept `--condition`, `--skill-updates`,
+`--diffusion-enabled`, `--diffusion-policy`, or `--diffusion-graph` as mutable
+run controls. Those values are owned by each fixed row preset. Passing those
+flags intentionally fails so a matrix cannot silently become a custom design.
+
+Use `-l` or `--list` to display all row setup:
+
+```bash
+uv run medcoevo matrix --list
+```
 
 Run only one indexed row while keeping the usual task selectors and shared
-controls, run all 8 rows if ignored (default):
+controls:
 
 ```bash
 uv run medcoevo matrix \
@@ -388,6 +492,27 @@ uv run medcoevo matrix \
   --seed 42 \
   --index 0 \
   --run-id csm-matrix-skill-none-diffusion-none
+```
+
+Run multiple selected rows:
+
+```bash
+uv run medcoevo matrix \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --seed 42 \
+  --index 0,3,7 \
+  --run-id wra-selected-matrix
+```
+
+Omit `--index` to run all eight rows:
+
+```bash
+uv run medcoevo matrix \
+  --family Weighted-Risk-Assessment \
+  --iterations 3 \
+  --seed 42 \
+  --run-id wra-full-matrix
 ```
 
 With `--run-id`, the parent matrix directory is timestamp-prefixed, for example
@@ -420,15 +545,6 @@ Matrix rows:
 Each row gets an isolated copy of the skill tree under its experiment
 directory and writes its own `config.toml`, metrics, summaries, diffusion
 artifacts, and graph snapshots.
-
-`matrix` accepts the same task selectors as `run`, plus shared controls:
-`--iterations`, `--seed`, `--coevo-interval`, `--advisor-buffer-max`,
-`--diffusion-max-artifacts`, `--diffusion-top-k-neighbors`, `--index`/`-i`,
-`--run-id`, `--list`/`-l`, `--config-dir`, and `--verbose`.
-
-Do not pass `--condition`, `--skill-updates`, `--diffusion-enabled`,
-`--diffusion-policy`, or `--diffusion-graph` to `matrix`. Those settings are
-owned by the fixed row presets.
 
 ## `inspect`
 
@@ -751,6 +867,8 @@ benchmarks_dir = "benchmarks/skillflow"
 
 [executor_runtime]
 task_dirs = ["tasks"]
+agent_name = "hermes"
+agent_env = {}
 sync_enabled = false
 dataset = "zhang-ziao/SkillFlow-Task"
 dataset_repo_type = "dataset"
@@ -772,8 +890,8 @@ uv run pytest
 Run static checks:
 
 ```bash
-uv run ruff check src tests
-uv run mypy src
+uv run ruff check .
+uv run mypy src tests
 ```
 
 ## Troubleshooting

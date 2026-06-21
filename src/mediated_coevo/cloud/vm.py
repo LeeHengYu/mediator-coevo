@@ -27,6 +27,7 @@ from mediated_coevo.benchmarks import (
     HarborTimeoutError,
 )
 from mediated_coevo.benchmarks.skillflow import (
+    harbor_agent_env_for_model,
     harbor_missing_prebuilt_image_message,
     harbor_run_missing_prebuilt_image,
 )
@@ -205,7 +206,9 @@ def build_remote_harbor_script(
     remote_run_dir: str,
     model: str,
     harbor_timeout_sec: float,
-    agent_setup_timeout_multiplier: float | None,
+    agent_name: str = HERMES_AGENT_NAME,
+    agent_env: Mapping[str, str] | None = None,
+    agent_setup_timeout_multiplier: float | None = None,
 ) -> str:
     """Build the bash script executed on the VM for one Harbor run."""
     secret = parse_secret_resource(
@@ -231,12 +234,19 @@ def build_remote_harbor_script(
         "-p",
         "$TASK_DIR",
         "-a",
-        HERMES_AGENT_NAME,
+        agent_name,
         "-m",
         model,
         "-o",
         "$JOBS_DIR",
     ]
+    effective_agent_env = harbor_agent_env_for_model(
+        agent_name=agent_name,
+        agent_env=agent_env or {},
+        model=model,
+    )
+    for key, value in sorted(effective_agent_env.items()):
+        harbor_command.extend(["--agent-env", f"{key}={value}"])
     if agent_setup_timeout_multiplier is not None:
         harbor_command.extend(
             [
@@ -288,12 +298,16 @@ class RemoteHarborRunner:
         config: GCPVMConfig,
         jobs_dir: Path,
         timeout_sec: float = 1800.0,
+        agent_name: str = HERMES_AGENT_NAME,
+        agent_env: Mapping[str, str] | None = None,
         agent_setup_timeout_multiplier: float | None = None,
         command_runner: AsyncCommandRunner | None = None,
     ) -> None:
         self.config = config
         self.jobs_dir = jobs_dir
         self.timeout_sec = timeout_sec
+        self.agent_name = agent_name
+        self.agent_env = dict(agent_env or {})
         self.agent_setup_timeout_multiplier = agent_setup_timeout_multiplier
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._command_runner = command_runner or _run_local_command
@@ -346,6 +360,8 @@ class RemoteHarborRunner:
                             remote_run_dir=remote_run_dir,
                             model=model,
                             harbor_timeout_sec=self.timeout_sec,
+                            agent_name=self.agent_name,
+                            agent_env=self.agent_env,
                             agent_setup_timeout_multiplier=(
                                 self.agent_setup_timeout_multiplier
                             ),

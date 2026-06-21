@@ -73,20 +73,48 @@ def test_config_normalize_models_rejects_blank_model_name():
         config.normalize_models()
 
 
-def test_executor_agent_is_hermes_only_not_configurable():
-    with pytest.raises(ValueError, match="agent_name"):
-        Config(
-            models={
-                "planner": "anthropic/claude-sonnet-4.6",
-                "executor": "openrouter/openai/gpt-5.5",
-                "mediator": "openai/gpt-5.5",
-                "judge": "openai/gpt-5.5",
+def test_executor_agent_defaults_to_hermes_and_allows_configured_agent_env():
+    config = Config(
+        models={
+            "planner": "anthropic/claude-sonnet-4.6",
+            "executor": "openrouter/openai/gpt-5.5",
+            "mediator": "openai/gpt-5.5",
+            "judge": "openai/gpt-5.5",
+        },
+        budgets=budgets_config(),
+        experiment=experiment_config(),
+        diffusion=diffusion_config(),
+    )
+
+    assert config.executor_runtime.agent_name == "hermes"
+    assert config.executor_runtime.agent_env == {}
+
+    config = Config(
+        models={
+            "planner": "anthropic/claude-sonnet-4.6",
+            "executor": "openrouter/openai/gpt-5.5",
+            "mediator": "openai/gpt-5.5",
+            "judge": "openai/gpt-5.5",
+        },
+        budgets=budgets_config(),
+        experiment=experiment_config(),
+        diffusion=diffusion_config(),
+        executor_runtime={
+            "agent_name": "claude-code",
+            "agent_env": {
+                "ANTHROPIC_API_KEY": "",
+                "ANTHROPIC_AUTH_TOKEN": "${OPENROUTER_API_KEY}",
+                "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
             },
-            budgets=budgets_config(),
-            experiment=experiment_config(),
-            diffusion=diffusion_config(),
-            executor_runtime={"agent_name": "other-agent"},
-        )
+        },
+    )
+
+    assert config.executor_runtime.agent_name == "claude-code"
+    assert config.executor_runtime.agent_env == {
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "${OPENROUTER_API_KEY}",
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+    }
 
 
 @pytest.mark.parametrize("model", ["openrouter", "openrouter/", "openai/"])

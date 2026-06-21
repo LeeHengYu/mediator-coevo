@@ -9,7 +9,6 @@ from rich.console import Console
 from rich.table import Table
 
 from mediated_coevo.analysis.reporting import ExperimentScoreSummary
-from mediated_coevo.benchmarks import HERMES_AGENT_NAME
 from mediated_coevo.core.config import Config
 
 
@@ -332,7 +331,7 @@ def print_experiment_controls(config: Config) -> None:
     console.print("[bold]Skill validation:[/] required")
     console.print(
         "[bold]Harbor:[/] "
-        f"agent={HERMES_AGENT_NAME} "
+        f"agent={config.executor_runtime.agent_name} "
         "base_image=required "
         "task_prebuild=optional"
     )
