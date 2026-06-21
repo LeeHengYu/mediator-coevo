@@ -167,6 +167,8 @@ class Orchestrator:
             list[DiffusionSubscription],
         ] = {}
         self.freeze_diffusion_artifact_store = False
+        self.preloaded_diffusion_artifact_store_path: str | None = None
+        self.preloaded_diffusion_artifact_store_count = 0
         self._diffusion_prepared_iterations: set[int] = set()
         self._diffusion_snapshot_by_iteration: dict[int, TaskGraphSnapshot] = {}
         self._diffusion_target_task_ids: list[str] = []
@@ -1109,6 +1111,7 @@ class Orchestrator:
 
     def _attach_diffusion_context_metrics(self, record: IterationRecord) -> None:
         self._ensure_diffusion_runtime_state()
+        self._attach_diffusion_artifact_store_metrics(record)
         prior_context = self._prior_context_by_target.get(
             (record.task_id, record.iteration)
         )
@@ -1153,6 +1156,21 @@ class Orchestrator:
                 record.delta_reward is not None and record.delta_reward < 0
             )
 
+    def _attach_diffusion_artifact_store_metrics(
+        self,
+        record: IterationRecord,
+    ) -> None:
+        self._ensure_diffusion_runtime_state()
+        record.diffusion_artifact_store_path = (
+            self.preloaded_diffusion_artifact_store_path
+        )
+        record.diffusion_artifact_store_count = (
+            self.preloaded_diffusion_artifact_store_count
+        )
+        record.diffusion_artifact_store_frozen = (
+            self.freeze_diffusion_artifact_store
+        )
+
     def _ensure_diffusion_runtime_state(self) -> None:
         if not hasattr(self, "_diffusion_store"):
             self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
@@ -1164,6 +1182,10 @@ class Orchestrator:
             self._diffusion_sub_board = {}
         if not hasattr(self, "freeze_diffusion_artifact_store"):
             self.freeze_diffusion_artifact_store = False
+        if not hasattr(self, "preloaded_diffusion_artifact_store_path"):
+            self.preloaded_diffusion_artifact_store_path = None
+        if not hasattr(self, "preloaded_diffusion_artifact_store_count"):
+            self.preloaded_diffusion_artifact_store_count = 0
         if not hasattr(self, "_diffusion_prepared_iterations"):
             self._diffusion_prepared_iterations = set()
         if not hasattr(self, "_diffusion_snapshot_by_iteration"):
@@ -1911,6 +1933,7 @@ class Orchestrator:
         if coevolution_record is not None:
             records_to_write.append(coevolution_record)
         for record in records_to_write:
+            self._attach_diffusion_artifact_store_metrics(record)
             attach_skill_identity(record, skill_hashes, current_skill_version)
             self._store_skill_update_ledger_entries(record)
             self._write_metric(record)

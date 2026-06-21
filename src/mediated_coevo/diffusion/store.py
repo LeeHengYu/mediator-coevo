@@ -88,6 +88,7 @@ class DiffusionStore:
         source: Path,
         *,
         initial_source_iteration: int = -1,
+        frozen: bool = False,
     ) -> int:
         """Import saved artifacts as pre-warmup artifacts."""
         artifacts = _load_saved_artifacts(source)
@@ -95,6 +96,7 @@ class DiffusionStore:
             metadata = dict(artifact.metadata)
             metadata["preloaded_from_artifact_store"] = str(source)
             metadata["original_source_iteration"] = artifact.source_iteration
+            metadata["preloaded_artifact_store_frozen"] = frozen
             preloaded = artifact.model_copy(
                 update={
                     "source_iteration": initial_source_iteration,

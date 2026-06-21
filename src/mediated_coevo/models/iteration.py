@@ -54,6 +54,9 @@ class IterationRecord(BaseModel):
     diffusion_artifacts_eligible: int = 0
     diffusion_artifacts_selected: int = 0
     diffusion_artifacts_rendered: int = 0
+    diffusion_artifact_store_path: str | None = None
+    diffusion_artifact_store_count: int = 0
+    diffusion_artifact_store_frozen: bool = False
     transfer_context_kind: TransferContextKind = "none"
     transfer_context_tokens: int = 0
     same_task_prior_tokens: int = 0

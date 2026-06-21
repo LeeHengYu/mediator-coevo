@@ -111,6 +111,9 @@ def test_metric_row_includes_diffusion_process_and_transfer_fields():
     record.diffusion_artifacts_eligible = 4
     record.diffusion_artifacts_selected = 2
     record.diffusion_artifacts_rendered = 1
+    record.diffusion_artifact_store_path = "data/artifact-stores/warmup"
+    record.diffusion_artifact_store_count = 12
+    record.diffusion_artifact_store_frozen = True
     record.transfer_context_kind = "diffusion"
     record.transfer_context_tokens = 37
     record.source_task_ids = ["task-b"]
@@ -122,6 +125,9 @@ def test_metric_row_includes_diffusion_process_and_transfer_fields():
     assert row["diffusion_artifacts_eligible"] == 4
     assert row["diffusion_artifacts_selected"] == 2
     assert row["diffusion_artifacts_rendered"] == 1
+    assert row["diffusion_artifact_store_path"] == "data/artifact-stores/warmup"
+    assert row["diffusion_artifact_store_count"] == 12
+    assert row["diffusion_artifact_store_frozen"] is True
     assert row["transfer_context_kind"] == "diffusion"
     assert row["transfer_context_tokens"] == 37
     assert row["source_task_ids"] == ["task-b"]

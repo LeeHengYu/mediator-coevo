@@ -470,6 +470,8 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
         _diffusion_store=DiffusionStore(tmp_path / "row-experiment" / "diffusion"),
         history_store=object(),
         freeze_diffusion_artifact_store=False,
+        preloaded_diffusion_artifact_store_path=None,
+        preloaded_diffusion_artifact_store_count=0,
     )
 
     class Factory:
@@ -550,11 +552,24 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
         ],
     )
     loaded = orch._diffusion_store.load_artifact("artifact-1")
+    invocation = json.loads((orch.experiment_dir / "matrix_invocation.json").read_text())
 
     assert result.exit_code == 0, result.output
     assert loaded is not None
     assert loaded.source_iteration == -1
+    assert loaded.metadata["preloaded_from_artifact_store"] == str(saved)
+    assert loaded.metadata["preloaded_artifact_store_frozen"] is True
     assert orch.freeze_diffusion_artifact_store is True
+    assert orch.preloaded_diffusion_artifact_store_path == str(saved)
+    assert orch.preloaded_diffusion_artifact_store_count == 1
+    assert "command" not in invocation
+    assert invocation["tasks"] == ["task-A"]
+    assert invocation["selected_task_ids"] == ["task-A"]
+    assert invocation["row_indexes_argument"] == "1"
+    assert invocation["selected_indexes"] == [1]
+    assert invocation["artifact_store"] == str(saved)
+    assert invocation["imported_artifact_count"] == 1
+    assert invocation["freeze_artifacts"] is True
 
 
 @pytest.mark.asyncio

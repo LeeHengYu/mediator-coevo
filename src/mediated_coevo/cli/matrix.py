@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 from typing import Annotated
@@ -284,10 +285,12 @@ def matrix(
     saved_store_root = PROJECT_ROOT / config.paths.data_dir / "artifact-stores"
     for row in rows:
         row_config = row.runtime.orchestrator.config
+        imported_count = 0
         if artifact_store is not None:
             try:
                 imported_count = row.runtime.orchestrator._diffusion_store.import_artifact_store(
-                    artifact_store
+                    artifact_store,
+                    frozen=freeze_artifacts,
                 )
             except (OSError, ValueError) as exc:
                 console.print(
@@ -295,11 +298,37 @@ def matrix(
                     f"{exc}"
                 )
                 raise typer.Exit(code=1) from exc
+            row.runtime.orchestrator.preloaded_diffusion_artifact_store_path = str(
+                artifact_store
+            )
+            row.runtime.orchestrator.preloaded_diffusion_artifact_store_count = (
+                imported_count
+            )
             row.runtime.orchestrator.freeze_diffusion_artifact_store = freeze_artifacts
             console.print(
                 f"[bold]Preloaded diffusion artifacts:[/] {imported_count} "
                 f"from {artifact_store}"
             )
+        _write_matrix_invocation_metadata(
+            row_dir=row.runtime.experiment_dir,
+            tasks=_task_ids_from_repeatable_cli(tasks),
+            family=family,
+            task_set=task_set,
+            selected_task_ids=selection.task_ids,
+            iterations=iterations,
+            seed=seed,
+            selected_indexes=selected_indexes,
+            row_indexes_argument=row_indexes,
+            run_id=run_id,
+            preset_name=row.preset_name,
+            config_dir=config_dir,
+            artifact_store=artifact_store,
+            imported_artifact_count=imported_count,
+            freeze_artifacts=freeze_artifacts,
+            save_artifacts=save_artifacts,
+            diffusion_max_artifacts=diffusion_max_artifacts,
+            diffusion_top_k_neighbors=diffusion_top_k_neighbors,
+        )
         random.seed(seed)
         try:
             materialize_task_graph_for_diffusion(
@@ -382,6 +411,54 @@ def _parse_matrix_row_indexes(value: str | None) -> list[int] | None:
             raise typer.BadParameter("matrix row indexes cannot repeat")
         indexes.append(index)
     return indexes
+
+
+def _write_matrix_invocation_metadata(
+    *,
+    row_dir: Path,
+    tasks: list[str],
+    family: str | None,
+    task_set: str | None,
+    selected_task_ids: list[str],
+    iterations: int,
+    seed: int,
+    selected_indexes: list[int] | None,
+    row_indexes_argument: str | None,
+    run_id: str | None,
+    preset_name: str,
+    config_dir: Path,
+    artifact_store: Path | None,
+    imported_artifact_count: int,
+    freeze_artifacts: bool,
+    save_artifacts: bool,
+    diffusion_max_artifacts: int | None,
+    diffusion_top_k_neighbors: int | None,
+) -> None:
+    """Persist matrix CLI inputs that are not fully represented in config.toml."""
+    payload = {
+        "tasks": tasks,
+        "family": family,
+        "task_set": task_set,
+        "selected_task_ids": selected_task_ids,
+        "iterations": iterations,
+        "seed": seed,
+        "selected_indexes": selected_indexes,
+        "row_indexes_argument": row_indexes_argument,
+        "run_id": run_id,
+        "preset_name": preset_name,
+        "config_dir": str(config_dir),
+        "artifact_store": str(artifact_store) if artifact_store is not None else None,
+        "imported_artifact_count": imported_artifact_count,
+        "freeze_artifacts": freeze_artifacts,
+        "save_artifacts": save_artifacts,
+        "diffusion_max_artifacts": diffusion_max_artifacts,
+        "diffusion_top_k_neighbors": diffusion_top_k_neighbors,
+    }
+    row_dir.mkdir(parents=True, exist_ok=True)
+    (row_dir / "matrix_invocation.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _validate_artifact_store_options(
