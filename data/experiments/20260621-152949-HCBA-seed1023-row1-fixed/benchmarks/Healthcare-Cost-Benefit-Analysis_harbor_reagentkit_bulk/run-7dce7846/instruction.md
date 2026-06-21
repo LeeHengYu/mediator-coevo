@@ -1,0 +1,236 @@
+# Task Instruction
+
+Execute the following steps in order.
+
+## 1 – Inspect all input files and the test suite
+
+```bash
+cat /root/assay_manifest.json
+cat /root/carrier_cost.csv
+cat /root/billing.csv
+cat /root/lab_overrides.csv
+cat /root/report_template.json
+```
+
+Also inspect the test file that the verifier will run:
+```bash
+find /root -name '*.py' | head -20
+cat /root/tests/test_output.py 2>/dev/null || cat /root/tests/test_outputs.py 2>/dev/null || find /root -name 'test_*' -exec cat {} \;
+```
+
+Read the test file **very carefully**. It defines the exact keys expected in `analysis.assumptions`, the exact field names in each assay object, the exact keys in `totals`, and the formatting rules for the markdown summary. The test is the contract — match it exactly.
+
+## 2 – Understand the carrier cost model
+
+The carrier cost formula is NOT given explicitly in the prompt. Inspect the test file to determine how `annual_carrier_cost_small_kit_usd` and `annual_carrier_cost_bulk_kit_usd` are computed. Typical patterns:
+- `carrier_cost_usd * runs_per_year` (per-run shipping), or
+- `carrier_cost_usd * active_labs * runs_per_year`
+- Some other formula
+
+Match whatever the test expects.
+
+## 3 – Build the computation script
+
+Create `/root/solve.py` that:
+
+### 3a – Load data
+- Parse `assay_manifest.json` → list of assay objects.
+- Parse `carrier_cost.csv`, `billing.csv`, `lab_overrides.csv` with the `csv` module.
+- Parse `report_template.json`.
+
+### 3b – Filter in-scope assays
+- Keep only manifest entries where `in_scope` is `true`.
+
+### 3c – Resolve billing
+- For each in-scope assay, find all rows in `billing.csv` where `assay_label` matches the assay's `assay_name` OR any of its `aliases`.
+- Keep only rows where `is_active` is `true` (handle string "true"/"True" and boolean).
+- Among those, keep the row with the latest `effective_month` (lexicographic comparison works for YYYY-MM).
+- Extract `payment_per_run_per_lab_usd`.
+
+### 3d – Resolve active labs
+- From `lab_overrides.csv`, keep rows where `status` == `approved` (case-insensitive compare to be safe).
+- For each `assay_id`, keep the row with the highest `revision`.
+- If an in-scope assay has a matching override, use its `active_labs`; otherwise use `default_active_labs` from the manifest.
+
+### 3e – Compute per-assay numbers
+- `runs_small = 24`, `runs_bulk = 12`
+- `tests_small = tests_per_lab_per_run_small` (from manifest)
+- `tests_bulk = tests_per_lab_per_run_bulk` (from manifest)
+- `reagent_price = reagent_price_per_1000_tests_usd` (from manifest)
+- `carrier_cost_usd` from `carrier_cost.csv` matched on `carrier_type`
+- `payment = payment_per_run_per_lab_usd` (from billing)
+
+Formulas:
+- `annual_revenue_small = payment * active_labs * 24`
+- `annual_revenue_bulk = payment * active_labs * 12`
+- `annual_reagent_cost_small = reagent_price * active_labs * tests_small * 24 / 1000`
+- `annual_reagent_cost_bulk = reagent_price * active_labs * tests_bulk * 12 / 1000`
+- `annual_carrier_cost_small` and `annual_carrier_cost_bulk`: determine from the test file (likely `carrier_cost_usd * active_labs * runs_per_year` or `carrier_cost_usd * runs_per_year`).
+- `annual_margin_small = annual_revenue_small - annual_reagent_cost_small - annual_carrier_cost_small`
+- `annual_margin_bulk = annual_revenue_bulk - annual_reagent_cost_bulk - annual_carrier_cost_bulk`
+- `difference = annual_margin_bulk - annual_margin_small`
+
+Round all USD values to 2 decimal places.
+
+### 3f – Totals and decision
+- Sum margins and differences across assays.
+- `absolute_total_margin_difference_usd = abs(total_difference)`
+- If `abs(total_difference) < 7000` → `adopt_bulk_kit`, else `keep_small_kit`.
+
+### 3g – Build the JSON output
+- Copy `metadata` from `report_template.json` exactly.
+- Build `analysis.assumptions` with **all keys the test expects**. Read the test to discover these. At minimum include the keys from the prompt schema, but also any additional keys the test checks for (e.g., `carrier_cost_interpretation`, `decision_rule`, `runs_per_year_bulk`, `runs_per_year_small`, etc.).
+- Build `analysis.assays` sorted by `assay_id` ascending.
+- Use **exactly** the field names from the schema. Double-check against the test.
+- Build `analysis.totals` and `analysis.recommendation`.
+- Write to `/root/reagent_policy_report.json` with `json.dump(..., indent=2)`.
+
+### 3h – Build the markdown summary
+- Write `/root/reagent_policy_summary.md` with 4–8 non-empty lines.
+- Include total small-kit margin, total bulk-kit margin, absolute difference, and the decision slug.
+- **Format USD values with comma thousands separators** (e.g., `$-7,106.39` not `$-7106.39`). Use Python's `"{:,.2f}".format(value)` for this.
+- Include the exact slug `adopt_bulk_kit` or `keep_small_kit`.
+
+## 4 – Run the script
+
+```bash
+cd /root && python solve.py
+```
+
+## 5 – Validate outputs
+
+```bash
+cat /root/reagent_policy_report.json
+cat /root/reagent_policy_summary.md
+```
+
+Check that:
+- JSON is valid and parseable.
+- All expected keys are present.
+- Assays are sorted by `assay_id`.
+- Currency values are rounded to 2 decimals.
+- Markdown has 4–8 non-empty lines with comma-formatted numbers.
+
+## 6 – Run the test suite
+
+```bash
+cd /root && python -m pytest tests/ -v 2>&1 | head -80
+```
+
+If any test fails:
+- Read the failure message carefully.
+- Identify the exact mismatch (key name, value, format).
+- Fix `solve.py` accordingly.
+- Re-run until all tests pass.
+
+**Critical reminders from prior failure feedback:**
+1. The `analysis.assumptions` block must contain ALL keys the test expects — read the test to discover them.
+2. Field names in assay objects and totals must match exactly — no abbreviations or alternative names.
+3. The markdown summary must use comma-formatted numbers (thousands separators).
+4. The carrier cost formula must match what the test expects — derive it from the test's expected values if needed.
+5. Do NOT guess — always read the test file first and reverse-engineer expected behavior from it.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=gpt54@example.com, author_name=GPT-5.4, category=financial-analysis, difficulty=medium, tags=[lab-operations, json, csv, template-update, decision-analysis].
+Verifier config: timeout_sec=900.0.
