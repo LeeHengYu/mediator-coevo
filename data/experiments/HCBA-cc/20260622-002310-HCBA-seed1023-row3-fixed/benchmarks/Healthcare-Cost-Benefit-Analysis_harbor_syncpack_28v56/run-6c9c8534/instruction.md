@@ -1,0 +1,202 @@
+# Task Instruction
+
+## Task: Healthcare Syncpack 28-day vs 56-day Cost-Benefit Analysis
+
+### Step 1: Inspect input files
+```bash
+cat /root/ingredient_cost.csv
+cat /root/card_cost.csv
+cat /root/reimbursement.csv
+```
+
+### Step 2: Inspect the verifier/test file
+```bash
+find /root -name '*.py' -path '*test*' | head -20
+cat /root/test_output.py 2>/dev/null || find /root -name 'test_output.py' -exec cat {} \;
+```
+Read the test file carefully to understand exact key names, schema expectations, field ordering, and assertion logic before writing any output.
+
+### Step 3: Write a Python script to produce both output files
+
+Create `/root/solve.py` with the following logic:
+
+1. **Read CSVs** using the `csv` module:
+   - `ingredient_cost.csv`: columns should include `medication` and `price_per_1000_capsules_usd`
+   - `card_cost.csv`: columns should include `blister_card_count` and `card_cost_usd`
+   - `reimbursement.csv`: columns should include `medication` and a reimbursement column (per cycle for 180 patients)
+
+2. **For each medication**, compute:
+   - `annual_drug_cost_28_day_usd = (price_per_1000_capsules_usd / 1000) * 56 * 180 * 12`
+   - `annual_drug_cost_56_day_usd = (price_per_1000_capsules_usd / 1000) * 112 * 180 * 6`
+   - Note: both should be equal (same total capsules/year = 56*12 = 112*6 = 672 per patient * 180 patients)
+   - `annual_packaging_cost_28_day_usd = card_cost_usd * 180 * 12` (matched by blister_card_count from card_cost.csv; the blister_card_count in ingredient_cost.csv or reimbursement.csv links to card_cost.csv)
+   - `annual_packaging_cost_56_day_usd = card_cost_usd_for_56day * 180 * 6` (matched by the appropriate blister_card_count for 56-day fills)
+   - **IMPORTANT**: Determine how blister_card_count maps. The 28-day fill uses 56 capsules, so look for blister_card_count=56. The 56-day fill uses 112 capsules, so look for blister_card_count=112. If the card_cost.csv has entries per card count, use the matching one. If each medication has its own blister_card_count in ingredient_cost.csv, use that for 28-day and double it for 56-day. **Inspect the actual CSV structure first to determine the correct mapping.**
+   - `annual_reimbursement_28_day_usd = reimbursement_per_cycle_180_patients * 12`
+   - `annual_reimbursement_56_day_usd = reimbursement_per_cycle_180_patients * 6`
+   - `annual_margin = annual_reimbursement - annual_drug_cost - annual_packaging_cost` (for each model)
+   - `annual_margin_difference_56_minus_28_usd = margin_56 - margin_28`
+
+3. **Round all currency values to 2 decimal places.**
+
+4. **Sort medications alphabetically by `medication` name.**
+
+5. **Compute totals**:
+   - `total_annual_margin_28_day_usd` = sum of all 28-day margins
+   - `total_annual_margin_56_day_usd` = sum of all 56-day margins
+   - `total_annual_margin_difference_56_minus_28_usd` = sum of all per-med differences
+   - `absolute_total_margin_difference_usd` = abs(total_difference)
+
+6. **Decision**:
+   - If `absolute_total_margin_difference_usd < 9000`: `convert_to_56_day`
+   - Otherwise: `keep_28_day`
+
+7. **Output JSON** to `/root/syncpack_analysis.json` with the **exact schema** from the task:
+   - Top-level keys: `assumptions`, `medications`, `totals`, `recommendation`
+   - `assumptions` must include all 6 fields exactly as specified
+   - Each medication object must have exactly the 14 fields specified
+   - `totals` must have exactly the 4 fields specified
+   - `recommendation` must have `decision` and `justification`
+
+8. **Output Markdown** to `/root/syncpack_summary.md`:
+   - 4-8 non-empty lines
+   - Must include: total 28-day margin (USD), total 56-day margin (USD), absolute difference (USD), and the exact decision slug (`convert_to_56_day` or `keep_28_day`)
+
+### Step 4: Run the script
+```bash
+python3 /root/solve.py
+```
+
+### Step 5: Validate outputs
+```bash
+cat /root/syncpack_analysis.json | python3 -m json.tool
+cat /root/syncpack_summary.md
+```
+Verify:
+- JSON is valid and parseable
+- All required top-level keys present: `assumptions`, `medications`, `totals`, `recommendation`
+- `medications` array is sorted alphabetically
+- All currency values are rounded to 2 decimals
+- `totals` fields are consistent with medication-level data
+- Summary has 4-8 non-empty lines with required content
+
+### Step 6: Run the verifier
+```bash
+cd /root && python3 -m pytest test_output.py -v 2>&1 | head -80
+```
+If any test fails, read the error carefully, fix the issue, and re-run. Pay special attention to:
+- Exact key names (the failed artifact warns about schema mismatches)
+- Field naming conventions matching the schema exactly
+- The `blister_card_count` mapping logic
+- Rounding precision
+
+### Critical Notes from Cross-Task Feedback:
+- A prior similar task FAILED because of missing top-level keys (`assumptions`, `recommendation`) and incorrect field names. Ensure the JSON schema matches EXACTLY.
+- Do NOT rename or restructure keys. Use the exact names from the schema.
+- The `medications` array items must contain ALL 14 fields listed in the schema, no more, no less.
+- Read the test file BEFORE writing the solution to catch any additional constraints.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=gpt54@example.com, author_name=GPT-5.4, category=financial-analysis, difficulty=medium, tags=[med-sync, packaging, csv, json, decision-analysis].
+Verifier config: timeout_sec=900.0.

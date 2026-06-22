@@ -1,0 +1,416 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following steps in order to produce `/root/vaxcrate_analysis.json` and `/root/vaxcrate_summary.md`.
+
+## Step 1: Inspect all input files
+
+```bash
+cat /root/campaign_manifest.json
+cat /root/crate_cost.csv
+cat /root/billing.csv
+cat /root/location_overrides.csv
+cat /root/suspensions.csv
+```
+
+Also inspect the verifier:
+```bash
+cat /root/test_outputs.py
+```
+
+## Step 2: Write and run a Python script
+
+Create `/root/solve.py` with the following logic (adapt field names to whatever you see in the actual files):
+
+```python
+import json, csv, math
+from decimal import Decimal, ROUND_HALF_UP
+
+# ---- Load data ----
+with open('"'"'/root/campaign_manifest.json'"'"') as f:
+    manifest = json.load(f)
+
+def load_csv(path):
+    with open(path, newline='"'"''"'"') as f:
+        return list(csv.DictReader(f))
+
+crate_cost_rows = load_csv('"'"'/root/crate_cost.csv'"'"')
+billing_rows = load_csv('"'"'/root/billing.csv'"'"')
+override_rows = load_csv('"'"'/root/location_overrides.csv'"'"')
+suspension_rows = load_csv('"'"'/root/suspensions.csv'"'"')
+
+# ---- Build lookup structures ----
+# Crate cost lookup by tier
+crate_cost_map = {}
+for row in crate_cost_rows:
+    crate_cost_map[row['"'"'crate_tier'"'"'].strip()] = float(row['"'"'crate_cost_usd'"'"'].strip())
+
+# Suspended campaign IDs (hold)
+suspended_ids = set()
+for row in suspension_rows:
+    if row['"'"'suspension_status'"'"'].strip().lower() == '"'"'hold'"'"':
+        suspended_ids.add(row['"'"'campaign_id'"'"'].strip())
+
+# ---- Filter campaigns: analysis_flag == '"'"'review'"'"' and not suspended ----
+campaigns_data = manifest if isinstance(manifest, list) else manifest.get('"'"'campaigns'"'"', manifest.get('"'"'campaign_manifest'"'"', [manifest]))
+# Handle if manifest is a dict with a single campaign or a list
+if isinstance(campaigns_data, dict):
+    # Maybe it'"'"'s keyed by campaign_id or has a '"'"'campaigns'"'"' key
+    if '"'"'campaign_id'"'"' in campaigns_data:
+        campaigns_data = [campaigns_data]
+    else:
+        # Try to find the list
+        for v in campaigns_data.values():
+            if isinstance(v, list):
+                campaigns_data = v
+                break
+
+retained = []
+for c in campaigns_data:
+    if str(c.get('"'"'analysis_flag'"'"', '"'"''"'"')).strip().lower() != '"'"'review'"'"':
+        continue
+    cid = str(c['"'"'campaign_id'"'"']).strip()
+    if cid in suspended_ids:
+        continue
+    retained.append(c)
+
+# ---- Resolve billing rows ----
+# Build map: campaign_name and alias_labels -> campaign_id
+name_to_campaign = {}
+for c in retained:
+    cid = str(c['"'"'campaign_id'"'"']).strip()
+    cname = str(c['"'"'campaign_name'"'"']).strip()
+    name_to_campaign[cname] = cid
+    aliases = c.get('"'"'alias_labels'"'"', [])
+    if isinstance(aliases, str):
+        aliases = [a.strip() for a in aliases.split('"'"','"'"')]
+    for alias in aliases:
+        name_to_campaign[str(alias).strip()] = cid
+
+# Filter active billing rows, map to campaign_id
+billing_by_campaign = {}  # campaign_id -> list of (cycle_tag, row)
+for row in billing_rows:
+    if row['"'"'status'"'"'].strip().lower() != '"'"'active'"'"':
+        continue
+    label = row['"'"'campaign_label'"'"'].strip()
+    cid = name_to_campaign.get(label)
+    if cid is None:
+        continue
+    billing_by_campaign.setdefault(cid, []).append(row)
+
+# Keep latest cycle_tag per campaign
+def cycle_sort_key(row):
+    ct = row['"'"'cycle_tag'"'"'].strip()
+    # Try numeric, then string
+    try:
+        return (0, float(ct))
+    except ValueError:
+        return (1, ct)
+
+billing_selected = {}
+for cid, rows in billing_by_campaign.items():
+    rows_sorted = sorted(rows, key=cycle_sort_key)
+    billing_selected[cid] = rows_sorted[-1]
+
+# ---- Resolve active clinics from location_overrides ----
+override_by_campaign = {}  # campaign_id -> list of valid approved rows
+for row in override_rows:
+    if row['"'"'state'"'"'].strip().lower() != '"'"'approved'"'"':
+        continue
+    rev = row.get('"'"'revision'"'"', '"'"''"'"').strip()
+    ac = row.get('"'"'active_clinics'"'"', '"'"''"'"').strip()
+    if rev == '"'"''"'"' or ac == '"'"''"'"':
+        continue
+    cid = row['"'"'campaign_id'"'"'].strip()
+    override_by_campaign.setdefault(cid, []).append(row)
+
+clinic_override = {}
+for cid, rows in override_by_campaign.items():
+    best = max(rows, key=lambda r: float(r['"'"'revision'"'"'].strip()))
+    clinic_override[cid] = int(float(best['"'"'active_clinics'"'"'].strip()))
+
+# ---- Build per-campaign results ----
+results = []
+for c in retained:
+    cid = str(c['"'"'campaign_id'"'"']).strip()
+    cname = str(c['"'"'campaign_name'"'"']).strip()
+    
+    # Active clinics
+    if cid in clinic_override:
+        active_clinics = clinic_override[cid]
+    else:
+        active_clinics = int(float(c['"'"'default_active_clinics'"'"']))
+    
+    drug_cost_per_1000 = float(c['"'"'drug_cost_per_1000_doses_usd'"'"'])
+    doses_per_day = float(c['"'"'doses_per_day'"'"'])
+    crate_tier = str(c['"'"'crate_tier'"'"']).strip()
+    crate_cost = crate_cost_map[crate_tier]
+    
+    if cid not in billing_selected:
+        continue  # no billing row found
+    payment = float(billing_selected[cid]['"'"'payment_per_dispatch_per_clinic_usd'"'"'].strip())
+    
+    # 6-day model
+    days6 = 6; disp6 = 60
+    rev6 = payment * active_clinics * disp6
+    drug6 = drug_cost_per_1000 * active_clinics * doses_per_day * days6 * disp6 / 1000
+    crate6 = crate_cost * disp6
+    margin6 = rev6 - drug6 - crate6
+    
+    # 12-day model
+    days12 = 12; disp12 = 30
+    rev12 = payment * active_clinics * disp12
+    drug12 = drug_cost_per_1000 * active_clinics * doses_per_day * days12 * disp12 / 1000
+    crate12 = crate_cost * disp12
+    margin12 = rev12 - drug12 - crate12
+    
+    diff = margin12 - margin6
+    
+    results.append({
+        '"'"'campaign_id'"'"': cid,
+        '"'"'campaign_name'"'"': cname,
+        '"'"'active_clinics'"'"': active_clinics,
+        '"'"'drug_cost_per_1000_doses_usd'"'"': round(drug_cost_per_1000, 2),
+        '"'"'doses_per_day'"'"': round(doses_per_day, 2),
+        '"'"'crate_tier'"'"': crate_tier,
+        '"'"'crate_cost_usd'"'"': round(crate_cost, 2),
+        '"'"'payment_per_dispatch_per_clinic_usd'"'"': round(payment, 2),
+        '"'"'annual_drug_cost_6_day_usd'"'"': round(drug6, 2),
+        '"'"'annual_drug_cost_12_day_usd'"'"': round(drug12, 2),
+        '"'"'annual_crate_cost_6_day_usd'"'"': round(crate6, 2),
+        '"'"'annual_crate_cost_12_day_usd'"'"': round(crate12, 2),
+        '"'"'annual_revenue_6_day_usd'"'"': round(rev6, 2),
+        '"'"'annual_revenue_12_day_usd'"'"': round(rev12, 2),
+        '"'"'annual_margin_6_day_usd'"'"': round(margin6, 2),
+        '"'"'annual_margin_12_day_usd'"'"': round(margin12, 2),
+        '"'"'annual_margin_difference_12_minus_6_usd'"'"': round(diff, 2)
+    })
+
+# Sort by campaign_id ascending
+results.sort(key=lambda x: x['"'"'campaign_id'"'"'])
+
+# ---- Totals ----
+total_margin_6 = sum(r['"'"'annual_margin_6_day_usd'"'"'] for r in results)
+total_margin_12 = sum(r['"'"'annual_margin_12_day_usd'"'"'] for r in results)
+total_diff = sum(r['"'"'annual_margin_difference_12_minus_6_usd'"'"'] for r in results)
+abs_diff = abs(total_diff)
+
+# Round totals
+total_margin_6 = round(total_margin_6, 2)
+total_margin_12 = round(total_margin_12, 2)
+total_diff = round(total_diff, 2)
+abs_diff = round(abs_diff, 2)
+
+# Decision
+if abs_diff < 11000:
+    decision = '"'"'move_to_12_day'"'"'
+    justification = f'"'"'Absolute total margin difference ${abs_diff:,.2f} is below the $11,000 threshold, so consolidating to 12-day dispatches is recommended.'"'"'
+else:
+    decision = '"'"'keep_6_day'"'"'
+    justification = f'"'"'Absolute total margin difference ${abs_diff:,.2f} meets or exceeds the $11,000 threshold, so keeping 6-day dispatches is recommended.'"'"'
+
+output = {
+    '"'"'assumptions'"'"': {
+        '"'"'dispatches_per_year_6_day'"'"': 60,
+        '"'"'dispatches_per_year_12_day'"'"': 30,
+        '"'"'days_per_dispatch_6_day'"'"': 6,
+        '"'"'days_per_dispatch_12_day'"'"': 12,
+        '"'"'switch_threshold_usd'"'"': 11000,
+        '"'"'override_rule'"'"': '"'"'highest numeric approved revision with non-empty active_clinics, else default_active_clinics'"'"',
+        '"'"'suspension_rule'"'"': '"'"'exclude hold campaigns'"'"'
+    },
+    '"'"'campaigns'"'"': results,
+    '"'"'totals'"'"': {
+        '"'"'total_annual_margin_6_day_usd'"'"': total_margin_6,
+        '"'"'total_annual_margin_12_day_usd'"'"': total_margin_12,
+        '"'"'total_annual_margin_difference_12_minus_6_usd'"'"': total_diff,
+        '"'"'absolute_total_margin_difference_usd'"'"': abs_diff
+    },
+    '"'"'recommendation'"'"': {
+        '"'"'decision'"'"': decision,
+        '"'"'justification'"'"': justification
+    }
+}
+
+with open('"'"'/root/vaxcrate_analysis.json'"'"', '"'"'w'"'"') as f:
+    json.dump(output, f, indent=2)
+
+print('"'"'JSON written.'"'"')
+print(f'"'"'Campaigns retained: {len(results)}'"'"')
+for r in results:
+    print(f"  {r['"'"'campaign_id'"'"']}: clinics={r['"'"'active_clinics'"'"']}, margin6={r['"'"'annual_margin_6_day_usd'"'"']}, margin12={r['"'"'annual_margin_12_day_usd'"'"']}, diff={r['"'"'annual_margin_difference_12_minus_6_usd'"'"']}")
+print(f'"'"'Total margin 6-day: {total_margin_6}'"'"')
+print(f'"'"'Total margin 12-day: {total_margin_12}'"'"')
+print(f'"'"'Total diff: {total_diff}'"'"')
+print(f'"'"'Abs diff: {abs_diff}'"'"')
+print(f'"'"'Decision: {decision}'"'"')
+
+# ---- Summary ----
+summary_lines = [
+    '"'"'# VaxCrate 6-Day vs 12-Day Dispatch Analysis Summary'"'"',
+    '"'"''"'"',
+    f'"'"'Total 6-day annual margin: ${total_margin_6:,.2f} USD'"'"',
+    f'"'"'Total 12-day annual margin: ${total_margin_12:,.2f} USD'"'"',
+    f'"'"'Absolute margin difference: ${abs_diff:,.2f} USD'"'"',
+    f'"'"'Recommendation: {decision}'"'"',
+]
+
+with open('"'"'/root/vaxcrate_summary.md'"'"', '"'"'w'"'"') as f:
+    f.write('"'"'\n'"'"'.join(summary_lines) + '"'"'\n'"'"')
+
+print('"'"'Summary written.'"'"')
+```
+
+Run it:
+```bash
+python3 /root/solve.py
+```
+
+## Step 3: Inspect outputs and debug
+
+After running, inspect the outputs:
+```bash
+cat /root/vaxcrate_analysis.json
+cat /root/vaxcrate_summary.md
+```
+
+Pay special attention to:
+- Every campaign object MUST include `doses_per_day` and `drug_cost_per_1000_doses_usd` keys (this was a prior failure).
+- The total margin values must be correct. The expected `total_annual_margin_6_day_usd` is approximately `-83406.84`. If your value differs, re-check:
+  - Are all `analysis_flag == '"'"'review'"'"'` campaigns included?
+  - Are suspended (`hold`) campaigns properly excluded?
+  - Is the billing label matching correct (check both `campaign_name` and `alias_labels`)?
+  - Is the location override logic correct (highest numeric revision among approved rows with non-empty revision and active_clinics)?
+  - Is `crate_cost` applied as `crate_cost_usd * dispatches_per_year` (NOT per clinic)?
+  - Verify `annual_crate_cost_6_day_usd = crate_cost_usd * 60` and `annual_crate_cost_12_day_usd = crate_cost_usd * 30`.
+
+## Step 4: Run the verifier
+
+```bash
+cd /root && python3 -m pytest test_outputs.py -v
+```
+
+If any test fails, read the assertion error carefully, fix the issue in `solve.py`, re-run, and re-test. Common pitfalls:
+- Missing JSON keys in campaign objects
+- Wrong clinic count (override vs default)
+- Wrong billing row selected (must be latest cycle_tag among active rows)
+- Crate cost is per-dispatch NOT per-clinic-per-dispatch
+- Numeric precision: use `round(..., 2)` on all currency values
+- Summary must contain the exact slug `move_to_12_day` or `keep_6_day`
+- Summary currency values should use comma formatting like `$-83,406.84`
+
+## Step 5: Iterate until all tests pass
+
+Do not stop until `pytest test_outputs.py` shows all tests passing. If the script logic needs adjustment based on actual file contents (field names, data formats), adapt accordingly after inspecting the files in Step 1.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=gpt54@example.com, author_name=GPT-5.4, category=financial-analysis, difficulty=medium, tags=[vaccination, json, csv, distractor-handling, decision-analysis].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260622-002310-HCBA-seed1023-row3-fixed/jobs/2026-06-22__01-36-38/run-47a463da__G4A4YXb/agent/trajectory.json
