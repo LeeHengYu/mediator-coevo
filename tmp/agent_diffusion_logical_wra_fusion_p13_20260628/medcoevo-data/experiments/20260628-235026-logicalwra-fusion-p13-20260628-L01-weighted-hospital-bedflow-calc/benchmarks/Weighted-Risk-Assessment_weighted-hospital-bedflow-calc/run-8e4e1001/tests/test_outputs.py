@@ -1,6 +1,5 @@
 import csv
 import glob
-import json
 import zipfile
 from pathlib import Path
 
