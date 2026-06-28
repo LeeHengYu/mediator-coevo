@@ -14,6 +14,7 @@ from mediated_coevo.diffusion import (
     TaskGraphSnapshot,
     render_diffusion_subscriptions,
 )
+from mediated_coevo.prompt_text import PromptText
 from mediated_coevo.runtime.token_budget import count_text_tokens
 
 
@@ -192,6 +193,113 @@ async def test_render_diffusion_subscriptions_compacts_overflow_artifact(tmp_pat
     assert record.rendered is True
     assert record.metadata["compacted_for_budget"] is True
     assert record.metadata["diffusion_channel"] == REUSE_SUCCESS_CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_render_diffusion_subscriptions_compacts_selected_set_before_dropping(
+    tmp_path,
+):
+    model = "openrouter/openai/gpt-5.5"
+    store = DiffusionStore(tmp_path / "diffusion")
+    snapshot = TaskGraphSnapshot(
+        snapshot_id="snapshot-1",
+        run_id="run-1",
+        iteration=2,
+        task_ids=["task-a", "task-b", "task-c"],
+        graph_policy="broadcast",
+    )
+    artifacts = [
+        DiffusionArtifact(
+            artifact_id="artifact-1",
+            source_task_id="task-b",
+            source_iteration=1,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="alpha context " * 300,
+        ),
+        DiffusionArtifact(
+            artifact_id="artifact-2",
+            source_task_id="task-c",
+            source_iteration=1,
+            artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            risk_level=DiffusionRiskLevel.LOW,
+            content="beta context " * 300,
+        ),
+    ]
+    subscriptions = [
+        DiffusionSubscription(
+            artifact=artifact,
+            policy_name="capped_broadcast",
+            relation="broadcast",
+            reason="selected_by_test",
+        )
+        for artifact in artifacts
+    ]
+
+    def context_tokens(blocks: list[str]) -> int:
+        joined_blocks = "\n\n".join(blocks)
+        return count_text_tokens(
+            model,
+            PromptText.diffusion_context(
+                DIFFUSED_SECTION_NAME,
+                [f"### Reusable Success Artifacts\n\n{joined_blocks}"],
+            ),
+        )
+
+    first_full_block = PromptText.diffusion_artifact_block(
+        artifact_id="artifact-1",
+        source_task_id="task-b",
+        source_iteration=1,
+        policy_name="capped_broadcast",
+        relation="broadcast",
+        risk_level="low",
+        content=artifacts[0].content,
+    )
+    compacted_blocks = [
+        PromptText.diffusion_artifact_block(
+            artifact_id=artifact.artifact_id,
+            source_task_id=artifact.source_task_id,
+            source_iteration=artifact.source_iteration,
+            policy_name="capped_broadcast",
+            relation="broadcast",
+            risk_level="low",
+            content=f"short hint for {artifact.artifact_id}",
+        )
+        for artifact in artifacts
+    ]
+    max_context_tokens = max(
+        context_tokens([first_full_block]) + 5,
+        context_tokens(compacted_blocks) + 1,
+    )
+
+    async def compact_artifact_content(
+        artifact: DiffusionArtifact,
+        budget_tokens: int,
+    ) -> str:
+        if budget_tokens <= 20:
+            return ""
+        return f"short hint for {artifact.artifact_id}"
+
+    bundle = await render_diffusion_subscriptions(
+        store=store,
+        snapshot=snapshot,
+        model=model,
+        target_task_id="task-a",
+        target_iteration=2,
+        target_run_id="target-run",
+        subscriptions=subscriptions,
+        max_context_tokens=max_context_tokens,
+        compact_artifact_content=compact_artifact_content,
+    )
+
+    assert bundle.text is not None
+    assert bundle.rendered_count == 2
+    assert bundle.source_task_ids == ["task-b", "task-c"]
+    assert bundle.compacted_artifact_ids == ["artifact-1", "artifact-2"]
+    assert bundle.dropped_for_budget_artifact_ids == []
+    assert bundle.budget_violation is False
+    assert "short hint for artifact-1" in bundle.text
+    assert "short hint for artifact-2" in bundle.text
 
 
 @pytest.mark.asyncio

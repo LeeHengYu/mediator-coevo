@@ -73,7 +73,35 @@ async def render_diffusion_subscriptions(
     compacted_artifact_ids: list[str] = []
     dropped_artifact_ids: list[str] = []
 
-    for subscription in subscriptions:
+    compacted_selected_sections = await _compacted_selected_artifact_sections(
+        compact_artifact_content=compact_artifact_content,
+        max_context_tokens=max_context_tokens,
+        model=model,
+        subscriptions=subscriptions,
+    )
+    if compacted_selected_sections is not None:
+        for subscription, rendered_section in zip(
+            subscriptions,
+            compacted_selected_sections,
+            strict=True,
+        ):
+            rendered_sections.append((subscription.context_channel, rendered_section))
+            rendered_subscriptions.append(subscription)
+            rendered_artifact_ids.append(subscription.artifact.artifact_id)
+            compacted_artifact_ids.append(subscription.artifact.artifact_id)
+            _append_rendered_record(
+                store=store,
+                snapshot=snapshot,
+                model=model,
+                target_task_id=target_task_id,
+                target_iteration=target_iteration,
+                target_run_id=target_run_id,
+                subscription=subscription,
+                rendered_section=rendered_section,
+                metadata={"compacted_for_budget": True},
+            )
+
+    for subscription in subscriptions[len(rendered_subscriptions) :]:
         rendered_section = _render_artifact_block(
             subscription.artifact,
             policy_name=subscription.policy_name,
@@ -240,6 +268,92 @@ def _append_rendered_record(
             },
         )
     )
+
+
+async def _compacted_selected_artifact_sections(
+    *,
+    compact_artifact_content: DiffusionArtifactCompactor | None,
+    max_context_tokens: int | None,
+    model: str,
+    subscriptions: list[DiffusionSubscription],
+) -> list[str] | None:
+    if (
+        compact_artifact_content is None
+        or max_context_tokens is None
+        or len(subscriptions) < 2
+    ):
+        return None
+
+    full_sections = [
+        (
+            subscription.context_channel,
+            _render_artifact_block(
+                subscription.artifact,
+                policy_name=subscription.policy_name,
+                relation=subscription.relation,
+            ),
+        )
+        for subscription in subscriptions
+    ]
+    if _sections_fit(model, full_sections, max_context_tokens):
+        return None
+
+    empty_sections = [
+        (
+            subscription.context_channel,
+            _render_artifact_block(
+                subscription.artifact,
+                policy_name=subscription.policy_name,
+                relation=subscription.relation,
+                content="",
+            ),
+        )
+        for subscription in subscriptions
+    ]
+    empty_context_tokens = count_text_tokens(model, _context_text(empty_sections))
+    content_budget = max_context_tokens - empty_context_tokens
+    if content_budget <= 0:
+        return None
+
+    per_artifact_budget = max(1, content_budget // len(subscriptions))
+    compacted_sections: list[str] = []
+    for subscription in subscriptions:
+        try:
+            compacted_content = (
+                await compact_artifact_content(
+                    subscription.artifact,
+                    per_artifact_budget,
+                )
+            ).strip()
+        except Exception as e:
+            logger.warning(
+                "Diffusion artifact compaction failed for %s: %s",
+                subscription.artifact.artifact_id,
+                e,
+            )
+            return None
+        if not compacted_content:
+            return None
+        compacted_sections.append(
+            _render_artifact_block(
+                subscription.artifact,
+                policy_name=subscription.policy_name,
+                relation=subscription.relation,
+                content=compacted_content,
+            )
+        )
+
+    channel_sections = [
+        (subscription.context_channel, rendered_section)
+        for subscription, rendered_section in zip(
+            subscriptions,
+            compacted_sections,
+            strict=True,
+        )
+    ]
+    if _sections_fit(model, channel_sections, max_context_tokens):
+        return compacted_sections
+    return None
 
 
 async def _compacted_artifact_section(
