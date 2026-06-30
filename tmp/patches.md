@@ -126,3 +126,170 @@ Fusion improves the experiment mechanics and verifier-dollar profile:
 - all tasks remain covered.
 
 Fusion does not improve judge quality per row. Mean judge is lower than baseline in aggregate, first-10, and post-warmup views. Judge points per dollar are lower in aggregate but slightly higher post-warmup. The practical conclusion is that adopted `patch 1+3` is a better routing/context-retention setup, but it still needs a judge-quality improvement before it can be called a clear reward-quality improvement.
+
+# Refined WRA And HWPX Family Runs Versus Baselines
+
+Compared runs:
+
+- WRA baseline: `tmp/agent_diffusion_logical_wra_realcost_fresh_20260626`
+- WRA refined: `tmp/agent_diffusion_logical_wra_llmrouter_temp_gpt52_20260630`
+- HWPX baseline: `tmp/agent_diffusion_logical_hwpx_gpt5`
+- HWPX refined: `tmp/agent_diffusion_logical_hwpx_llmrouter_temp_gpt52_20260630`
+
+Refined patch under comparison:
+
+- Add compact GPT-5.2 LLM router packets for scoring diffusion targets.
+- Blend LLM router scores with deterministic signed affinity.
+- Use softmax target activation with temperature `0.35`.
+- Keep the existing logical-iteration rule: iteration `k+1` only consumes artifacts from iteration `k`.
+- Use executor billing cost when Harbor reports it; planner and mediator remain proxy-priced.
+
+The common baseline policy is the earlier logical diffusion batch setup without the GPT-5.2 LLM-router/temp refinement. The family baselines differ by task family, so the cleanest reading is per-family first, then combined.
+
+## WRA Result
+
+| Metric | WRA baseline | WRA refined | Direction |
+| --- | ---: | ---: | --- |
+| Rows | 10 | 10 | equal |
+| Verifier successes | 9/10 | 8/10 | regressed |
+| Scored verifier success rate | 9/10 | 8/9 | slight regression |
+| Env failures | 0 | 1 | regressed |
+| Success rate | 90.0% | 80.0% | regressed |
+| Mean judge | 0.751 | 0.646 | regressed |
+| Tokens | 2.38M | 2.17M | improved |
+| Cost | $5.367 | $4.857 | improved |
+| Cost / success | $0.596 | $0.607 | regressed slightly |
+| Success / $ | 1.677 | 1.647 | regressed slightly |
+| Success / 100k tokens | 0.378 | 0.369 | regressed slightly |
+| Budget violations | 3 | 0 | improved |
+| Dropped artifacts | 3 | 0 | improved |
+
+WRA refined had one environment failure: `weighted-cloud-reliability-calc` at logical iter 1 returned `verifier_reward=None` with `env_failure_count=1`, using only 4,226 tokens and $0.02113. So the aggregate should be read as 8/10 total-row successes, but 8/9 scored-row successes.
+
+WRA conclusion: refined WRA is cleaner operationally and cheaper in total dollars/tokens, but not better on reward. It removed budget violations and dropped artifacts, but lost one total-row verifier success and judge quality fell. Post-warmup is more favorable on efficiency: refined WRA used 19.5% fewer post-warmup tokens, cost 16.7% less, and success per dollar improved by 2.8%. Post-warmup total-row success dropped from 7/7 to 6/7, but excluding the env failure it was 6/6 on scored rows; mean judge still fell from 0.805 to 0.661.
+
+## HWPX Result
+
+HWPX refined ran 12 rows while baseline ran 10. Both views matter:
+
+| Metric | HWPX baseline 10 | HWPX refined first 10 | HWPX refined full 12 |
+| --- | ---: | ---: | ---: |
+| Verifier successes | 7/10 | 8/10 | 10/12 |
+| Success rate | 70.0% | 80.0% | 83.3% |
+| Mean judge | 0.539 | 0.559 | 0.603 |
+| Tokens | 2.07M | 3.57M | 4.19M |
+| Cost | $5.145 | $4.821 | $5.781 |
+| Cost / success | $0.735 | $0.603 | $0.578 |
+| Success / $ | 1.361 | 1.659 | 1.730 |
+| Success / 100k tokens | 0.338 | 0.224 | 0.239 |
+
+HWPX conclusion: refined HWPX is a clear dollar-efficiency and success-rate win. In the first 10 rows, it gets one more success while costing 6.3% less, so cost per success improves by 18.0% and success per dollar improves by 22.0%. In the full 12-row run, cost per success improves by 21.3% versus baseline. The weakness is token efficiency: first-10 refined HWPX uses 72.1% more tokens than baseline, and full refined HWPX uses 102.1% more tokens. This is mostly executor-side prompt/cache churn.
+
+## Token And Cost Shape
+
+| View | Executor token share | Executor cost share | Prompt share | Completion share |
+| --- | ---: | ---: | ---: | ---: |
+| WRA baseline | 95.1% | 95.3% | 94.1% | 5.9% |
+| WRA refined | 95.6% | 95.5% | 94.1% | 5.9% |
+| HWPX baseline | 96.4% | 96.1% | 93.8% | 6.2% |
+| HWPX refined | 97.3% | 95.6% | 97.0% | 3.0% |
+
+The refined patch is not expensive because of the router itself. Router usage was small:
+
+- WRA refined router: 9/9 parsed calls, 19,138 input tokens, 5,179 output tokens.
+- HWPX refined router: 9/9 parsed calls, 18,983 input tokens, 3,995 output tokens.
+
+The main token increase is executor-side. HWPX refined in particular has much more prompt/cache traffic, which raises token count but not dollar cost proportionally because the cost model uses Harbor executor billing where available.
+
+## Patch Assessment
+
+The refined patch improves routing observability and dollar efficiency, especially for HWPX. It also eliminates WRA baseline budget/drop failures. The patch does not uniformly improve reward quality:
+
+- WRA: operationally cleaner and cheaper total run, but reward regressed; one refined WRA row was an env failure rather than a scored verifier failure.
+- HWPX: better success rate, better judge average, and better dollar efficiency, but worse token efficiency.
+- Combined: same first-20 success count at lower dollar cost, but lower judge average and materially higher token usage.
+
+Practical conclusion: keep the refined patch as a cost-efficient routing/context mechanism, but do not call it a token-efficiency improvement. The next patch should target executor token bloat and task-specific failure repair, especially `hwpx-safety-audit-brief` exact risk-tier formatting and WRA reward-quality regression.
+
+# Medical-Data-Standardization LLM-Router Temp Run Versus Same-Code Family Runs
+
+Patch/code under comparison:
+
+- Same adopted `llmrouter_temp_gpt52` mechanism as the refined WRA and HWPX runs: compact GPT-5.2 router packets, deterministic signed-affinity blend, softmax target activation at temperature `0.35`, and logical-iteration isolation.
+- Only the task family configuration/guidance changed for `Medical-Data-Standardization`; no shared infra change was needed.
+- Executor dollar cost uses Harbor billing when available; planner, mediator, judge, and compactor remain proxy-priced.
+
+Compared runs:
+
+- WRA: `tmp/agent_diffusion_logical_wra_llmrouter_temp_gpt52_20260630`
+- HWPX: `tmp/agent_diffusion_logical_hwpx_llmrouter_temp_gpt52_20260630`
+- Medical: `tmp/agent_diffusion_logical_medical_llmrouter_temp_gpt52_20260630`
+
+## Aggregate Result
+
+| Metric | WRA llmrouter_temp | HWPX llmrouter_temp | Medical llmrouter_temp |
+| --- | ---: | ---: | ---: |
+| Rows | 10 | 12 | 12 |
+| Verifier successes | 8/10 | 10/12 | 1/12 |
+| Success rate | 80.0% | 83.3% | 8.3% |
+| Mean verifier reward | 0.800 | 0.833 | 0.083 |
+| Mean judge | 0.646 | 0.603 | 0.215 |
+| Env failures | 1 | 0 | 0 |
+| Total cost | $4.857 | $5.781 | $8.691 |
+| Executor billing cost | $4.639 | $5.525 | $8.369 |
+| Success / $ | 1.647 | 1.730 | 0.115 |
+| Judge points / $ | 1.329 | 1.251 | 0.297 |
+| Total tokens | 2.17M | 4.19M | 4.88M |
+| Tokens / row | 216.7k | 349.2k | 406.3k |
+| Executor token share | 95.6% | 97.3% | 96.1% |
+
+Medical is a clear regression versus both same-code refined family runs. It costs more than WRA and HWPX, uses more total tokens, and gets only one verifier success. The only Medical success was the seed `transplant-panel-alignment-harmonization` row; all diffusion-era Medical rows failed verifier.
+
+## Post-Warmup Result
+
+| Metric | WRA post-warmup | HWPX post-warmup | Medical post-warmup |
+| --- | ---: | ---: | ---: |
+| Rows | 7 | 9 | 9 |
+| Verifier successes | 6/7 | 8/9 | 0/9 |
+| Mean verifier reward | 0.857 | 0.889 | 0.000 |
+| Mean judge | 0.661 | 0.622 | 0.164 |
+| Env failures | 1 | 0 | 0 |
+| Total cost | $3.565 | $4.380 | $6.343 |
+| Executor billing cost | $3.406 | $4.181 | $6.093 |
+| Success / $ | 1.683 | 1.826 | 0.000 |
+| Judge points / $ | 1.299 | 1.278 | 0.233 |
+| Total tokens | 1.54M | 3.26M | 3.78M |
+| Tokens / row | 219.8k | 361.7k | 420.5k |
+
+Post-warmup is the main signal: the Medical router/diffusion loop did not convert any selected artifact into a verifier success. This is worse than flat; it is a practical family mismatch for the adopted patch.
+
+## Medical Row Notes
+
+| Logical iter | Task | Verifier | Judge | Cost | Tokens |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 0 | `icu-metabolic-harmonization` | 0.0 | 0.200 | $1.238 | 369.9k |
+| 0 | `respiratory-panel-json-harmonization` | 0.0 | 0.145 | $0.607 | 434.5k |
+| 0 | `transplant-panel-alignment-harmonization` | 1.0 | 0.760 | $0.503 | 286.1k |
+| 1 | `cardio-panel-template-harmonization` | 0.0 | 0.140 | $0.471 | 153.0k |
+| 1 | `electrolyte-rounding-harmonization` | 0.0 | 0.145 | $0.348 | 156.7k |
+| 1 | `respiratory-panel-json-harmonization` | 0.0 | 0.185 | $0.595 | 213.4k |
+| 2 | `hepatic-panel-harmonization` | 0.0 | 0.145 | $0.311 | 292.3k |
+| 2 | `neonatal-sepsis-harmonization` | 0.0 | 0.180 | $0.805 | 290.5k |
+| 2 | `thyroid-monitoring-harmonization` | 0.0 | 0.200 | $2.367 | 1.87M |
+| 3 | `cardio-panel-template-harmonization` | 0.0 | 0.200 | $0.635 | 376.9k |
+| 3 | `electrolyte-rounding-harmonization` | 0.0 | 0.145 | $0.364 | 195.4k |
+| 3 | `respiratory-panel-json-harmonization` | 0.0 | 0.140 | $0.447 | 236.1k |
+
+Anomalies and mechanics:
+
+- No Medical env failures: all 12 rows completed as valid runs.
+- The Medical run skipped `oncology-followup-dedup-harmonization`.
+- `thyroid-monitoring-harmonization` was the major cost outlier: 1.87M total tokens, $2.367 total cost, $2.340 executor billing, and verifier `0.0`.
+- Router overhead was not the main cost driver. Executor tokens were 96.1% of all Medical tokens; the extra cost came from executor-side task solving.
+- The run recorded 9/9 parsed LLM-router calls, 0 fallbacks, 2 negative-transfer flags, 1 quorum candidate activation, and over-exploitation flagged at max target share 0.333.
+
+## Conclusion
+
+The adopted `llmrouter_temp_gpt52` patch generalizes well to WRA/HWPX relative to dollar efficiency, but it does not generalize to `Medical-Data-Standardization` in this 12-row iteration. Medical has much lower reward, worse judge quality, higher total cost, and worse token use than both same-code refined family runs.
+
+The failure mode is not infrastructure. It is task-family fit: the selected artifacts did not teach the executor enough about exact medical harmonization contracts such as numeric normalization, per-value unit conversion, required CSV shape, missing-row filtering, and header/order constraints. The next Medical-specific patch should target executor-facing contract repair and token containment, not another router-only change.
