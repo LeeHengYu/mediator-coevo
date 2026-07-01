@@ -145,6 +145,10 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "executor_cache_read_tokens": trace_metadata.get(
             "executor_session_cache_read_tokens"
         ),
+        "executor_reported_cost_usd": trace_metadata.get("agent_result.cost_usd"),
+        "executor_reported_cost_source": trace_metadata.get(
+            "executor_reported_cost_source"
+        ),
         "task_resource_count": trace_metadata.get("task_resource_count"),
         "task_resource_names": trace_metadata.get("task_resource_names"),
         "verifier_contract_kind": trace_metadata.get("verifier_contract_kind"),

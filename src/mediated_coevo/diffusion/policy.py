@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import random
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from math import exp
+import random
 from typing import Any
 
 from mediated_coevo.core.selection import deterministic_seed
@@ -28,6 +30,31 @@ class DiffusionSubscription:
     reason: str
     metadata: dict[str, Any] = field(default_factory=dict)
     context_channel: str = REUSE_SUCCESS_CHANNEL
+
+
+@dataclass(frozen=True)
+class LLMRouterSoftmaxDecision:
+    """Audit payload for one source-artifact softmax activation."""
+
+    source_artifact_id: str
+    source_task_id: str
+    target_task_id: str
+    target_iteration: int
+    policy_name: str
+    random_marker: float
+    selection_seed: int
+    selected_probability: float
+    selected_similarity_index: float
+    candidate_distribution: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class LLMRouterSoftmaxRoute:
+    """A selected source artifact routed to one activated target task."""
+
+    target_task_id: str
+    subscription: DiffusionSubscription
+    decision: LLMRouterSoftmaxDecision
 
 
 def select_capped_broadcast_subscriptions(
@@ -129,6 +156,116 @@ def select_random_k_subscriptions(
     ]
 
 
+def select_llm_router_softmax_routes(
+    *,
+    eligible_artifacts: list[DiffusionArtifact],
+    snapshot: TaskGraphSnapshot,
+    target_task_ids: list[str],
+    target_iteration: int,
+    top_k_candidates: int,
+    temperature: float,
+    seed: int | None,
+    router_scores: Mapping[tuple[str, str], Mapping[str, Any]],
+    router_weight: float = 0.0,
+    router_model: str | None = None,
+) -> list[LLMRouterSoftmaxRoute]:
+    """Route each source artifact to a single LLM-scored target.
+
+    This implements the logical-batch checkpoint used by the tmp WRA runs:
+    each source contributes at most one selected transfer target. Candidates
+    without parsed LLM router scores are not eligible.
+    """
+    if top_k_candidates <= 0 or temperature <= 0:
+        return []
+
+    routes: list[LLMRouterSoftmaxRoute] = []
+    source_artifacts = _best_artifact_per_source(
+        [
+            artifact
+            for artifact in eligible_artifacts
+            if diffusion_channel_for_artifact(artifact) is not None
+        ],
+        artifact_type_priority=_SOFTMAX_ARTIFACT_TYPE_PRIORITY,
+    )
+    for artifact in source_artifacts:
+        candidates = _softmax_candidates_for_source(
+            artifact=artifact,
+            snapshot=snapshot,
+            target_task_ids=target_task_ids,
+            router_scores=router_scores,
+            router_weight=router_weight,
+            router_model=router_model,
+        )
+        if not candidates:
+            continue
+        candidates = sorted(
+            candidates,
+            key=lambda item: (-float(item["similarity_index"]), item["target_task_id"]),
+        )[:top_k_candidates]
+        distribution = _softmax_distribution(candidates, temperature=temperature)
+        selection_seed = deterministic_seed(
+            seed or 0,
+            "llm_router_softmax",
+            target_iteration,
+            artifact.artifact_id,
+            ",".join(item["target_task_id"] for item in distribution),
+        )
+        marker = random.Random(selection_seed).random()
+        selected = distribution[-1]
+        cumulative = 0.0
+        for item in distribution:
+            cumulative += float(item["probability"])
+            if marker <= cumulative:
+                selected = item
+                break
+        channel = diffusion_channel_for_artifact(artifact)
+        if channel is None:
+            continue
+        subscription = DiffusionSubscription(
+            artifact=artifact,
+            policy_name="llm_router_softmax",
+            relation=str(selected["relation"]),
+            reason="selected_by_llm_router_softmax",
+            metadata={
+                "selection_seed": selection_seed,
+                "softmax_temperature": temperature,
+                "softmax_top_k_candidates": top_k_candidates,
+                "selected_target_task_id": selected["target_task_id"],
+                "selected_probability": selected["probability"],
+                "selected_similarity_index": selected["similarity_index"],
+                "candidate_distribution": distribution,
+                **(
+                    {
+                        "router_model": router_model,
+                        "router_weight_cap": router_weight,
+                    }
+                    if router_model
+                    else {}
+                ),
+            },
+            context_channel=channel,
+        )
+        routes.append(
+            LLMRouterSoftmaxRoute(
+                target_task_id=str(selected["target_task_id"]),
+                subscription=subscription,
+                decision=LLMRouterSoftmaxDecision(
+                    source_artifact_id=artifact.artifact_id,
+                    source_task_id=artifact.source_task_id,
+                    target_task_id=str(selected["target_task_id"]),
+                    target_iteration=target_iteration,
+                    policy_name="llm_router_softmax",
+                    random_marker=marker,
+                    selection_seed=selection_seed,
+                    selected_probability=float(selected["probability"]),
+                    selected_similarity_index=float(selected["similarity_index"]),
+                    candidate_distribution=distribution,
+                ),
+            )
+        )
+    return routes
+
+
 def _seeded_sample(
     *,
     artifact_pool: list[DiffusionArtifact],
@@ -161,6 +298,136 @@ def _selection_seed(
         ",".join(artifact.artifact_id for artifact in artifact_pool),
     )
     return route_seed
+
+
+def _softmax_candidates_for_source(
+    *,
+    artifact: DiffusionArtifact,
+    snapshot: TaskGraphSnapshot,
+    target_task_ids: list[str],
+    router_scores: Mapping[tuple[str, str], Mapping[str, Any]],
+    router_weight: float,
+    router_model: str | None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for target_task_id in target_task_ids:
+        if target_task_id == artifact.source_task_id:
+            continue
+        router_payload = router_scores.get((artifact.artifact_id, target_task_id))
+        if router_payload is None:
+            continue
+        deterministic, relation, components = _softmax_deterministic_score(
+            artifact=artifact,
+            snapshot=snapshot,
+            target_task_id=target_task_id,
+        )
+        confidence = _clamped_float(router_payload.get("confidence"), 0.0, 1.0)
+        weight = max(0.0, min(1.0, router_weight * confidence))
+        llm_signed = (2.0 * _clamped_float(router_payload.get("score"), 0.0, 1.0)) - 1.0
+        similarity_index = _clamped_signed(
+            ((1.0 - weight) * deterministic) + (weight * llm_signed)
+        )
+        components = {
+            **components,
+            "deterministic_similarity_index": deterministic,
+            "llm_router_score": router_payload.get("score"),
+            "llm_router_confidence": confidence,
+            "llm_router_weight": weight,
+            "llm_router_rationale": router_payload.get("rationale") or "",
+            **({"router_model": router_model} if router_model else {}),
+        }
+        candidates.append(
+            {
+                "target_task_id": target_task_id,
+                "similarity_index": similarity_index,
+                "relation": relation,
+                "score_components": components,
+            }
+        )
+    return candidates
+
+
+def _softmax_deterministic_score(
+    *,
+    artifact: DiffusionArtifact,
+    snapshot: TaskGraphSnapshot,
+    target_task_id: str,
+) -> tuple[float, str, dict[str, Any]]:
+    edge = _edge_record(
+        snapshot=snapshot,
+        source_task_id=artifact.source_task_id,
+        target_task_id=target_task_id,
+    )
+    if edge is None:
+        graph_score = 0.0
+        relation = "llm_router_no_graph_edge"
+        edge_weight = None
+    else:
+        edge_weight = edge.weight
+        graph_score = _clamped_signed((2.0 * edge.weight) - 1.0)
+        relation = edge.relation
+    reward = _reward_score(artifact)
+    reward_adjustment = 0.0 if reward < 0 else 0.15 * ((2.0 * reward) - 1.0)
+    artifact_type_adjustment = {
+        DiffusionArtifactType.RUN_OUTCOME: 0.05,
+        DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY: 0.03,
+        DiffusionArtifactType.DEBUG_HINT: 0.0,
+        DiffusionArtifactType.OTHER: -0.03,
+    }.get(artifact.artifact_type, 0.0)
+    score = _clamped_signed(graph_score + reward_adjustment + artifact_type_adjustment)
+    return (
+        score,
+        relation,
+        {
+            "graph_score": graph_score,
+            "edge_weight": edge_weight,
+            "reward_score": reward,
+            "reward_adjustment": reward_adjustment,
+            "artifact_type_adjustment": artifact_type_adjustment,
+        },
+    )
+
+
+def _edge_record(
+    *,
+    snapshot: TaskGraphSnapshot,
+    source_task_id: str,
+    target_task_id: str,
+) -> TaskGraphEdgeRecord | None:
+    for edge in snapshot.edge_records:
+        if (
+            edge.source_task_id == source_task_id
+            and edge.target_task_id == target_task_id
+        ):
+            return edge
+    return None
+
+
+def _softmax_distribution(
+    candidates: list[dict[str, Any]],
+    *,
+    temperature: float,
+) -> list[dict[str, Any]]:
+    max_score = max(float(item["similarity_index"]) for item in candidates)
+    weights = [
+        exp((float(item["similarity_index"]) - max_score) / temperature)
+        for item in candidates
+    ]
+    total = sum(weights)
+    return [
+        {**item, "probability": weight / total}
+        for item, weight in zip(candidates, weights, strict=True)
+    ]
+
+
+def _clamped_signed(value: float) -> float:
+    return max(-1.0, min(1.0, float(value)))
+
+
+def _clamped_float(value: Any, minimum: float, maximum: float) -> float:
+    if not isinstance(value, (int, float)):
+        return minimum
+    return max(minimum, min(maximum, float(value)))
 
 
 def select_top_k_similarity_subscriptions(
@@ -448,4 +715,11 @@ _AVOID_RECHECK_ARTIFACT_TYPE_PRIORITY = {
     DiffusionArtifactType.DEBUG_HINT: 2,
     DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY: 3,
     DiffusionArtifactType.OTHER: 4,
+}
+
+_SOFTMAX_ARTIFACT_TYPE_PRIORITY = {
+    DiffusionArtifactType.RUN_OUTCOME: 0,
+    DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY: 1,
+    DiffusionArtifactType.DEBUG_HINT: 2,
+    DiffusionArtifactType.OTHER: 3,
 }

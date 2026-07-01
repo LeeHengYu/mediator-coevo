@@ -489,7 +489,11 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
         json.dumps(
             {
                 "id": "trial-1",
-                "agent_result": {"n_input_tokens": 7, "n_output_tokens": 3},
+                "agent_result": {
+                    "n_input_tokens": 7,
+                    "n_output_tokens": 3,
+                    "cost_usd": 0.123,
+                },
             }
         )
     )
@@ -513,6 +517,11 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
     assert trace.run_id == "job-1"
     assert trace.harbor_trial_id == "trial-1"
     assert trace.harbor_metadata["reward_source"] == "job_stats"
+    assert trace.harbor_metadata["agent_result.cost_usd"] == "0.123"
+    assert (
+        trace.harbor_metadata["executor_reported_cost_source"]
+        == "harbor_agent_result"
+    )
     assert trace.token_usage.input_tokens == 7
     assert trace.token_usage.output_tokens == 3
 

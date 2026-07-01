@@ -20,9 +20,11 @@ from .models import (
 from .policy import (
     AVOID_RECHECK_CHANNEL,
     DiffusionSubscription,
+    LLMRouterSoftmaxRoute,
     REUSE_SUCCESS_CHANNEL,
     diffusion_channel_for_artifact,
     select_capped_broadcast_subscriptions,
+    select_llm_router_softmax_routes,
     select_random_k_subscriptions,
     select_top_k_similarity_subscriptions,
 )
@@ -43,6 +45,7 @@ __all__ = [
     "DiffusionNetwork",
     "DiffusionContextBundle",
     "DiffusionSubscription",
+    "LLMRouterSoftmaxRoute",
     "REUSE_SUCCESS_CHANNEL",
     "DiffusedRecord",
     "DiffusionStore",
@@ -51,6 +54,7 @@ __all__ = [
     "emit_diffusion_artifacts",
     "render_diffusion_subscriptions",
     "select_capped_broadcast_subscriptions",
+    "select_llm_router_softmax_routes",
     "select_random_k_subscriptions",
     "select_top_k_similarity_subscriptions",
     "GraphBuildSpec",

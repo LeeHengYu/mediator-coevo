@@ -146,6 +146,8 @@ def test_metric_row_reports_executor_cache_read_as_audit_only():
     record.execution_trace.harbor_metadata = {
         "executor_token_source": "hermes_session",
         "executor_session_cache_read_tokens": "303",
+        "agent_result.cost_usd": "0.123",
+        "executor_reported_cost_source": "harbor_agent_result",
     }
 
     row = metric_row(record)
@@ -156,6 +158,8 @@ def test_metric_row_reports_executor_cache_read_as_audit_only():
     assert row["total_tokens"] == 123
     assert row["executor_token_source"] == "hermes_session"
     assert row["executor_cache_read_tokens"] == "303"
+    assert row["executor_reported_cost_usd"] == "0.123"
+    assert row["executor_reported_cost_source"] == "harbor_agent_result"
 
 
 def test_score_summary_excludes_coevolution_records_and_writes_json(tmp_path):

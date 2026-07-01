@@ -122,6 +122,19 @@ Current diffusion policy values:
 - `top_k_similarity`: render eligible artifacts from the strongest incoming
   graph neighbors for the target task, capped by `diffusion.max_artifacts` and
   `diffusion.top_k_neighbors`.
+- `llm_router_softmax`: use a logical-batch scheduler. Seed tasks run first;
+  each source artifact from logical iteration `k` sends a compact router packet
+  to `diffusion.llm_router_model`, blends the parsed router score with
+  deterministic graph/reward affinity using `diffusion.llm_router_weight`, then
+  samples one target through `diffusion.softmax_temperature` and activates only
+  LLM-scored targets for iteration `k+1`.
+
+For `llm_router_softmax`, iteration `0` is a seed exploration batch and does
+not consume diffusion context. Later logical iterations consume only artifacts
+from the immediately previous logical iteration. If the router call fails or
+returns no parsed score for a source-target pair, that pair is not eligible; no
+local fallback route is created. A task is dropped from activation if it would
+exceed `diffusion.consecutive_iteration_limit` consecutive logical iterations.
 
 The graph precompute command scores directed SkillFlow edge candidates using
 family rankings, metadata, task resources, output shape, and instruction text.
@@ -133,6 +146,34 @@ When `medcoevo run` starts with `diffusion.enabled = true` and
 `diffusion.graph` set to `task_similarity` or `precomputed_similarity`, it
 materializes run-local graph artifacts under `task-graph/` using the configured
 local SkillFlow task cache and the default edge threshold `0.05`.
+
+### Logical-Router Patch Provenance
+
+The logical softmax policies came from the WRA progression archived under
+`tmp/agent_diffusion_logical_wra_realcost_fresh_20260626`,
+`tmp/agent_diffusion_logical_wra_fusion_p13_20260628`, and
+`tmp/agent_diffusion_logical_wra_llmrouter_temp_gpt52_20260630`.
+
+The adopted infra changes are:
+
+- selected transfer artifacts are compacted as a set before budget-driven
+  drops;
+- active logical iterations consume only artifacts from the immediately
+  previous logical iteration;
+- `llm_router_softmax` uses compact GPT-5.2 router packets, blends router
+  scores with deterministic signed affinity, and samples target activation with
+  `diffusion.softmax_temperature`;
+- executor dollar cost uses Harbor-reported `agent_result.cost_usd` when
+  present, while planner, mediator, judge, compactor, and fallback executor
+  estimates remain proxy-priced in downstream analysis.
+
+The run evidence is mixed. Patch `1+3` removed WRA context drops and improved
+post-warmup cost per activated row, but WRA judge quality per row regressed.
+The later LLM-router/temp patch improved HWPX success rate and dollar
+efficiency, made WRA operationally cleaner but not higher reward, and did not
+generalize to the Medical family. Treat these policies as routing and
+observability mechanisms; reward-quality claims still need family-level
+validation.
 
 ### Skill Update Paths
 
@@ -193,13 +234,16 @@ alone.
 - `uv`
 - Harbor CLI on `PATH`
 - Docker for local Harbor execution
-- `OPENROUTER_API_KEY` for planner, mediator, judge, and the default Hermes executor
+- `OPENROUTER_API_KEY` for planner, mediator, judge, the optional
+  `llm_router_softmax` router, and any executor agent configured to route
+  through OpenRouter
 
-MedCoevo runs SkillFlow tasks through Harbor's `hermes` agent by default.
-`executor_runtime.agent_name` can select another Harbor agent such as
-`claude-code`, and `executor_runtime.agent_env` can pass agent-specific
-environment variables. Local Harbor subprocesses deliberately drop
-`OPENAI_API_KEY` so the default Hermes path routes through `OPENROUTER_API_KEY`.
+MedCoevo runs SkillFlow tasks through the Harbor agent configured in
+`executor_runtime.agent_name`; the repo default is currently `claude-code`.
+`executor_runtime.agent_env` passes agent-specific environment variables.
+The default config routes Claude-compatible executor traffic through
+OpenRouter by setting `ANTHROPIC_AUTH_TOKEN=${OPENROUTER_API_KEY}` and
+`ANTHROPIC_BASE_URL=https://openrouter.ai/api`.
 
 ## Quick Start
 
@@ -242,6 +286,22 @@ uv run medcoevo run \
   --diffusion-policy top_k_similarity \
   --diffusion-graph task_similarity \
   --run-id all-wra-top-k-similarity
+```
+
+Run one family with the logical softmax batch scheduler:
+
+```bash
+uv run medcoevo run \
+  --family Weighted-Risk-Assessment \
+  --iterations 4 \
+  --condition no_feedback \
+  --skill-updates none \
+  --coevo-interval 99 \
+  --advisor-buffer-max 99 \
+  --diffusion-enabled \
+  --diffusion-policy llm_router_softmax \
+  --diffusion-graph task_similarity \
+  --run-id wra-llm-router-softmax
 ```
 
 Or set those parameters in `config/default.toml`
@@ -582,7 +642,8 @@ Diffusion output includes:
 - `diffusion/graph_snapshots/*.json`: per-iteration graph snapshots used for
   artifact selection.
 - `diffusion/diffused_records.jsonl`: audit ledger for eligible, selected, and
-  rendered artifact routes.
+  rendered artifact routes. Softmax policies also write not-selected candidate
+  rows with candidate probabilities and selected-target metadata.
 
 Executor policy observability fields in `metrics.jsonl`:
 
@@ -611,6 +672,14 @@ Diffusion observability fields in `metrics.jsonl`:
 - `reward_after_diffusion_context` and `regression_after_diffusion_context`
   when rendered diffusion context was present.
 
+Executor cost provenance fields in `metrics.jsonl`:
+
+- `executor_reported_cost_usd` and `executor_reported_cost_source` when Harbor
+  exposes an executor billing cost in `agent_result.cost_usd`.
+- Token totals remain separately reported in `prompt_tokens_by_agent`,
+  `completion_tokens_by_agent`, `total_tokens_by_agent`, and
+  `executor_cache_read_tokens`.
+
 ## Configuration
 
 Default configuration lives in:
@@ -627,7 +696,7 @@ The current config controls:
 - skill update and validation defaults;
 - diffusion emission, selection, and graph-routing settings;
 - local output and benchmark paths;
-- Hermes/Harbor runtime settings;
+- Harbor executor runtime settings;
 - SkillFlow dataset synchronization settings.
 
 CLI options override the loaded config for a single run. The resolved config is
@@ -646,7 +715,7 @@ max_same_task_prior_tokens = 300
 max_transfer_context_tokens = 900
 trace_excerpt_tokens = 6000
 historical_summary_tokens = 3000
-mediator_report_tokens = 4000
+mediator_report_tokens = 1200
 planner_context_tokens = 24000
 
 [diffusion]
@@ -654,19 +723,30 @@ enabled = false
 policy = "none"
 graph = "none"
 max_artifacts = 3
-top_k_neighbors = 3
+top_k_neighbors = 5
+avoid_recheck_max_artifacts = 1
+softmax_temperature = 0.35
+softmax_top_k_candidates = 3
+llm_router_model = "openrouter/openai/gpt-5.2"
+llm_router_weight = 0.30
+logical_seed_count = 3
+consecutive_iteration_limit = 2
 
 [paths]
 benchmarks_dir = "benchmarks/skillflow"
 
 [executor_runtime]
 task_dirs = ["tasks"]
-agent_name = "hermes"
-agent_env = {}
+agent_name = "claude-code"
 sync_enabled = false
 dataset = "zhang-ziao/SkillFlow-Task"
 dataset_repo_type = "dataset"
-harbor_agent_setup_timeout_multiplier = 3.0
+harbor_agent_setup_timeout_multiplier = 2.0
+
+[executor_runtime.agent_env]
+ANTHROPIC_API_KEY = ""
+ANTHROPIC_AUTH_TOKEN = "${OPENROUTER_API_KEY}"
+ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
 
 [experiment.skill_validation]
 sample_size = 3

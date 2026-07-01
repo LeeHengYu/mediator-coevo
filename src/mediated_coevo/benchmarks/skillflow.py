@@ -1215,10 +1215,12 @@ def _harbor_metadata(result_json: dict[str, Any]) -> dict[str, str]:
     if model_info.get("name") is not None:
         metadata["agent_info.model_name"] = str(model_info["name"])
     agent_result = as_mapping(result_json.get("agent_result"))
-    for key in ("agent", "model", "duration_sec"):
+    for key in ("agent", "model", "duration_sec", "cost_usd"):
         value = agent_result.get(key)
         if value is not None:
             metadata[f"agent_result.{key}"] = str(value)
+    if agent_result.get("cost_usd") is not None:
+        metadata["executor_reported_cost_source"] = "harbor_agent_result"
     return metadata
 
 

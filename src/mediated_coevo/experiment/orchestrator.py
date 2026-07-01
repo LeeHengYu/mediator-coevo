@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,11 +33,13 @@ from mediated_coevo.diffusion import (
     DiffusionArtifact,
     DiffusionStore,
     DiffusionSubscription,
+    LLMRouterSoftmaxRoute,
     TaskGraphSnapshot,
     diffusion_channel_for_artifact,
     emit_diffusion_artifacts,
     render_diffusion_subscriptions,
     select_capped_broadcast_subscriptions,
+    select_llm_router_softmax_routes,
     select_random_k_subscriptions,
     select_top_k_similarity_subscriptions,
 )
@@ -172,6 +175,7 @@ class Orchestrator:
         self._diffusion_prepared_iterations: set[int] = set()
         self._diffusion_snapshot_by_iteration: dict[int, TaskGraphSnapshot] = {}
         self._diffusion_target_task_ids: list[str] = []
+        self._logical_task_run_iterations: dict[str, list[int]] = {}
 
     async def run_experiment(
         self,
@@ -181,6 +185,11 @@ class Orchestrator:
         """Run the full experiment loop."""
         if num_iterations is None:
             num_iterations = self.config.experiment.num_iterations
+        if self._uses_logical_batch_scheduler():
+            return await self._run_logical_batch_experiment(
+                task_ids,
+                num_iterations,
+            )
         records: list[IterationRecord] = []
         selection = self.config.experiment.benchmark_selection
         self._diffusion_target_task_ids = list(task_ids)
@@ -224,6 +233,133 @@ class Orchestrator:
             len(records),
         )
         return records
+
+    async def _run_logical_batch_experiment(
+        self,
+        task_ids: list[str],
+        num_iterations: int,
+    ) -> list[IterationRecord]:
+        """Run activated logical batches for source-to-target diffusion policies."""
+        records: list[IterationRecord] = []
+        selection = self.config.experiment.benchmark_selection
+        self._diffusion_target_task_ids = list(task_ids)
+        self._diffusion_sub_board.clear()
+        self._diffusion_prepared_iterations.clear()
+        self._diffusion_snapshot_by_iteration.clear()
+        self._logical_task_run_iterations.clear()
+        self.executor_skill_gate.validation_task_pool = [
+            *selection.tasks,
+            *task_ids,
+        ]
+
+        active_task_ids = self._logical_seed_task_ids(task_ids)
+        for iteration in range(num_iterations):
+            self._release_staged_cross_task_reports()
+            if not active_task_ids:
+                logger.info(
+                    "Logical batch stopped: no active tasks at iteration %d",
+                    iteration,
+                )
+                break
+
+            for task_id in active_task_ids:
+                logger.info(
+                    "=== Logical iteration %d/%d | Task: %s ===",
+                    iteration + 1,
+                    num_iterations,
+                    task_id,
+                )
+                record = await self._run_iteration(task_id, iteration)
+                self._record_logical_task_run(task_id, iteration)
+                records.append(record)
+                self._snapshot_and_write_metrics(iteration, [record])
+
+            coevolution_record: IterationRecord | None = None
+            if (iteration + 1) % self.config.experiment.coevo_interval == 0:
+                coevolution_record = await self._coevolve(
+                    iteration,
+                    self.config.experiment.condition_name,
+                )
+                self._snapshot_and_write_metrics(
+                    iteration,
+                    [],
+                    coevolution_record=coevolution_record,
+                )
+
+            if iteration + 1 >= num_iterations:
+                break
+            active_task_ids = await self._logical_next_active_task_ids(
+                all_task_ids=task_ids,
+                next_iteration=iteration + 1,
+            )
+
+        logger.info(
+            "Logical batch experiment complete: %d records across %d max iterations",
+            len(records),
+            num_iterations,
+        )
+        return records
+
+    def _uses_logical_batch_scheduler(self) -> bool:
+        return (
+            self.config.diffusion.enabled
+            and self.config.diffusion.policy == "llm_router_softmax"
+        )
+
+    def _logical_seed_task_ids(self, task_ids: list[str]) -> list[str]:
+        seed_count = min(self.config.diffusion.logical_seed_count, len(task_ids))
+        if seed_count >= len(task_ids):
+            return list(task_ids)
+        return random.Random(self.config.experiment.seed).sample(task_ids, seed_count)
+
+    def _record_logical_task_run(self, task_id: str, iteration: int) -> None:
+        self._logical_task_run_iterations.setdefault(task_id, []).append(iteration)
+
+    async def _logical_next_active_task_ids(
+        self,
+        *,
+        all_task_ids: list[str],
+        next_iteration: int,
+    ) -> list[str]:
+        await self._prepare_diffusion_subscriptions(
+            target_task_id=all_task_ids[0],
+            current_iteration=next_iteration,
+        )
+        active = {
+            task_id
+            for iteration, task_id in self._diffusion_sub_board
+            if iteration == next_iteration
+        }
+        for task_id in list(active):
+            if self._would_make_too_many_consecutive_runs(task_id, next_iteration):
+                self._diffusion_sub_board.pop((next_iteration, task_id), None)
+                active.remove(task_id)
+
+        return sorted(active, key=self._logical_task_order_key)
+
+    def _logical_task_order_key(self, task_id: str) -> tuple[int, int, str]:
+        return (
+            self._logical_task_run_count(task_id),
+            self._logical_task_last_seen(task_id),
+            task_id,
+        )
+
+    def _logical_task_run_count(self, task_id: str) -> int:
+        return len(self._logical_task_run_iterations.get(task_id, []))
+
+    def _logical_task_last_seen(self, task_id: str) -> int:
+        return max(self._logical_task_run_iterations.get(task_id, []), default=-999)
+
+    def _would_make_too_many_consecutive_runs(
+        self,
+        task_id: str,
+        next_iteration: int,
+    ) -> bool:
+        limit = self.config.diffusion.consecutive_iteration_limit
+        return all(
+            iteration in self._logical_task_run_iterations.get(task_id, [])
+            for iteration in range(next_iteration - limit, next_iteration)
+        )
 
     def _release_staged_cross_task_reports(self) -> None:
         """Promote cross-task reports only at iteration boundaries."""
@@ -783,8 +919,11 @@ class Orchestrator:
             or current_iteration is None
         ):
             return None
+        if policy_name == "llm_router_softmax" and current_iteration == 0:
+            self._record_empty_diffusion_context(task_id, current_iteration)
+            return None
 
-        self._prepare_diffusion_subscriptions(
+        await self._prepare_diffusion_subscriptions(
             target_task_id=task_id,
             current_iteration=current_iteration,
         )
@@ -851,7 +990,7 @@ class Orchestrator:
             condition_name=self.config.experiment.condition_name,
         )
 
-    def _prepare_diffusion_subscriptions(
+    async def _prepare_diffusion_subscriptions(
         self,
         *,
         target_task_id: str,
@@ -883,6 +1022,16 @@ class Orchestrator:
         )
         self._diffusion_store.store_graph_snapshot(snapshot, overwrite=True)
         self._diffusion_snapshot_by_iteration[current_iteration] = snapshot
+
+        if self.config.diffusion.policy == "llm_router_softmax":
+            await self._prepare_llm_router_softmax_subscriptions(
+                target_task_ids=target_task_ids,
+                current_iteration=current_iteration,
+                artifacts=artifacts,
+                snapshot=snapshot,
+            )
+            self._diffusion_prepared_iterations.add(current_iteration)
+            return
 
         for target_id in target_task_ids:
             eligible_artifacts = [
@@ -916,6 +1065,201 @@ class Orchestrator:
                 )
 
         self._diffusion_prepared_iterations.add(current_iteration)
+
+    async def _prepare_llm_router_softmax_subscriptions(
+        self,
+        *,
+        target_task_ids: list[str],
+        current_iteration: int,
+        artifacts: list[DiffusionArtifact],
+        snapshot: TaskGraphSnapshot,
+    ) -> None:
+        source_artifacts = [
+            artifact
+            for artifact in artifacts
+            if artifact.source_iteration == current_iteration - 1
+        ]
+        router_scores = await self._llm_router_scores(
+            artifacts=source_artifacts,
+            target_task_ids=target_task_ids,
+            snapshot=snapshot,
+            current_iteration=current_iteration,
+        )
+        routes = select_llm_router_softmax_routes(
+            eligible_artifacts=source_artifacts,
+            snapshot=snapshot,
+            target_task_ids=target_task_ids,
+            target_iteration=current_iteration,
+            top_k_candidates=self.config.diffusion.softmax_top_k_candidates,
+            temperature=self.config.diffusion.softmax_temperature,
+            seed=self.config.experiment.seed,
+            router_scores=router_scores,
+            router_weight=self.config.diffusion.llm_router_weight,
+            router_model=self.config.diffusion.llm_router_model,
+        )
+        routes_by_target: dict[str, list[LLMRouterSoftmaxRoute]] = {}
+        for route in routes:
+            routes_by_target.setdefault(route.target_task_id, []).append(route)
+            self._record_llm_router_softmax_decision(route, snapshot=snapshot)
+
+        for target_id, target_routes in routes_by_target.items():
+            selected_routes = sorted(
+                target_routes,
+                key=lambda route: (
+                    -route.decision.selected_similarity_index,
+                    route.subscription.artifact.artifact_id,
+                ),
+            )[: self.config.diffusion.max_artifacts]
+            subscriptions = [route.subscription for route in selected_routes]
+            if not subscriptions:
+                continue
+            self._record_prepared_diffusion_context(
+                target_id,
+                current_iteration,
+                snapshot=snapshot,
+                eligible_count=len(
+                    [
+                        artifact
+                        for artifact in source_artifacts
+                        if artifact.source_task_id != target_id
+                    ]
+                ),
+                subscriptions=subscriptions,
+            )
+            self._diffusion_sub_board[(current_iteration, target_id)] = subscriptions
+
+    async def _llm_router_scores(
+        self,
+        *,
+        artifacts: list[DiffusionArtifact],
+        target_task_ids: list[str],
+        snapshot: TaskGraphSnapshot,
+        current_iteration: int,
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        scores: dict[tuple[str, str], dict[str, Any]] = {}
+        for artifact in artifacts:
+            packet = self._llm_router_packet(
+                artifact=artifact,
+                target_task_ids=target_task_ids,
+                snapshot=snapshot,
+            )
+            if not packet["candidates"]:
+                continue
+            try:
+                result = await self.mediator.llm_client.complete(
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Score source-to-target transfer fit. Return only "
+                                "JSON: {\"scores\":[{\"target\":\"...\","
+                                "\"score\":0.0,\"confidence\":0.0,"
+                                "\"rationale\":\"...\"}]}. Values are in [0,1]."
+                            ),
+                        },
+                        {"role": "user", "content": json.dumps(packet, sort_keys=True)},
+                    ],
+                    model=self.config.diffusion.llm_router_model,
+                    max_tokens=900,
+                    temperature=0.0,
+                    budget_label="diffusion.llm_router",
+                    condition_name=self.config.experiment.condition_name,
+                )
+            except Exception as exc:  # pragma: no cover - network/provider path
+                logger.warning(
+                    "LLM router failed for source artifact %s at iteration %d: %s",
+                    artifact.artifact_id,
+                    current_iteration,
+                    exc,
+                )
+                continue
+            for target_id, row in _parse_router_scores(result["content"]).items():
+                scores[(artifact.artifact_id, target_id)] = row
+        return scores
+
+    def _llm_router_packet(
+        self,
+        *,
+        artifact: DiffusionArtifact,
+        target_task_ids: list[str],
+        snapshot: TaskGraphSnapshot,
+    ) -> dict[str, Any]:
+        return {
+            "source": {
+                "artifact_id": artifact.artifact_id,
+                "task": artifact.source_task_id,
+                "source_iteration": artifact.source_iteration,
+                "verifier_reward": artifact.verifier_reward,
+                "judge_reward": artifact.judge_reward,
+                "artifact_type": artifact.artifact_type.value,
+                "risk_level": artifact.risk_level.value,
+                "content": _truncate_router_text(artifact.content, 1600),
+            },
+            "candidates": [
+                {
+                    "target": target_id,
+                    "edge_weight": _edge_weight(snapshot, artifact.source_task_id, target_id),
+                }
+                for target_id in target_task_ids
+                if target_id != artifact.source_task_id
+            ],
+            "instruction": (
+                "Prefer concrete contract/formula reuse and failure prevention. "
+                "Penalize noun-copy risk, circular reuse, and unrelated targets."
+            ),
+        }
+
+    def _record_llm_router_softmax_decision(
+        self,
+        route: LLMRouterSoftmaxRoute,
+        *,
+        snapshot: TaskGraphSnapshot,
+    ) -> None:
+        selected_target = route.target_task_id
+        for candidate in route.decision.candidate_distribution:
+            target_id = str(candidate["target_task_id"])
+            if target_id == selected_target:
+                continue
+            artifact = route.subscription.artifact
+            self._diffusion_store.append_diffused_record(
+                DiffusedRecord(
+                    artifact_id=artifact.artifact_id,
+                    source_task_id=artifact.source_task_id,
+                    source_iteration=artifact.source_iteration,
+                    source_run_id=artifact.source_run_id,
+                    target_task_id=target_id,
+                    target_iteration=route.decision.target_iteration,
+                    snapshot_id=snapshot.snapshot_id,
+                    policy_name=route.subscription.policy_name,
+                    relation=str(candidate.get("relation") or "candidate"),
+                    reason="softmax_candidate_not_selected",
+                    eligible=True,
+                    selected=False,
+                    rendered=False,
+                    verifier_reward=artifact.verifier_reward,
+                    judge_reward=artifact.judge_reward,
+                    success=(
+                        None
+                        if artifact.verifier_reward is None
+                        else artifact.verifier_reward == 1.0
+                    ),
+                    regression=True
+                    if artifact.metadata.get("regression") is True
+                    else None,
+                    metadata={
+                        "artifact_type": artifact.artifact_type.value,
+                        "risk_level": artifact.risk_level.value,
+                        "diffusion_channel": route.subscription.context_channel,
+                        "candidate_probability": candidate.get("probability"),
+                        "candidate_similarity_index": candidate.get(
+                            "similarity_index"
+                        ),
+                        "selected_target_task_id": selected_target,
+                        "selection_seed": route.decision.selection_seed,
+                        "random_marker": route.decision.random_marker,
+                    },
+                )
+            )
 
     def _select_diffusion_subscriptions(
         self,
@@ -1192,6 +1536,8 @@ class Orchestrator:
             self._diffusion_snapshot_by_iteration = {}
         if not hasattr(self, "_diffusion_target_task_ids"):
             self._diffusion_target_task_ids = []
+        if not hasattr(self, "_logical_task_run_iterations"):
+            self._logical_task_run_iterations = {}
 
     async def _coevolve(
         self,
@@ -2024,6 +2370,68 @@ class Orchestrator:
             if llm_client is not None and hasattr(llm_client, "drain_token_events"):
                 events.extend(llm_client.drain_token_events())
         return events
+
+
+def _parse_router_scores(content: str) -> dict[str, dict[str, Any]]:
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if match is None:
+            return {}
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {}
+    rows = payload.get("scores") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    parsed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        target = row.get("target")
+        score = row.get("score")
+        if not isinstance(target, str) or not isinstance(score, (int, float)):
+            continue
+        confidence = row.get("confidence", 0.0)
+        parsed[target] = {
+            "score": max(0.0, min(1.0, float(score))),
+            "confidence": max(
+                0.0,
+                min(
+                    1.0,
+                    float(confidence) if isinstance(confidence, (int, float)) else 0.0,
+                ),
+            ),
+            "rationale": _truncate_router_text(str(row.get("rationale") or ""), 420),
+        }
+    return parsed
+
+
+def _truncate_router_text(text: str, limit: int) -> str:
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 20)] + " ...[truncated]"
+
+
+def _edge_weight(
+    snapshot: TaskGraphSnapshot,
+    source_task_id: str,
+    target_task_id: str,
+) -> float | None:
+    for edge in snapshot.edge_records:
+        if (
+            edge.source_task_id == source_task_id
+            and edge.target_task_id == target_task_id
+        ):
+            return edge.weight
+    return None
 
 
 def _valid_planner_reflection_candidates(

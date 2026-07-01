@@ -42,6 +42,12 @@ def test_factory_persisted_config_omits_none_values_for_toml(tmp_path):
     assert saved["diffusion"]["max_artifacts"] == 3
     assert saved["diffusion"]["top_k_neighbors"] == 3
     assert saved["diffusion"]["avoid_recheck_max_artifacts"] == 1
+    assert saved["diffusion"]["softmax_temperature"] == 1.0
+    assert saved["diffusion"]["softmax_top_k_candidates"] == 3
+    assert saved["diffusion"]["llm_router_model"] == "openrouter/openai/gpt-5.2"
+    assert saved["diffusion"]["llm_router_weight"] == 0.3
+    assert saved["diffusion"]["logical_seed_count"] == 3
+    assert saved["diffusion"]["consecutive_iteration_limit"] == 2
     assert saved["experiment"]["skill_updates"] == {
         "executor": True,
         "planner": True,
