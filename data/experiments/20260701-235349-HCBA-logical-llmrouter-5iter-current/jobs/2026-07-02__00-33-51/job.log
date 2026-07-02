@@ -1,0 +1,231 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+## Task: Healthcare Cost-Benefit Analysis — diagpanel_14v28
+
+You must produce two output files by reading and combining data from seven input files. Follow these steps precisely.
+
+### Step 1: Read all input files
+
+```bash
+cat /root/panel_manifest.json
+cat /root/shipper_cost.csv
+cat /root/contract_terms.csv
+cat /root/network_adjustments.csv
+cat /root/lab_capacity_overrides.csv
+cat /root/holdouts.json
+cat /root/report_template.json
+```
+
+Study every file carefully before writing any code.
+
+### Step 2: Write and run a Python script
+
+Create `/root/solve.py` that does the following:
+
+1. **Load all inputs** — use `json.load` for `.json` files, `csv.DictReader` for `.csv` files.
+
+2. **Filter panels** — From `panel_manifest.json`, keep only panels where `analysis_mode == "review"`.
+
+3. **Apply holdouts** — Remove any panel whose `panel_code` appears in `holdouts.json` with `holdout_state == "exclude"`.
+
+4. **Resolve contract terms** — For each retained panel, find matching rows in `contract_terms.csv` where `panel_ref` equals either the panel'"'"'s `panel_name` OR any entry in the panel'"'"'s `alias_labels` list. Among matches, keep only rows where `status_flag == "current"`. If multiple current rows match the same panel, keep the one with the latest `effective_week` (compare as strings if ISO-like, or parse as dates). Extract `base_payment_per_run_per_lab_usd` (convert to float).
+
+5. **Network adjustments** — Load `network_adjustments.csv`. For each panel, look up `network_adjustment_per_run_per_lab_usd` by matching the panel'"'"'s `network_tier`. If the tier is not found, use `0.0`. Convert to float.
+
+6. **Lab capacity overrides** — Load `lab_capacity_overrides.csv`. Filter to rows where `approval == "approved"`. Then discard rows where `rev` is blank/empty or `active_labs` is blank/empty. For each `panel_code`, keep the row with the highest numeric `rev`. The `active_labs` from that row (as int) is the override. If no valid override row exists for a panel, use `default_active_labs` from `panel_manifest.json` (as int).
+
+7. **Shipper cost** — Load `shipper_cost.csv`. For each panel, match by `shipper_class` to get `shipper_cost_usd` (float).
+
+8. **Compute per-panel metrics** (all floats, round to 2 decimals at the end):
+   - `total_payment_per_run_per_lab_usd = base_payment_per_run_per_lab_usd + network_adjustment_per_run_per_lab_usd`
+   - 14-day model: `runs_per_year = 26`, use `tests_per_lab_per_run_14_day`
+   - 28-day model: `runs_per_year = 13`, use `tests_per_lab_per_run_28_day`
+   - `annual_revenue = total_payment_per_run_per_lab_usd * active_labs * runs_per_year`
+   - `annual_reagent_cost = reagent_cost_per_1000_tests_usd * active_labs * tests_per_lab_per_run * runs_per_year / 1000`
+   - `annual_shipper_cost = shipper_cost_usd * runs_per_year`  (Note: shipper cost is per shipment, one shipment per run — verify from the data whether shipper_cost_usd is already annual or per-run. If the CSV has a single cost value per shipper_class, treat it as cost per run, so annual = shipper_cost_usd * runs_per_year.)
+   - `annual_margin = annual_revenue - annual_reagent_cost - annual_shipper_cost`
+   - `annual_margin_difference_28_minus_14 = annual_margin_28_day - annual_margin_14_day`
+
+   **IMPORTANT**: Double-check the shipper cost formula. Re-read the task: it says "Annual margin formula: annual_revenue - annual_reagent_cost - annual_shipper_cost". The shipper_cost_usd from the CSV is likely per-shipment. So `annual_shipper_cost = shipper_cost_usd * runs_per_year`. But inspect the data first — if the numbers seem like annual figures already, use them directly. Use your judgment based on the magnitude of the values.
+
+9. **Round** all currency fields to 2 decimal places.
+
+10. **Sort** the panels list by `panel_code` ascending.
+
+11. **Totals**:
+    - `total_annual_margin_14_day_usd = sum of all panels'"'"' annual_margin_14_day_usd`
+    - `total_annual_margin_28_day_usd = sum of all panels'"'"' annual_margin_28_day_usd`
+    - `total_annual_margin_difference_28_minus_14_usd = total_28 - total_14`
+    - `absolute_total_margin_difference_usd = abs(total_difference)`
+    - Round all to 2 decimals.
+
+12. **Decision**:
+    - If `absolute_total_margin_difference_usd < 6000`, decision = `"adopt_28_day"`
+    - Otherwise, decision = `"keep_14_day"`
+    - Justification: a brief string explaining the decision referencing the threshold and the absolute difference.
+
+13. **Build output JSON** — Load `report_template.json`. Preserve its `metadata` and `audit_notes` exactly as-is. Build the `analysis` section with the schema specified. Write to `/root/diagpanel_policy_report.json` with `json.dump(..., indent=2)`.
+
+14. **Build summary markdown** — Write `/root/diagpanel_policy_summary.md` with 4–8 non-empty lines including:
+    - Total 14-day margin (USD)
+    - Total 28-day margin (USD)
+    - Absolute difference (USD)
+    - Final decision slug (`adopt_28_day` or `keep_14_day`)
+    - Format currency values with 2 decimal places using f-strings on float values (not strings).
+
+### Step 3: Run the script
+
+```bash
+python3 /root/solve.py
+```
+
+### Step 4: Validate outputs
+
+```bash
+python3 -c "
+import json
+with open('"'"'/root/diagpanel_policy_report.json'"'"') as f:
+    d = json.load(f)
+assert '"'"'metadata'"'"' in d
+assert '"'"'audit_notes'"'"' in d
+assert '"'"'analysis'"'"' in d
+assert '"'"'panels'"'"' in d['"'"'analysis'"'"']
+assert '"'"'totals'"'"' in d['"'"'analysis'"'"']
+assert '"'"'recommendation'"'"' in d['"'"'analysis'"'"']
+assert len(d['"'"'analysis'"'"']['"'"'panels'"'"']) > 0
+for p in d['"'"'analysis'"'"']['"'"'panels'"'"']:
+    assert isinstance(p['"'"'annual_margin_14_day_usd'"'"'], float)
+    assert isinstance(p['"'"'annual_margin_28_day_usd'"'"'], float)
+    assert isinstance(p['"'"'active_labs'"'"'], int)
+print('"'"'JSON schema OK'"'"')
+print('"'"'Panels:'"'"', [p['"'"'panel_code'"'"'] for p in d['"'"'analysis'"'"']['"'"'panels'"'"']])
+print('"'"'Decision:'"'"', d['"'"'analysis'"'"']['"'"'recommendation'"'"']['"'"'decision'"'"'])
+print('"'"'Total diff:'"'"', d['"'"'analysis'"'"']['"'"'totals'"'"']['"'"'total_annual_margin_difference_28_minus_14_usd'"'"'])
+print('"'"'Abs diff:'"'"', d['"'"'analysis'"'"']['"'"'totals'"'"']['"'"'absolute_total_margin_difference_usd'"'"'])
+"
+
+cat /root/diagpanel_policy_summary.md
+```
+
+Check that:
+- All currency values are floats rounded to 2 decimals (not strings)
+- `active_labs` is int
+- Panels are sorted by `panel_code` ascending
+- `metadata` and `audit_notes` match the template exactly
+- The summary has 4–8 non-empty lines and contains the required information with the exact decision slug
+- The decision logic uses `abs(total_difference) < 6000` (strict less-than)
+
+If anything fails, debug and fix before finishing.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=gpt54@example.com, author_name=GPT-5.4, category=financial-analysis, difficulty=medium, tags=[diagnostics, json, csv, template-update, decision-analysis].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260701-235349-HCBA-logical-llmrouter-5waves-current/jobs/2026-07-02__00-33-51/run-020693f7__yWosRFm/agent/trajectory.json
