@@ -269,6 +269,13 @@ class DiffusionNetwork:
         )
         snapshot_metadata.setdefault("p20_threshold", pairwise_artifact.p20_threshold)
         snapshot_metadata.setdefault("threshold_kind", pairwise_artifact.threshold_kind)
+        snapshot_metadata.setdefault(
+            "task_profiles",
+            {
+                task_id: node.profile.model_dump(mode="json")
+                for task_id, node in self._nodes_by_task_id.items()
+            },
+        )
         return snapshot_metadata
 
     def _require_built(self) -> None:
@@ -412,4 +419,3 @@ def _copy_adj_list(
     task_ids: Sequence[str],
 ) -> dict[str, list[TaskGraphEdgeRecord]]:
     return {task_id: list(adjacency[task_id]) for task_id in task_ids}
-
