@@ -1,0 +1,222 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following Python script to produce `/root/safety_audit_brief_final.hwpx`.
+
+```python
+import json
+import zipfile
+import os
+import shutil
+import re
+from lxml import etree
+
+# ── paths ──
+BASE = '"'"'/root'"'"'
+TEMPLATE = os.path.join(BASE, '"'"'safety_audit_template.hwpx'"'"')
+OVERVIEW_JSON = os.path.join(BASE, '"'"'audit_overview.json'"'"')
+ACTIONS_JSON = os.path.join(BASE, '"'"'corrective_actions.json'"'"')
+OUTPUT = os.path.join(BASE, '"'"'safety_audit_brief_final.hwpx'"'"')
+WORK = os.path.join(BASE, '"'"'_hwpx_work'"'"')
+
+# ── load JSON data ──
+with open(OVERVIEW_JSON, '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+    overview = json.load(f)
+with open(ACTIONS_JSON, '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+    actions = json.load(f)
+
+print('"'"'=== overview ==='"'"')
+print(json.dumps(overview, ensure_ascii=False, indent=2))
+print('"'"'=== corrective_actions ==='"'"')
+print(json.dumps(actions, ensure_ascii=False, indent=2))
+
+# ── severity mapping ──
+SEVERITY_MAP = {'"'"'High'"'"': '"'"'즉시조치'"'"', '"'"'Medium'"'"': '"'"'계획보완'"'"', '"'"'Low'"'"': '"'"'모니터링'"'"'}
+
+# ── extract template ──
+if os.path.exists(WORK):
+    shutil.rmtree(WORK)
+os.makedirs(WORK)
+with zipfile.ZipFile(TEMPLATE, '"'"'r'"'"') as zf:
+    zf.extractall(WORK)
+
+# ── find all XML files inside the package ──
+xml_files = []
+for root, dirs, files in os.walk(WORK):
+    for fname in files:
+        if fname.endswith('"'"'.xml'"'"'):
+            xml_files.append(os.path.join(root, fname))
+
+print('"'"'\n=== XML files in package ==='"'"')
+for xf in xml_files:
+    print(xf)
+
+# ── read & display section*.xml content to understand placeholders ──
+for xf in xml_files:
+    if '"'"'section'"'"' in os.path.basename(xf).lower() or '"'"'content'"'"' in os.path.basename(xf).lower():
+        print(f'"'"'\n=== Content of {xf} ==='"'"')
+        with open(xf, '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+            print(f.read())
+```
+
+After the first script finishes, **read its output carefully** to understand:
+- The JSON data fields and values
+- The XML structure and all `{{...}}` placeholders
+- The namespace prefixes used
+- The structure of `<hp:p>`, `<hp:t>`, and `<hp:lineSegArray>` (or `<hp:linesegarray>`) elements
+
+Then write and execute a second, complete Python script that does the following:
+
+### Step 1: Build replacement map
+- From `audit_overview.json`, map each `{{placeholder}}` to its value. For the inspection date field, reformat from `YYYY-MM-DD` to `YYYY.MM.DD`.
+- For the risk tier field, append the severity note: e.g., if risk tier is `High`, the replacement text becomes `High 즉시조치`. Apply this mapping using the SEVERITY_MAP.
+- From `corrective_actions.json`, map each corrective-action placeholder to its value, preserving the order from the JSON array.
+- The date reformatting (`YYYY-MM-DD` → `YYYY.MM.DD`) must apply to ALL occurrences of any date in that format, not just the overview field.
+
+### Step 2: For each XML file in the package, apply replacements
+Use this proven pattern for HWPX placeholder replacement:
+
+1. Parse the XML with `lxml.etree` (preserve namespaces).
+2. For every `<hp:p>` element (find all paragraph elements using the correct namespace):
+   a. Collect all `<hp:t>` descendant elements in document order.
+   b. Concatenate their `.text` values to form the full paragraph text.
+   c. Check if the concatenated text contains any `{{` placeholder or any replacement target.
+   d. If it does, apply all replacements (string substitutions) to the concatenated text.
+   e. Also apply the date reformat regex (`(\d{4})-(\d{2})-(\d{2})` → `\1.\2.\3`) to the result.
+   f. Set the first `<hp:t>` element'"'"'s `.text` to the fully replaced string.
+   g. Set all remaining `<hp:t>` elements'"'"' `.text` to `'"'"''"'"'` (empty string).
+   h. **Remove any `<hp:linesegarray>` child element** (case-insensitive local name match) from this `<hp:p>`. Iterate over all direct children and also use namespace-aware search. Remove elements whose local name (lowercased) is `linesegarray` or matches `lineSegArray` or `linesegarray` in any namespace.
+3. Also scan paragraphs that don'"'"'t have placeholders but whose concatenated text contains a date in `YYYY-MM-DD` format, and apply the date reformat + layout cache removal to those as well.
+4. Also scan paragraphs whose text contains the risk tier string, and ensure the severity note is appended if not already present, plus layout cache removal.
+
+### Step 3: Write back the XML and repackage
+- Write each modified XML back with `etree.tostring(..., xml_declaration=True, encoding='"'"'UTF-8'"'"', standalone=True)` or match the original declaration.
+- Repackage the entire working directory into a new `.hwpx` ZIP file at the output path using `zipfile.ZipFile` with `ZIP_DEFLATED` compression.
+- Preserve the original directory structure inside the ZIP (paths relative to the work directory root).
+
+### Step 4: Validate
+- Open the output `.hwpx` as a ZIP and confirm it'"'"'s valid.
+- Parse each XML file inside and confirm:
+  - No `{{` or `}}` text remains anywhere.
+  - No `<hp:linesegarray>` (any case) elements exist in any paragraph that was modified.
+  - All dates are in `YYYY.MM.DD` format (no `YYYY-MM-DD` remaining).
+  - The risk tier has the severity note appended.
+- Print all validation results.
+
+### Critical details
+- **Layout cache removal is the #1 failure point.** For EVERY `<hp:p>` whose text you modify (placeholder replacement, date reformat, or severity note addition), you MUST remove ALL child elements whose local name (case-insensitive) is `linesegarray`. Use both `element.findall()` with namespace and also iterate `list(p_element)` checking `etree.QName(child).localname.lower() == '"'"'linesegarray'"'"'`.
+- Use the actual namespace URI from the XML (inspect the root element'"'"'s `nsmap`) rather than hardcoding.
+- Handle the case where `<hp:t>` text might be `None`.
+- Do NOT modify section titles or row labels—only fill value cells and apply the date/severity transformations.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260703-095745-final-hwpx-kimi25-row0-none-3iter-runtimefix2/jobs/2026-07-03__13-19-53/run-e13a2bb9__WVshY5g/agent/trajectory.json

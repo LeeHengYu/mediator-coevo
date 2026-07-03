@@ -1,0 +1,179 @@
+# Task Instruction
+
+Complete the following task to prepare a warehouse safety audit brief from a HWPX template.
+
+## Goal
+Fill the template `safety_audit_template.hwpx` with data from `audit_overview.json` and `corrective_actions.json`, then save the result to `/root/safety_audit_brief_final.hwpx`.
+
+## Step-by-step Instructions
+
+### Step 1: Explore the workspace and understand the inputs
+1. List all files in the task directory: `find /root -maxdepth 3 -type f | head -60`
+2. Read `audit_overview.json` and `corrective_actions.json` completely. Note all field names and values.
+3. Examine the HWPX template structure:
+   - HWPX is a ZIP package. Copy it and unzip: `cp safety_audit_template.hwpx /tmp/template.zip && cd /tmp && mkdir hwpx_extracted && cd hwpx_extracted && unzip ../template.zip`
+   - List all extracted files: `find /tmp/hwpx_extracted -type f`
+   - Read every XML file inside, especially files under `Contents/` (likely `section0.xml` or similar). These contain the document body with `{{placeholder}}` markers.
+   - Also check for files like `content.hpf`, `header.xml`, `Preview/`, etc.
+
+### Step 2: Identify all placeholders and layout-cache elements
+1. Search for all `{{` occurrences across all XML files: `grep -rn '{{' /tmp/hwpx_extracted/`
+2. Make a complete list of every placeholder found (e.g., `{{facility_name}}`, `{{inspection_date}}`, `{{risk_tier}}`, corrective action placeholders, etc.)
+3. Search for layout-cache or char-position elements. In HWPX XML, these are typically `<hp:linesegarray>` or `<hp:lineSegArray>` elements (or similar names like `<lineseg>`, `<hp:lineSeg>`). Search: `grep -rni 'lineseg\|lineseg\|charPr\|layoutcache\|cache' /tmp/hwpx_extracted/Contents/`
+4. Understand the XML namespace and element structure by reading the section XML files carefully.
+
+### Step 3: Build the replacement mapping
+From the JSON data, build the complete set of replacements:
+- Map each overview field from `audit_overview.json` to its corresponding `{{placeholder}}`.
+- Map each corrective action from `corrective_actions.json` (in order) to the corresponding placeholders in the three corrective-action lines.
+- For the **inspection date**: convert from `YYYY-MM-DD` format to `YYYY.MM.DD` format (replace hyphens with dots). Apply this to EVERY occurrence of the date in the document.
+- For the **risk tier**: replace EVERY occurrence. After each risk tier value, append a severity note using this mapping:
+  - `High` → ` 즉시조치`
+  - `Medium` → ` 계획보완`
+  - `Low` → ` 모니터링`
+  So if risk tier is `High`, every place it appears should read `High 즉시조치` (with a space before the Korean text).
+
+### Step 4: Write a Python script to perform all modifications
+Write a Python script (`/tmp/fill_template.py`) that:
+1. Copies the template HWPX to a working location.
+2. Unzips it.
+3. For each XML file in the package (especially section XML files under `Contents/`):
+   a. Reads the XML content as text.
+   b. Performs all placeholder replacements. **IMPORTANT**: Placeholders might be split across multiple XML inline elements (e.g., `<hp:t>{{facility</hp:t><hp:t>_name}}</hp:t>`). To handle this:
+      - First, try simple string replacement on the raw XML text for each `{{placeholder}}`.
+      - After replacements, verify no `{{` remains. If any do, you need to concatenate adjacent text runs, do the replacement, then split back. A robust approach: for each paragraph element, extract all text content, perform replacements on the concatenated text, then put the result back into the first text run and clear the others.
+   c. Removes layout-cache elements (`<hp:linesegarray>...</hp:linesegarray>` or equivalent) from any paragraph whose text content was modified. Use XML parsing (lxml or ElementTree) for this step to be safe. The element name variations to look for include: `linesegarray`, `lineSegArray`, `lineseg`, `lineSeg`. Remove the entire element and its children.
+   d. Writes the modified XML back.
+4. Re-zips everything back into a valid HWPX package at `/root/safety_audit_brief_final.hwpx`, preserving the original directory structure and using the same compression method.
+5. Verifies:
+   - No `{{` remains in any XML file in the output package.
+   - The date appears in `YYYY.MM.DD` format (not `YYYY-MM-DD`).
+   - The risk tier has the severity note appended.
+   - The file is a valid ZIP.
+
+### Step 5: Execute and validate
+1. Run the Python script: `python3 /tmp/fill_template.py`
+2. Verify the output:
+   - `unzip -l /root/safety_audit_brief_final.hwpx` to confirm valid ZIP structure.
+   - `mkdir /tmp/verify && cd /tmp/verify && unzip /root/safety_audit_brief_final.hwpx`
+   - `grep -rn '{{' /tmp/verify/` — must return nothing.
+   - `grep -rni 'YYYY-MM-DD\|the original date in YYYY-MM-DD format' /tmp/verify/` — must return nothing (replace with actual date value).
+   - Inspect the section XML to confirm:
+     - All overview fields are filled.
+     - Corrective actions appear in the correct order.
+     - Risk tier has severity note everywhere it appears.
+     - Date is in `YYYY.MM.DD` format everywhere.
+     - Section titles and row labels are preserved.
+     - No `linesegarray` or equivalent layout-cache elements remain in modified paragraphs.
+
+### Critical Details
+- **Placeholder splitting**: HWPX XML often splits text across multiple `<hp:t>` elements within a `<hp:run>` or `<hp:r>` inside a `<hp:p>` (paragraph). Your script MUST handle this. The safest approach: for each paragraph, collect all text nodes, join them, check if the joined text contains any placeholder, and if so, replace in the joined text, put result in first text node, and empty the rest.
+- **Namespace handling**: HWPX XML uses namespaces (e.g., `hp:`, `hc:`, etc.). When using ElementTree, register namespaces before parsing to avoid namespace prefix changes in output. Use `ET.register_namespace()` for all namespaces found in the XML files.
+- **ZIP recreation**: When creating the output HWPX, use `zipfile.ZipFile` with `ZIP_DEFLATED` compression. Walk the extracted directory and add files with their relative paths matching the original structure. Ensure `mimetype` file (if present) is stored first and uncompressed (like EPUB/ODF conventions), though HWPX may not require this — check the original ZIP for the compression method of each entry and replicate it.
+- **Encoding**: Write XML files as UTF-8.
+- **Do NOT modify section titles or row labels** — only fill placeholder values and apply the specified transformations.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

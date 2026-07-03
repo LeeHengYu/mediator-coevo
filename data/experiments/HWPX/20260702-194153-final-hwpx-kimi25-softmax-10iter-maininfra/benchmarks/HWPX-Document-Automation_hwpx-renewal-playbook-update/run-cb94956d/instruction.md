@@ -1,0 +1,326 @@
+# Task Instruction
+
+Execute the following steps to produce `/root/renewal_playbook_updated.hwpx`.
+
+### 1 – Inspect the workspace
+```bash
+ls /root/
+ls /root/HWPX-Document-Automation/hwpx-renewal-playbook-update/
+```
+Identify the exact paths of `renewal_playbook.hwpx`, `renewal_update.json`, and `followups.csv`.
+
+### 2 – Examine the source data
+```bash
+cat <path>/renewal_update.json
+cat <path>/followups.csv
+```
+Note every field name/value pair in the JSON (customer name, current owner, renewal window, pricing band, escalation contact, pricing note). Note the CSV columns and the `sequence` column that determines ordering.
+
+### 3 – Explore the HWPX package
+```python
+import zipfile, os
+with zipfile.ZipFile('<path>/renewal_playbook.hwpx') as z:
+    z.printdir()
+    # Extract to a temp dir for inspection
+    z.extractall('/tmp/hwpx_orig')
+```
+Read `Contents/section0.xml` (and any other section files) to understand the XML structure and namespaces. Identify:
+- All paragraphs containing old field values (customer name, owner, renewal window, pricing band, escalation contact, pricing note).
+- The three existing follow-up lines and how they are structured.
+- The appendix sentence `이 부록 문단은 그대로 유지해야 합니다.` — confirm its location.
+- Layout-cache elements such as `<hp:lineSegArray>`, `<hp:lineseg>`, or similar that live inside paragraph elements.
+
+### 4 – Write and run the update script
+Create a Python script `/tmp/update_hwpx.py` that does the following:
+
+```python
+import zipfile, json, csv, copy, os, shutil
+from lxml import etree
+
+# --- Paths (adjust after step 1) ---
+SRC = '<path>/renewal_playbook.hwpx'
+JSON_PATH = '<path>/renewal_update.json'
+CSV_PATH = '<path>/followups.csv'
+OUT = '/root/renewal_playbook_updated.hwpx'
+TMP_DIR = '/tmp/hwpx_work'
+
+# --- Load update data ---
+with open(JSON_PATH) as f:
+    updates = json.load(f)
+with open(CSV_PATH, newline='', encoding='utf-8') as f:
+    reader = csv.DictReader(f)
+    followups = sorted(reader, key=lambda r: int(r['sequence']))
+
+# --- Extract ---
+if os.path.exists(TMP_DIR):
+    shutil.rmtree(TMP_DIR)
+with zipfile.ZipFile(SRC) as z:
+    z.extractall(TMP_DIR)
+
+# --- Parse section XML ---
+section_path = os.path.join(TMP_DIR, 'Contents', 'section0.xml')
+tree = etree.parse(section_path)
+root = tree.getroot()
+nsmap = root.nsmap  # capture all namespaces
+
+# Register every namespace so serialization preserves prefixes
+for prefix, uri in nsmap.items():
+    if prefix:  # skip default ns
+        etree.register_namespace(prefix, uri)
+    else:
+        etree.register_namespace('', uri)
+
+# --- Helper: extract full text of a paragraph element ---
+def para_text(para):
+    return ''.join(para.itertext())
+
+# --- Helper: replace text inside a paragraph's text runs ---
+def replace_in_para(para, old, new):
+    """Walk all text-bearing elements; replace `old` with `new`."""
+    changed = False
+    for elem in para.iter():
+        if elem.text and old in elem.text:
+            elem.text = elem.text.replace(old, new)
+            changed = True
+        if elem.tail and old in elem.tail:
+            elem.tail = elem.tail.replace(old, new)
+            changed = True
+    return changed
+
+# --- Helper: remove layout cache from a paragraph ---
+def remove_layout_cache(para):
+    """Remove lineSegArray or similar layout-cache children."""
+    ns_hp = nsmap.get('hp') or nsmap.get(None)
+    for tag_local in ['lineSegArray', 'lineSeg', 'linesegarray', 'lineseg']:
+        for child in para.findall(f'.//{{{ns_hp}}}{tag_local}'):
+            child.getparent().remove(child)
+    # Also try without namespace
+    for child in list(para):
+        local = etree.QName(child).localname
+        if local.lower() in ('linesegarray', 'lineseg'):
+            para.remove(child)
+
+# --- Build old→new replacement map from JSON ---
+# The JSON keys may be like "customer_name", "current_owner", etc.
+# We need the OLD values from the existing document and the NEW values from JSON.
+# Strategy: search section XML text for JSON values that should be NEW,
+# but first we must know the OLD values. The JSON likely contains both
+# or the old values are discoverable from the document.
+# Inspect the JSON structure carefully — it may have {"field": {"old":..., "new":...}}
+# or just new values while old values are in the document.
+
+# >>> Adapt this section after inspecting the actual JSON structure <<<
+# If JSON has flat new-values only, discover old values from the document text.
+
+all_paras = root.findall(f'.//{{{nsmap.get("hp", nsmap.get(None))}}}p') or list(root.iter())
+# Fallback: find all <p> or paragraph elements by local name
+if not all_paras:
+    all_paras = [e for e in root.iter() if etree.QName(e).localname == 'p']
+
+# --- Perform field replacements ---
+APPENDIX_SENTINEL = '이 부록 문단은 그대로 유지해야 합니다.'
+for para in all_paras:
+    txt = para_text(para)
+    if APPENDIX_SENTINEL in txt:
+        continue  # never touch appendix
+    modified = False
+    for field, mapping in updates.items():
+        # Handle both {old, new} dicts and flat new-value strings
+        if isinstance(mapping, dict):
+            old_val = str(mapping.get('old', ''))
+            new_val = str(mapping.get('new', ''))
+        else:
+            continue  # will handle flat case below
+        if old_val and old_val in para_text(para):
+            replace_in_para(para, old_val, new_val)
+            modified = True
+    if modified:
+        remove_layout_cache(para)
+
+# --- Replace follow-up lines ---
+# Identify the three consecutive follow-up paragraphs.
+# They likely share a textual pattern (e.g., numbered "1.", "2.", "3." or a keyword).
+# After inspecting the document, locate them and replace their text content
+# with the sorted CSV items. If there are more or fewer CSV rows than existing
+# follow-up paragraphs, clone or remove paragraph elements as needed.
+# >>> Adapt after inspecting the actual follow-up paragraph structure <<<
+
+# --- Serialize ---
+tree.write(section_path, xml_declaration=True, encoding='UTF-8', pretty_print=True)
+
+# --- Re-zip preserving mimetype-first and stored ---
+with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as zout:
+    mimetype_path = os.path.join(TMP_DIR, 'mimetype')
+    if os.path.exists(mimetype_path):
+        zout.write(mimetype_path, 'mimetype', compress_type=zipfile.ZIP_STORED)
+    for dirpath, dirnames, filenames in os.walk(TMP_DIR):
+        for fn in filenames:
+            full = os.path.join(dirpath, fn)
+            arcname = os.path.relpath(full, TMP_DIR)
+            if arcname == 'mimetype':
+                continue
+            zout.write(full, arcname)
+
+print('Done:', OUT)
+```
+
+**Important**: The script above is a *template*. After steps 1–3 you MUST adapt it:
+- Fill in correct file paths.
+- Adjust the JSON parsing to match its actual structure (flat values vs old/new pairs).
+- Identify the exact old field values from the document text if the JSON only provides new values.
+- Identify the follow-up paragraph elements precisely (by text pattern, position, or structure) and replace them with CSV rows in `sequence` order.
+- Confirm the namespace prefix for paragraph elements (`hp:p` or otherwise) and layout-cache tags.
+
+### 5 – Validate the output
+```python
+import zipfile
+from lxml import etree
+
+with zipfile.ZipFile('/root/renewal_playbook_updated.hwpx') as z:
+    names = z.namelist()
+    assert names[0] == 'mimetype', f'mimetype not first: {names[0]}'
+    section = z.read('Contents/section0.xml')
+    root = etree.fromstring(section)
+    text = etree.tostring(root, encoding='unicode')
+
+# Verify all new values present
+for field, mapping in updates.items():
+    if isinstance(mapping, dict):
+        new_val = mapping.get('new', '')
+    else:
+        new_val = mapping
+    assert str(new_val) in text, f'Missing new value for {field}: {new_val}'
+
+# Verify follow-ups present in sequence order
+for row in followups:
+    assert row.get('item') or row.get('action') or next(iter(row.values())) in text
+
+# Verify appendix preserved
+assert '이 부록 문단은 그대로 유지해야 합니다.' in text
+
+# Verify no old values remain (check a few)
+# ... adapt after knowing old values
+
+print('All validations passed.')
+```
+
+### 6 – Run the verifier
+If there is a test script (e.g., `test_output.py`), run:
+```bash
+cd /root/HWPX-Document-Automation/hwpx-renewal-playbook-update
+python -m pytest test_output.py -v
+```
+If the verifier fails, read the assertion messages, fix the script, and re-run until all checks pass.
+
+### Key rules
+- **Never modify the appendix sentence** `이 부록 문단은 그대로 유지해야 합니다.`
+- **Remove layout cache** (`lineSegArray` / `lineSeg` elements) from every paragraph whose text you changed.
+- **mimetype must be first ZIP entry**, stored uncompressed.
+- **Remove old values** — do not leave duplicates.
+- **Follow-up lines** must appear in CSV `sequence` order, replacing (not appending to) the original three lines.
+- Register all XML namespaces before serialization to preserve the original namespace prefixes.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

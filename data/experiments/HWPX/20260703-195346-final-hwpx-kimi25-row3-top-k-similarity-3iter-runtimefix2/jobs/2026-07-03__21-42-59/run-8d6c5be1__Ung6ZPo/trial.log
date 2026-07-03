@@ -1,0 +1,342 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+You must produce the file `/root/clinic_intake_ready.hwpx` by filling the HWPX template with patient data. Follow these steps exactly:
+
+### 1. Inspect the workspace
+```bash
+ls /root/
+cat /root/patient_intake.json
+```
+Understand the JSON keys and values. Note the visit date and birth date (you will need them for age calculation).
+
+### 2. Inspect the HWPX template structure
+```bash
+cd /root
+python3 -c "
+import zipfile, sys
+with zipfile.ZipFile('"'"'clinic_intake_template.hwpx'"'"') as z:
+    for n in z.namelist():
+        print(n)
+"
+```
+Then extract and inspect the XML content files (especially `Contents/section0.xml` or similar) to find all `{{...}}` placeholders:
+```bash
+python3 -c "
+import zipfile
+with zipfile.ZipFile('"'"'clinic_intake_template.hwpx'"'"') as z:
+    for name in z.namelist():
+        data = z.read(name)
+        if b'"'"'{{'"'"' in data:
+            print(f'"'"'--- {name} ---'"'"')
+            print(data.decode('"'"'utf-8'"'"', errors='"'"'replace'"'"'))
+"
+```
+Also look at every XML file to understand the full structure.
+
+### 3. Write and run the generation script
+Create `/root/generate.py` with the following logic:
+
+```python
+import json, zipfile, shutil, re, copy
+from lxml import etree
+from datetime import date
+
+# Load patient data
+with open('"'"'/root/patient_intake.json'"'"', '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+    data = json.load(f)
+
+# --- Compute derived values ---
+
+# Korean full-year age: age as of visit date
+# Parse dates (expect ISO format YYYY-MM-DD or similar)
+def parse_date(s):
+    # Handle various formats
+    for fmt in ('"'"'%Y-%m-%d'"'"', '"'"'%Y.%m.%d'"'"', '"'"'%Y/%m/%d'"'"'):
+        try:
+            parts = s.strip().split('"'"'-'"'"') if '"'"'-'"'"' in s else s.strip().split('"'"'.'"'"') if '"'"'.'"'"' in s else s.strip().split('"'"'/'"'"')
+            return date(int(parts[0]), int(parts[1]), int(parts[2]))
+        except:
+            continue
+    raise ValueError(f'"'"'Cannot parse date: {s}'"'"')
+
+birth_date = parse_date(data.get('"'"'birth_date'"'"') or data.get('"'"'birthdate'"'"') or data.get('"'"'date_of_birth'"'"') or data.get('"'"'dob'"'"'))
+visit_date = parse_date(data.get('"'"'visit_date'"'"') or data.get('"'"'visitdate'"'"') or data.get('"'"'date'"'"'))
+
+# Korean full-year age
+age = visit_date.year - birth_date.year
+if (visit_date.month, visit_date.day) < (birth_date.month, birth_date.day):
+    age -= 1
+age_note = f'"'"'({age}세)'"'"'
+
+# Normalize phone: extract digits, format as 000-0000-0000
+def normalize_phone(ph):
+    digits = re.sub(r'"'"'\D'"'"', '"'"''"'"', ph)
+    if len(digits) == 11:
+        return f'"'"'{digits[:3]}-{digits[3:7]}-{digits[7:]}'"'"'
+    elif len(digits) == 10:
+        return f'"'"'{digits[:3]}-{digits[3:6]}-{digits[6:]}'"'"'
+    return ph  # fallback
+
+# Find the phone field(s) in data and normalize
+for key in list(data.keys()):
+    val = data[key]
+    if isinstance(val, str) and re.search(r'"'"'\d{2,4}[-.\s]?\d{3,4}[-.\s]?\d{4}'"'"', val):
+        # Check if this looks like a phone number (not a date)
+        if '"'"'phone'"'"' in key.lower() or '"'"'callback'"'"' in key.lower() or '"'"'tel'"'"' in key.lower() or '"'"'contact'"'"' in key.lower() or '"'"'mobile'"'"' in key.lower():
+            data[key] = normalize_phone(val)
+
+# Build replacement map: placeholder -> value
+# We need to inspect the placeholders in the template to build the map.
+# For now, build a generic map from JSON keys.
+replacements = {}
+for k, v in data.items():
+    placeholder = '"'"'{{'"'"' + k + '"'"'}}'"'"'
+    replacements[placeholder] = str(v)
+
+# We'"'"'ll also need to handle the age note insertion after birth date.
+# The exact placeholder and insertion point will be determined after inspecting the XML.
+
+# --- Process HWPX ---
+template_path = '"'"'/root/clinic_intake_template.hwpx'"'"'
+output_path = '"'"'/root/clinic_intake_ready.hwpx'"'"'
+
+shutil.copy2(template_path, output_path)
+
+with zipfile.ZipFile(template_path, '"'"'r'"'"') as zin:
+    with zipfile.ZipFile(output_path, '"'"'w'"'"', zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.namelist():
+            raw = zin.read(item)
+            if raw.startswith(b'"'"'<?xml'"'"') or b'"'"'<hp:'"'"' in raw or b'"'"'{{'"'"' in raw:
+                text = raw.decode('"'"'utf-8'"'"')
+                if '"'"'{{'"'"' in text:
+                    # Parse XML
+                    root = etree.fromstring(raw)
+                    nsmap = root.nsmap
+                    # Collect all namespaces
+                    ns = {}
+                    for prefix, uri in root.nsmap.items():
+                        if prefix:
+                            ns[prefix] = uri
+                    
+                    # Walk all text-bearing elements
+                    modified_paragraphs = set()
+                    
+                    for elem in root.iter():
+                        for attr in ['"'"'text'"'"', '"'"'tail'"'"']:
+                            val = getattr(elem, attr)
+                            if val and '"'"'{{'"'"' in val:
+                                new_val = val
+                                for placeholder, replacement in replacements.items():
+                                    new_val = new_val.replace(placeholder, replacement)
+                                setattr(elem, attr, new_val)
+                                # Track the paragraph ancestor
+                                p = elem
+                                while p is not None:
+                                    tag = etree.QName(p.tag).localname if '"'"'}'"'"' in p.tag else p.tag
+                                    if tag == '"'"'p'"'"':
+                                        modified_paragraphs.add(p)
+                                        break
+                                    p = p.getparent()
+                    
+                    # Insert age note after birth date value
+                    # Find text nodes containing the birth date value and append age note
+                    birth_date_str = data.get('"'"'birth_date'"'"') or data.get('"'"'birthdate'"'"') or data.get('"'"'date_of_birth'"'"') or data.get('"'"'dob'"'"', '"'"''"'"')
+                    if birth_date_str:
+                        for elem in root.iter():
+                            for attr in ['"'"'text'"'"', '"'"'tail'"'"']:
+                                val = getattr(elem, attr)
+                                if val and birth_date_str in val and age_note not in val:
+                                    setattr(elem, attr, val.replace(birth_date_str, birth_date_str + '"'"' '"'"' + age_note))
+                                    # Track paragraph
+                                    p = elem
+                                    while p is not None:
+                                        tag = etree.QName(p.tag).localname if '"'"'}'"'"' in p.tag else p.tag
+                                        if tag == '"'"'p'"'"':
+                                            modified_paragraphs.add(p)
+                                            break
+                                        p = p.getparent()
+                    
+                    # Remove hp:linesegarray (layout cache) from modified paragraphs
+                    for p in modified_paragraphs:
+                        for child in list(p):
+                            tag = etree.QName(child.tag).localname if '"'"'}'"'"' in child.tag else child.tag
+                            if tag.lower() in ('"'"'linesegarray'"'"', '"'"'lineSegArray'"'"'):
+                                p.remove(child)
+                    
+                    # Verify no remaining placeholders
+                    output_xml = etree.tostring(root, xml_declaration=True, encoding='"'"'UTF-8'"'"')
+                    if b'"'"'{{'"'"' in output_xml:
+                        remaining = re.findall(rb'"'"'\{\{[^}]+\}\}'"'"', output_xml)
+                        print(f'"'"'WARNING: remaining placeholders in {item}: {remaining}'"'"')
+                    
+                    zout.writestr(item, output_xml)
+                else:
+                    zout.writestr(item, raw)
+            else:
+                zout.writestr(item, raw)
+
+print('"'"'Done generating'"'"', output_path)
+```
+
+**IMPORTANT**: The script above is a starting framework. Before writing the final version, you MUST:
+- First inspect the actual JSON keys and template placeholders to build the correct replacement map.
+- Check if placeholders are split across multiple XML elements (common in HWPX). If so, you need to concatenate adjacent `<hp:t>` text runs within a `<hp:run>`, perform replacement, then redistribute.
+- Identify the exact birth-date placeholder/key name and phone field name from the JSON.
+- Verify the namespace prefixes used in the actual XML.
+
+### 4. Run and validate
+```bash
+python3 /root/generate.py
+```
+
+Then validate:
+```bash
+# Check it'"'"'s a valid zip/hwpx
+python3 -c "
+import zipfile
+with zipfile.ZipFile('"'"'/root/clinic_intake_ready.hwpx'"'"') as z:
+    for n in z.namelist():
+        print(n)
+    # Check no remaining placeholders
+    for n in z.namelist():
+        data = z.read(n)
+        if b'"'"'{{'"'"' in data:
+            import re
+            found = re.findall(rb'"'"'\{\{[^}]+\}\}'"'"', data)
+            print(f'"'"'FAIL: {n} has placeholders: {found}'"'"')
+            break
+    else:
+        print('"'"'OK: no placeholders remain'"'"')
+"
+```
+
+Also verify:
+- The age note `(<N>세)` appears after the birth date
+- Phone is in `000-0000-0000` format
+- Korean labels and handwritten-signature note are preserved
+- `hp:linesegarray` (or `hp:lineSegArray`) elements are removed from all modified paragraphs
+
+### 5. Run the verifier
+```bash
+cd /root && python3 -m pytest test_output.py -v
+```
+
+If any test fails, read the error carefully, fix the script, regenerate, and re-test. Common issues:
+- Placeholders split across XML elements (need to merge `<hp:t>` text before replacing)
+- Wrong namespace handling
+- Layout cache elements not fully removed
+- Age calculation off-by-one
+- Phone normalization edge cases
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260703-195346-final-hwpx-kimi25-row3-top-k-similarity-3iter-runtimefix2/jobs/2026-07-03__21-42-59/run-8d6c5be1__Ung6ZPo/agent/trajectory.json

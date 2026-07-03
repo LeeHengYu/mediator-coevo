@@ -123,18 +123,20 @@ Current diffusion policy values:
   graph neighbors for the target task, capped by `diffusion.max_artifacts` and
   `diffusion.top_k_neighbors`.
 - `llm_router_softmax`: use a logical-batch scheduler. Seed tasks run first;
-  each source artifact from logical iteration `k` sends a compact router packet
-  to `diffusion.llm_router_model`, blends the parsed router score with
-  deterministic graph/reward affinity using `diffusion.llm_router_weight`, then
-  samples one target through `diffusion.softmax_temperature` and activates only
-  LLM-scored targets for iteration `k+1`.
+  each source artifact from logical iteration `k` sends a compact top-k router
+  packet to `diffusion.llm_router_model`, blends parsed router scores with
+  deterministic graph/reward/signal affinity using
+  `diffusion.llm_router_weight`, then samples one target through
+  `diffusion.softmax_temperature`.
 
 For `llm_router_softmax`, iteration `0` is a seed exploration batch and does
 not consume diffusion context. Later logical iterations consume only artifacts
 from the immediately previous logical iteration. If the router call fails or
-returns no parsed score for a source-target pair, that pair is not eligible; no
-local fallback route is created. A task is dropped from activation if it would
-exceed `diffusion.consecutive_iteration_limit` consecutive logical iterations.
+returns no parsed score for a source-target pair, the pair keeps its
+deterministic affinity as a local fallback. A task is dropped from activation
+if it would exceed `diffusion.consecutive_iteration_limit` consecutive logical
+iterations, and wildcard rescue fills a wave to
+`diffusion.logical_min_active_tasks` when possible.
 
 The graph precompute command scores directed SkillFlow edge candidates using
 family rankings, metadata, task resources, output shape, and instruction text.
@@ -160,12 +162,19 @@ The adopted infra changes are:
   drops;
 - active logical iterations consume only artifacts from the immediately
   previous logical iteration;
-- `llm_router_softmax` uses compact GPT-5.2 router packets, blends router
-  scores with deterministic signed affinity, and samples target activation with
-  `diffusion.softmax_temperature`;
+- `llm_router_softmax` uses compact GPT-5.2 router packets over deterministic
+  top-k candidates, blends router scores with graph/reward/source-signal
+  affinity, and falls back to deterministic scores for missing router rows;
+- logical activation enforces the main-infra safeguards from the tmp controller:
+  no task may exceed `diffusion.consecutive_iteration_limit` consecutive waves,
+  and each wave is rescued up to `diffusion.logical_min_active_tasks` active
+  tasks when enough non-blocked tasks exist;
+- router decisions, activation safeguards, selected per-target artifact stores,
+  routing memory, and the logical-router reporting board are written under the
+  run's `diffusion/` directory for post-run analysis;
 - executor dollar cost uses Harbor-reported `agent_result.cost_usd` when
   present, while planner, mediator, judge, compactor, and fallback executor
-  estimates remain proxy-priced in downstream analysis.
+  estimates remain proxy-priced in downstream analysis. Note that the Harbor-reported cost may not be real, we use OpenRouter cost when analyzing.
 
 The run evidence is mixed. Patch `1+3` removed WRA context drops and improved
 post-warmup cost per activated row, but WRA judge quality per row regressed.
@@ -730,6 +739,7 @@ softmax_top_k_candidates = 3
 llm_router_model = "openrouter/openai/gpt-5.2"
 llm_router_weight = 0.30
 logical_seed_count = 3
+logical_min_active_tasks = 2
 consecutive_iteration_limit = 2
 
 [paths]

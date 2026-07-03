@@ -1,0 +1,416 @@
+# Task Instruction
+
+You must produce the file `/root/clinic_intake_ready.hwpx` by filling in the HWPX template with patient data. Follow these steps **exactly and in order**.
+
+---
+
+### Step 1 – Inspect the workspace
+
+```bash
+ls -la /root/
+find /root/ -name '*.hwpx' -o -name '*.json' 2>/dev/null
+```
+
+Identify the exact paths of `clinic_intake_template.hwpx` and `patient_intake.json`.
+
+### Step 2 – Read the JSON data
+
+```bash
+cat <path_to>/patient_intake.json
+```
+
+Note every key-value pair. Pay special attention to:
+- patient name (may appear more than once in the template)
+- birth date and visit date (you will compute Korean full-year age)
+- phone number (must be normalized to `000-0000-0000` digit-hyphen form)
+- any other fields
+
+### Step 3 – Understand the HWPX structure
+
+HWPX is a ZIP archive. Unzip it to a temp directory and explore:
+
+```bash
+mkdir -p /tmp/hwpx_work
+cp <path_to>/clinic_intake_template.hwpx /tmp/hwpx_work/template.zip
+cd /tmp/hwpx_work
+unzip -o template.zip -d template_contents
+find template_contents -type f | sort
+```
+
+Then read every XML file that could contain text content (especially files like `section0.xml`, `section1.xml`, etc. under a `Contents/` directory):
+
+```bash
+for f in $(find template_contents -name '*.xml'); do echo "=== $f ==="; cat "$f"; echo; done
+```
+
+Search for all `{{` occurrences across all files:
+
+```bash
+grep -rn '{{' template_contents/
+```
+
+### Step 4 – Write the Python processing script
+
+Create `/tmp/hwpx_work/process.py` with the following logic:
+
+```python
+import json, os, re, shutil, zipfile
+from lxml import etree
+
+# --- Configuration ---
+JSON_PATH = '<path_to>/patient_intake.json'  # FIX THIS PATH
+TEMPLATE_PATH = '<path_to>/clinic_intake_template.hwpx'  # FIX THIS PATH
+OUTPUT_PATH = '/root/clinic_intake_ready.hwpx'
+WORK_DIR = '/tmp/hwpx_work/output_contents'
+
+# --- Load JSON ---
+with open(JSON_PATH, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+print("JSON data:", json.dumps(data, ensure_ascii=False, indent=2))
+
+# --- Compute age (Korean full-year age = visit_year - birth_year) ---
+# Parse dates; try multiple formats
+from datetime import datetime
+
+def parse_date(s):
+    for fmt in ('%Y-%m-%d', '%Y.%m.%d', '%Y/%m/%d', '%Y년 %m월 %d일'):
+        try:
+            return datetime.strptime(s.strip(), fmt)
+        except ValueError:
+            continue
+    raise ValueError(f'Cannot parse date: {s}')
+
+# Identify the birth date and visit date keys from JSON
+# (inspect the JSON and adjust these key names accordingly)
+birth_date_str = data.get('birth_date') or data.get('생년월일') or data.get('birthdate') or ''
+visit_date_str = data.get('visit_date') or data.get('방문일') or data.get('visitdate') or data.get('접수일') or ''
+
+birth_dt = parse_date(birth_date_str)
+visit_dt = parse_date(visit_date_str)
+
+# Korean full-year age: visit_year - birth_year
+# (Traditional Korean age counting for documents uses calendar year difference)
+korean_age = visit_dt.year - birth_dt.year
+age_note = f'({korean_age}세)'
+print(f'Age note: {age_note}')
+
+# --- Normalize phone number to 000-0000-0000 ---
+phone_raw = data.get('callback_phone') or data.get('phone') or data.get('전화번호') or data.get('연락처') or data.get('callback') or ''
+digits = re.sub(r'\D', '', phone_raw)
+if len(digits) == 11:
+    phone_norm = f'{digits[:3]}-{digits[3:7]}-{digits[7:]}'
+elif len(digits) == 10:
+    phone_norm = f'{digits[:3]}-{digits[3:6]}-{digits[6:]}'
+else:
+    phone_norm = phone_raw  # fallback
+print(f'Phone normalized: {phone_norm}')
+
+# --- Build placeholder map ---
+# Map each {{placeholder}} to its replacement value.
+# Inspect the JSON keys and template placeholders to build this correctly.
+# Start with all JSON keys mapped to their values:
+placeholder_map = {}
+for k, v in data.items():
+    placeholder_map[k] = str(v)
+
+# Override with computed/normalized values:
+# Phone
+for k in ['callback_phone', 'phone', '전화번호', '연락처', 'callback']:
+    if k in placeholder_map:
+        placeholder_map[k] = phone_norm
+
+# The age note should be APPENDED after the birth date value, not replace a placeholder.
+# We'll handle this specially during replacement.
+
+print("Placeholder map:", placeholder_map)
+
+# --- Extract HWPX ---
+if os.path.exists(WORK_DIR):
+    shutil.rmtree(WORK_DIR)
+os.makedirs(WORK_DIR)
+
+with zipfile.ZipFile(TEMPLATE_PATH, 'r') as zf:
+    zf.extractall(WORK_DIR)
+
+# --- Process XML files ---
+HP_NS = None  # We'll detect namespace from the files
+
+def get_ns(root):
+    """Extract the namespace map, focusing on the hp-related namespace."""
+    nsmap = {}
+    for prefix, uri in root.nsmap.items():
+        if prefix:
+            nsmap[prefix] = uri
+    return nsmap
+
+def get_full_paragraph_text(p_elem, ns_uri):
+    """Concatenate all <hp:t> text within a paragraph <hp:p>."""
+    texts = []
+    for t_elem in p_elem.iter(f'{{{ns_uri}}}t' if ns_uri else 't'):
+        if t_elem.text:
+            texts.append(t_elem.text)
+    return ''.join(texts)
+
+def set_paragraph_text(p_elem, new_text, ns_uri):
+    """Replace all <hp:t> content: put full text in first <hp:t>, clear the rest."""
+    t_elems = list(p_elem.iter(f'{{{ns_uri}}}t' if ns_uri else 't'))
+    if not t_elems:
+        return
+    t_elems[0].text = new_text
+    for t in t_elems[1:]:
+        t.text = ''
+
+def remove_line_seg_arrays(p_elem, ns_uri):
+    """Remove <hp:lineSegArray> elements (layout cache) from paragraph."""
+    for lsa in list(p_elem.iter(f'{{{ns_uri}}}lineSegArray' if ns_uri else 'lineSegArray')):
+        lsa.getparent().remove(lsa)
+
+def process_xml_file(filepath):
+    """Process one XML file: replace placeholders at paragraph level."""
+    tree = etree.parse(filepath)
+    root = tree.getroot()
+    
+    # Detect namespace
+    ns_uri = None
+    for uri in root.nsmap.values():
+        if 'hwpml' in uri.lower() or 'hancom' in uri.lower():
+            ns_uri = uri
+            break
+    if ns_uri is None:
+        # Try from default or first namespace
+        for prefix, uri in root.nsmap.items():
+            if prefix in (None, 'hp', 'hwp'):
+                ns_uri = uri
+                break
+    
+    modified = False
+    tag_p = f'{{{ns_uri}}}p' if ns_uri else 'p'
+    
+    for p_elem in root.iter(tag_p):
+        full_text = get_full_paragraph_text(p_elem, ns_uri)
+        if '{{' not in full_text:
+            continue
+        
+        new_text = full_text
+        # Replace all {{key}} placeholders
+        def replace_placeholder(m):
+            key = m.group(1).strip()
+            if key in placeholder_map:
+                return placeholder_map[key]
+            return m.group(0)  # leave unknown placeholders
+        
+        new_text = re.sub(r'\{\{\s*([^}]+?)\s*\}\}', replace_placeholder, new_text)
+        
+        if new_text != full_text:
+            set_paragraph_text(p_elem, new_text, ns_uri)
+            remove_line_seg_arrays(p_elem, ns_uri)
+            modified = True
+    
+    # --- Append age note after birth date ---
+    # Scan all paragraphs for the birth date value and append age note
+    birth_date_value = placeholder_map.get('birth_date') or placeholder_map.get('생년월일') or placeholder_map.get('birthdate') or birth_date_str
+    if birth_date_value:
+        for p_elem in root.iter(tag_p):
+            full_text = get_full_paragraph_text(p_elem, ns_uri)
+            if birth_date_value in full_text and age_note not in full_text:
+                new_text = full_text.replace(birth_date_value, birth_date_value + ' ' + age_note)
+                set_paragraph_text(p_elem, new_text, ns_uri)
+                remove_line_seg_arrays(p_elem, ns_uri)
+                modified = True
+    
+    if modified:
+        tree.write(filepath, xml_declaration=True, encoding='UTF-8')
+        print(f'  Modified: {filepath}')
+
+# Process all XML files
+for dirpath, dirnames, filenames in os.walk(WORK_DIR):
+    for fname in filenames:
+        if fname.endswith('.xml'):
+            fpath = os.path.join(dirpath, fname)
+            try:
+                process_xml_file(fpath)
+            except Exception as e:
+                print(f'  Error processing {fpath}: {e}')
+
+# --- Verify no placeholders remain ---
+print('\n--- Checking for remaining placeholders ---')
+remaining = []
+for dirpath, dirnames, filenames in os.walk(WORK_DIR):
+    for fname in filenames:
+        if fname.endswith('.xml'):
+            fpath = os.path.join(dirpath, fname)
+            with open(fpath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            matches = re.findall(r'\{\{.*?\}\}', content)
+            if matches:
+                remaining.append((fpath, matches))
+                print(f'  REMAINING in {fpath}: {matches}')
+
+if remaining:
+    print('WARNING: Some placeholders still remain!')
+else:
+    print('All placeholders replaced successfully.')
+
+# --- Repackage as HWPX (ZIP) ---
+# HWPX must be a valid ZIP. Preserve the original compression.
+with zipfile.ZipFile(OUTPUT_PATH, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for dirpath, dirnames, filenames in os.walk(WORK_DIR):
+        for fname in filenames:
+            fpath = os.path.join(dirpath, fname)
+            arcname = os.path.relpath(fpath, WORK_DIR)
+            zout.write(fpath, arcname)
+
+print(f'\nOutput written to {OUTPUT_PATH}')
+assert os.path.exists(OUTPUT_PATH), 'Output file was not created!'
+print('Done.')
+```
+
+**CRITICAL**: After reading the JSON and the template XML files, you MUST adjust the script before running it:
+- Fix the `JSON_PATH` and `TEMPLATE_PATH` variables to the actual file locations.
+- Inspect the actual JSON keys and adjust the placeholder map construction.
+- Inspect the actual placeholder names in the template (from grep output) and ensure they match the map keys.
+- Check the namespace URI from the XML files and ensure namespace detection works.
+
+### Step 5 – Run the script
+
+```bash
+pip install lxml 2>/dev/null
+python3 /tmp/hwpx_work/process.py
+```
+
+### Step 6 – Validate the output
+
+1. Verify the file exists and is a valid ZIP:
+```bash
+ls -la /root/clinic_intake_ready.hwpx
+python3 -c "import zipfile; z=zipfile.ZipFile('/root/clinic_intake_ready.hwpx'); z.testzip(); print('Valid ZIP'); z.printdir()"
+```
+
+2. Check no `{{` remains in any XML inside the output:
+```bash
+mkdir -p /tmp/hwpx_verify
+cd /tmp/hwpx_verify && unzip -o /root/clinic_intake_ready.hwpx
+grep -rn '{{' /tmp/hwpx_verify/ && echo 'FAIL: placeholders remain' || echo 'PASS: no placeholders'
+```
+
+3. Check the age note is present:
+```bash
+grep -rn '세)' /tmp/hwpx_verify/
+```
+
+4. Check the phone number format:
+```bash
+grep -rn '[0-9]\{3\}-[0-9]\{4\}-[0-9]\{4\}' /tmp/hwpx_verify/
+```
+
+### Step 7 – If any validation fails, debug and fix
+
+If placeholders remain, re-inspect the XML to see how they are split across `<hp:t>` tags and adjust the paragraph-level aggregation. If the age note or phone format is wrong, fix the computation. Re-run until all checks pass.
+
+**The final deliverable is `/root/clinic_intake_ready.hwpx` – a valid HWPX ZIP with all placeholders replaced, age note added, phone normalized, layout caches cleared, and Korean labels preserved.**
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

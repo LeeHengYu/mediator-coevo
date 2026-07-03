@@ -1,0 +1,433 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Complete the project proposal HWPX document by replacing all placeholders with JSON values and saving to /root/project_proposal_ready.hwpx.
+
+## Steps
+
+### 1. Inspect the workspace
+```bash
+ls /root/
+find /root/ -name '"'"'*.hwpx'"'"' -o -name '"'"'*.json'"'"' | head -20
+```
+Identify the template file `project_proposal_template.hwpx` and `project_proposal.json`.
+
+### 2. Examine the JSON data
+```bash
+cat /root/project_proposal.json
+```
+Note all key-value pairs. For the budget field, you will need to strip commas but keep the leading currency symbol (e.g., '"'"'₩'"'"' or '"'"'\\'"'"').
+
+### 3. Examine the HWPX structure
+HWPX files are ZIP archives. Unzip the template to a temp directory and inspect:
+```bash
+mkdir -p /tmp/hwpx_work
+cd /tmp/hwpx_work
+cp /root/project_proposal_template.hwpx template.zip
+unzip -o template.zip -d template_contents
+find template_contents -type f
+```
+Look at the XML files, especially `Contents/section0.xml` (or similar section files). Search for `{{` placeholders:
+```bash
+grep -r '"'"'{{'"'"' template_contents/
+```
+Also check if there are multiple section XML files.
+
+### 4. Write a Python transformation script
+Create `/tmp/hwpx_work/transform.py` that does the following:
+
+```python
+import json, zipfile, os, re, shutil, copy
+from lxml import etree
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+
+# Load JSON
+with open('"'"'/root/project_proposal.json'"'"', '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+    data = json.load(f)
+
+# Normalize budget: remove commas, keep currency symbol
+for key in data:
+    if '"'"'budget'"'"' in key.lower() or '"'"'예산'"'"' in key.lower() or '"'"'비용'"'"' in key.lower():
+        val = str(data[key])
+        data[key] = re.sub(r'"'"','"'"', '"'"''"'"', val)
+    # Also check all values for comma-containing currency strings
+    # Be conservative: only strip commas from values that look like currency
+
+template_path = '"'"'/root/project_proposal_template.hwpx'"'"'
+output_path = '"'"'/root/project_proposal_ready.hwpx'"'"'
+work_dir = '"'"'/tmp/hwpx_work/output_contents'"'"'
+
+# Clean and extract
+if os.path.exists(work_dir):
+    shutil.rmtree(work_dir)
+os.makedirs(work_dir)
+
+with zipfile.ZipFile(template_path, '"'"'r'"'"') as zin:
+    zin.extractall(work_dir)
+
+# Find all XML files that contain placeholders
+xml_files = []
+for root, dirs, files in os.walk(work_dir):
+    for fname in files:
+        fpath = os.path.join(root, fname)
+        if fname.endswith('"'"'.xml'"'"'):
+            with open(fpath, '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+                content = f.read()
+            if '"'"'{{'"'"' in content:
+                xml_files.append(fpath)
+
+print(f"XML files with placeholders: {xml_files}")
+
+# Helper: compute months between two dates
+def compute_months(date_str_start, date_str_end):
+    """Try various date formats to parse start/end dates and return month count."""
+    for fmt in ['"'"'%Y-%m-%d'"'"', '"'"'%Y.%m.%d'"'"', '"'"'%Y/%m/%d'"'"', '"'"'%Y년 %m월 %d일'"'"', '"'"'%Y년%m월%d일'"'"']:
+        try:
+            d1 = datetime.strptime(date_str_start.strip(), fmt)
+            d2 = datetime.strptime(date_str_end.strip(), fmt)
+            diff = relativedelta(d2, d1)
+            months = diff.years * 12 + diff.months
+            if diff.days > 0:
+                months += 1  # partial month counts as 1
+            return months
+        except:
+            continue
+    return None
+
+# Process each XML file
+for xml_path in xml_files:
+    tree = etree.parse(xml_path)
+    root_el = tree.getroot()
+    nsmap = root_el.nsmap
+    
+    # Build namespace dict for findall
+    NS = {}
+    for prefix, uri in nsmap.items():
+        if prefix:
+            NS[prefix] = uri
+    # Also check for common HWPX namespaces
+    # Detect hp namespace
+    hp_ns = None
+    for prefix, uri in nsmap.items():
+        if '"'"'hwpml'"'"' in uri.lower() or prefix == '"'"'hp'"'"':
+            hp_ns = uri
+            NS['"'"'hp'"'"'] = uri
+            break
+    if not hp_ns:
+        # Try to find it from element tags
+        for el in root_el.iter():
+            tag = el.tag
+            if '"'"'{'"'"' in tag:
+                uri = tag.split('"'"'}'"'"')[0].lstrip('"'"'{'"'"')
+                if '"'"'hp'"'"' not in NS:
+                    NS['"'"'hp'"'"'] = uri
+                    hp_ns = uri
+                break
+    
+    print(f"Namespaces: {NS}")
+    
+    # Find all paragraphs (hp:p elements)
+    paragraphs = root_el.iter('"'"'{%s}p'"'"' % NS.get('"'"'hp'"'"', '"'"''"'"'))
+    
+    modified_paras = set()
+    
+    for para in root_el.iter():
+        if not para.tag.endswith('"'"'}p'"'"') and para.tag != '"'"'p'"'"':
+            continue
+        
+        # Get the namespace from the tag
+        if '"'"'{'"'"' in para.tag:
+            p_ns = para.tag.split('"'"'}'"'"')[0].lstrip('"'"'{'"'"')
+        else:
+            p_ns = '"'"''"'"'
+        
+        # Find all run elements within this paragraph
+        runs = list(para.iter())
+        run_elements = [el for el in runs if el.tag.endswith('"'"'}run'"'"') or el.tag == '"'"'run'"'"']
+        
+        para_modified = False
+        
+        for run in run_elements:
+            # Collect all hp:t text elements in this run
+            t_elements = [el for el in run.iter() if el.tag.endswith('"'"'}t'"'"') or el.tag == '"'"'t'"'"']
+            
+            if not t_elements:
+                continue
+            
+            # Merge all text into the first t element
+            merged_text = '"'"''"'"'.join((t.text or '"'"''"'"') for t in t_elements)
+            
+            if '"'"'{{'"'"' not in merged_text:
+                continue
+            
+            # Remove extra t elements, keep first
+            for t in t_elements[1:]:
+                t.getparent().remove(t)
+            
+            first_t = t_elements[0]
+            
+            # Replace all {{placeholder}} patterns
+            def replace_placeholder(match):
+                key = match.group(1).strip()
+                if key in data:
+                    return str(data[key])
+                return match.group(0)  # leave unchanged if not found
+            
+            new_text = re.sub(r'"'"'\{\{\s*(.+?)\s*\}\}'"'"', replace_placeholder, merged_text)
+            first_t.text = new_text
+            para_modified = True
+        
+        # Check full paragraph text for phase lines that need month spans
+        if para_modified:
+            modified_paras.add(para)
+    
+    # Second pass: add month spans to phase lines
+    # Look for lines containing 단계 and date ranges
+    for para in root_el.iter():
+        if not para.tag.endswith('"'"'}p'"'"') and para.tag != '"'"'p'"'"':
+            continue
+        
+        # Get all text in this paragraph
+        all_text = '"'"''"'"'.join(para.itertext())
+        
+        # Check if this is a phase line (단계)
+        if '"'"'단계'"'"' not in all_text:
+            continue
+        
+        # Try to find date range pattern and compute months
+        # Common patterns: YYYY.MM.DD ~ YYYY.MM.DD, YYYY-MM-DD ~ YYYY-MM-DD, etc.
+        date_patterns = [
+            r'"'"'(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s*[~–-]\s*(\d{4}[./-]\d{1,2}[./-]\d{1,2})'"'"',
+            r'"'"'(\d{4}년\s*\d{1,2}월\s*\d{1,2}일?)\s*[~–-]\s*(\d{4}년\s*\d{1,2}월\s*\d{1,2}일?)'"'"',
+        ]
+        
+        for pattern in date_patterns:
+            match = re.search(pattern, all_text)
+            if match:
+                start_str = match.group(1)
+                end_str = match.group(2)
+                
+                # Parse dates
+                for sep in ['"'"'.'"'"', '"'"'-'"'"', '"'"'/'"'"']:
+                    try:
+                        parts_s = [p for p in re.split(r'"'"'[./-]'"'"', start_str) if p]
+                        parts_e = [p for p in re.split(r'"'"'[./-]'"'"', end_str) if p]
+                        d1 = datetime(int(parts_s[0]), int(parts_s[1]), int(parts_s[2]))
+                        d2 = datetime(int(parts_e[0]), int(parts_e[1]), int(parts_e[2]))
+                        diff = relativedelta(d2, d1)
+                        months = diff.years * 12 + diff.months
+                        if diff.days > 0:
+                            months += 1
+                        
+                        # Find the last run'"'"'s last t element and append month span
+                        run_elements = [el for el in para.iter() if el.tag.endswith('"'"'}run'"'"') or el.tag == '"'"'run'"'"']
+                        if run_elements:
+                            last_run = run_elements[-1]
+                            t_elements = [el for el in last_run.iter() if el.tag.endswith('"'"'}t'"'"') or el.tag == '"'"'t'"'"']
+                            if t_elements:
+                                last_t = t_elements[-1]
+                                current = last_t.text or '"'"''"'"'
+                                month_span = f'"'"' ({months}개월)'"'"'
+                                if '"'"'개월'"'"' not in current:
+                                    last_t.text = current + month_span
+                                    modified_paras.add(para)
+                        break
+                    except:
+                        continue
+                break
+    
+    # Remove hp:linesegarray from ALL modified paragraphs
+    for para in modified_paras:
+        if '"'"'{'"'"' in para.tag:
+            p_ns = para.tag.split('"'"'}'"'"')[0].lstrip('"'"'{'"'"')
+        else:
+            p_ns = '"'"''"'"'
+        
+        for child in list(para):
+            if child.tag.endswith('"'"'}linesegarray'"'"') or child.tag == '"'"'linesegarray'"'"':
+                para.remove(child)
+    
+    # Also do a broader sweep: remove linesegarray from any paragraph that has modified text
+    # (catch paragraphs we might have missed)
+    for para in root_el.iter():
+        if not para.tag.endswith('"'"'}p'"'"'):
+            continue
+        all_text = '"'"''"'"'.join(para.itertext())
+        # If paragraph was likely modified (no {{ remaining but was a template para)
+        for child in list(para):
+            if child.tag.endswith('"'"'}linesegarray'"'"'):
+                # Remove from all modified paragraphs - to be safe, check if para is in our set
+                if para in modified_paras:
+                    para.remove(child)
+    
+    # Write back
+    tree.write(xml_path, xml_declaration=True, encoding='"'"'UTF-8'"'"', pretty_print=True)
+
+# Verify no {{...}} placeholders remain
+for xml_path in xml_files:
+    with open(xml_path, '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+        content = f.read()
+    remaining = re.findall(r'"'"'\{\{.*?\}\}'"'"', content)
+    if remaining:
+        print(f"WARNING: Remaining placeholders in {xml_path}: {remaining}")
+    else:
+        print(f"OK: No placeholders remaining in {xml_path}")
+
+# Repackage as HWPX (ZIP)
+with zipfile.ZipFile(output_path, '"'"'w'"'"', zipfile.ZIP_DEFLATED) as zout:
+    for root_dir, dirs, files in os.walk(work_dir):
+        for fname in files:
+            fpath = os.path.join(root_dir, fname)
+            arcname = os.path.relpath(fpath, work_dir)
+            zout.write(fpath, arcname)
+
+print(f"Output written to {output_path}")
+```
+
+**IMPORTANT**: The above is a starting template. You MUST:
+- First inspect the actual JSON keys and XML structure before running the script.
+- Adapt the script to match the actual namespace URIs, element names, and placeholder keys found in the template.
+- The budget normalization should target whichever JSON key contains the budget value (look for currency symbols or comma-separated numbers).
+- For month span computation: extract date ranges from the phase lines in the XML, compute the difference in months, and append `(N개월)` after each phase line.
+
+### 5. Detailed execution order
+
+1. **Read JSON**: `cat /root/project_proposal.json` — note all keys and values.
+2. **Unzip template**: Extract to `/tmp/hwpx_work/template_contents/`.
+3. **Find section XMLs**: `find ... -name '"'"'*.xml'"'"'` and `grep -rn '"'"'{{'"'"' ...` to see all placeholders and their XML context.
+4. **Inspect XML structure**: Look at a few paragraphs with placeholders to understand the hp:p > hp:run > hp:t nesting, and check for hp:linesegarray elements.
+5. **Inspect phase lines**: Find paragraphs containing `단계` and date ranges to understand the format.
+6. **Write and run the Python script** adapted to the actual structure found above.
+7. **Validate output**:
+   - Verify the output file exists: `ls -la /root/project_proposal_ready.hwpx`
+   - Verify it'"'"'s a valid ZIP: `python3 -c "import zipfile; z=zipfile.ZipFile('"'"'/root/project_proposal_ready.hwpx'"'"'); print(z.namelist())"`
+   - Check no placeholders remain: `python3 -c "import zipfile; z=zipfile.ZipFile('"'"'/root/project_proposal_ready.hwpx'"'"'); [print(f) for f in z.namelist() if f.endswith('"'"'.xml'"'"')]; [print('"'"'PLACEHOLDER FOUND in'"'"', f) for f in z.namelist() if f.endswith('"'"'.xml'"'"') and '"'"'{{'"'"' in z.read(f).decode('"'"'utf-8'"'"')]"`
+   - Check that linesegarray was removed from modified paragraphs.
+   - Check that month spans were appended to phase lines.
+   - Check budget value has no commas but retains currency symbol.
+
+### 6. Run the verifier
+```bash
+cd /root && python -m pytest test_output.py -v
+```
+
+### Critical reminders
+- **hp:linesegarray removal**: This is the #1 failure mode from past runs. Every paragraph whose text content was modified MUST have its `hp:linesegarray` child element removed. Be aggressive — if in doubt, remove it.
+- **Placeholder fragmentation**: Placeholders like `{{project_name}}` may be split across multiple `hp:t` elements within a single `hp:run`. You MUST merge all `hp:t` text within a run before doing regex replacement.
+- **Month span format**: Append ` (N개월)` (with a leading space) after each phase line. The month count comes from the date range in that line.
+- **Budget normalization**: Strip commas from the budget value but keep the currency symbol (₩ or similar).
+- **No remaining placeholders**: The final document must have zero `{{...}}` patterns anywhere.
+- **Valid HWPX package**: The output must be a proper ZIP file with the same internal structure as the template.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260703-195346-final-hwpx-kimi25-row3-top-k-similarity-3iter-runtimefix2/jobs/2026-07-03__22-01-33/run-099ac7e7__qfPmTWK/agent/trajectory.json
