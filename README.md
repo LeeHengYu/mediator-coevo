@@ -122,21 +122,6 @@ Current diffusion policy values:
 - `top_k_similarity`: render eligible artifacts from the strongest incoming
   graph neighbors for the target task, capped by `diffusion.max_artifacts` and
   `diffusion.top_k_neighbors`.
-- `llm_router_softmax`: use a logical-batch scheduler. Seed tasks run first;
-  each source artifact from logical iteration `k` sends a compact top-k router
-  packet to `diffusion.llm_router_model`, blends parsed router scores with
-  deterministic graph/reward/signal affinity using
-  `diffusion.llm_router_weight`, then samples one target through
-  `diffusion.softmax_temperature`.
-
-For `llm_router_softmax`, iteration `0` is a seed exploration batch and does
-not consume diffusion context. Later logical iterations consume only artifacts
-from the immediately previous logical iteration. If the router call fails or
-returns no parsed score for a source-target pair, the pair keeps its
-deterministic affinity as a local fallback. A task is dropped from activation
-if it would exceed `diffusion.consecutive_iteration_limit` consecutive logical
-iterations, and wildcard rescue fills a wave to
-`diffusion.logical_min_active_tasks` when possible.
 
 The graph precompute command scores directed SkillFlow edge candidates using
 family rankings, metadata, task resources, output shape, and instruction text.
@@ -148,41 +133,6 @@ When `medcoevo run` starts with `diffusion.enabled = true` and
 `diffusion.graph` set to `task_similarity` or `precomputed_similarity`, it
 materializes run-local graph artifacts under `task-graph/` using the configured
 local SkillFlow task cache and the default edge threshold `0.05`.
-
-### Logical-Router Patch Provenance
-
-The logical softmax policies came from the WRA progression archived under
-`tmp/agent_diffusion_logical_wra_realcost_fresh_20260626`,
-`tmp/agent_diffusion_logical_wra_fusion_p13_20260628`, and
-`tmp/agent_diffusion_logical_wra_llmrouter_temp_gpt52_20260630`.
-
-The adopted infra changes are:
-
-- selected transfer artifacts are compacted as a set before budget-driven
-  drops;
-- active logical iterations consume only artifacts from the immediately
-  previous logical iteration;
-- `llm_router_softmax` uses compact GPT-5.2 router packets over deterministic
-  top-k candidates, blends router scores with graph/reward/source-signal
-  affinity, and falls back to deterministic scores for missing router rows;
-- logical activation enforces the main-infra safeguards from the tmp controller:
-  no task may exceed `diffusion.consecutive_iteration_limit` consecutive waves,
-  and each wave is rescued up to `diffusion.logical_min_active_tasks` active
-  tasks when enough non-blocked tasks exist;
-- router decisions, activation safeguards, selected per-target artifact stores,
-  routing memory, and the logical-router reporting board are written under the
-  run's `diffusion/` directory for post-run analysis;
-- executor dollar cost uses Harbor-reported `agent_result.cost_usd` when
-  present, while planner, mediator, judge, compactor, and fallback executor
-  estimates remain proxy-priced in downstream analysis. Note that the Harbor-reported cost may not be real, we use OpenRouter cost when analyzing.
-
-The run evidence is mixed. Patch `1+3` removed WRA context drops and improved
-post-warmup cost per activated row, but WRA judge quality per row regressed.
-The later LLM-router/temp patch improved HWPX success rate and dollar
-efficiency, made WRA operationally cleaner but not higher reward, and did not
-generalize to the Medical family. Treat these policies as routing and
-observability mechanisms; reward-quality claims still need family-level
-validation.
 
 ### Skill Update Paths
 
@@ -243,9 +193,8 @@ alone.
 - `uv`
 - Harbor CLI on `PATH`
 - Docker for local Harbor execution
-- `OPENROUTER_API_KEY` for planner, mediator, judge, the optional
-  `llm_router_softmax` router, and any executor agent configured to route
-  through OpenRouter
+- `OPENROUTER_API_KEY` for planner, mediator, judge, and any executor agent
+  configured to route through OpenRouter
 
 MedCoevo runs SkillFlow tasks through the Harbor agent configured in
 `executor_runtime.agent_name`; the repo default is currently `claude-code`.
@@ -295,22 +244,6 @@ uv run medcoevo run \
   --diffusion-policy top_k_similarity \
   --diffusion-graph task_similarity \
   --run-id all-wra-top-k-similarity
-```
-
-Run one family with the LLM router diffusion policy:
-
-```bash
-uv run medcoevo run \
-  --family Weighted-Risk-Assessment \
-  --iterations 4 \
-  --condition no_feedback \
-  --skill-updates none \
-  --coevo-interval 99 \
-  --advisor-buffer-max 99 \
-  --diffusion-enabled \
-  --diffusion-policy llm_router_softmax \
-  --diffusion-graph task_similarity \
-  --run-id wra-llm-router-softmax
 ```
 
 Or set those parameters in `config/default.toml`
@@ -732,13 +665,6 @@ graph = "none"
 max_artifacts = 3
 top_k_neighbors = 5
 avoid_recheck_max_artifacts = 1
-softmax_temperature = 0.35
-softmax_top_k_candidates = 3
-llm_router_model = "openrouter/openai/gpt-5.2"
-llm_router_weight = 0.30
-logical_seed_count = 3
-logical_min_active_tasks = 2
-consecutive_iteration_limit = 2
 
 [paths]
 benchmarks_dir = "benchmarks/skillflow"

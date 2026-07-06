@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 import mediated_coevo.cli.run as run_module
 from mediated_coevo.core.config import Config, ModelConfigError, ModelsConfig
 from mediated_coevo.cli.experiment import prepare_llm_credentials_or_exit
-from mediated_coevo.experiment.runtime_factory import ExperimentFactory
+from mediated_coevo.experiment.runtime_factory import build_experiment
 from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_credentials
 from mediated_coevo.main import app
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
@@ -195,7 +195,8 @@ def test_normalized_models_are_persisted_in_run_config(monkeypatch, tmp_path):
     config.paths.skills_dir = "skills"
     prepare_llm_credentials_or_exit(config)
 
-    runtime = ExperimentFactory(tmp_path).build(
+    runtime = build_experiment(
+        project_root=tmp_path,
         config=config,
         seed=42,
         condition_name=config.experiment.condition_name,

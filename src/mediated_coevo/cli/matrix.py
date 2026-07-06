@@ -36,9 +36,9 @@ from mediated_coevo.experiment.baselines import (
 )
 from mediated_coevo.experiment.conditions import validate_experiment_design
 from mediated_coevo.experiment.runtime_factory import (
-    ExperimentFactory,
     build_benchmark_repo,
     build_matrix_runtimes,
+    create_matrix_dir,
 )
 
 
@@ -246,17 +246,16 @@ def matrix(
     )
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
-    config.experiment.benchmark_selection.task_set = None
-    factory = ExperimentFactory(PROJECT_ROOT)
     seed = config.experiment.seed
     iterations = config.experiment.num_iterations
-    matrix_dir = factory.create_matrix_dir(
+    matrix_dir = create_matrix_dir(
+        project_root=PROJECT_ROOT,
         seed=seed,
         data_dir=config.paths.data_dir,
         run_id=run_id,
     )
     rows = build_matrix_runtimes(
-        factory=factory,
+        project_root=PROJECT_ROOT,
         base_config=config,
         seed=seed,
         matrix_dir=matrix_dir,

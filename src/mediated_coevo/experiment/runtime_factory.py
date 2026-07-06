@@ -51,72 +51,65 @@ class MatrixRuntime:
     runtime: ExperimentRuntime
 
 
-class ExperimentFactory:
-    """Build the object graph for one mediated co-evolution run."""
-
-    def __init__(self, project_root: Path) -> None:
-        self._project_root = project_root
-
-    def build(
-        self,
-        *,
-        config: Config,
-        seed: int,
-        condition_name: ConditionName,
-        experiment_dir: Path | None = None,
-        benchmark_repo: SkillFlowRepository | None = None,
-        harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
-    ) -> ExperimentRuntime:
-        validate_experiment_design(
-            condition=condition_name,
-            skill_updates=config.experiment.skill_updates,
-            baseline_preset=config.experiment.baseline_preset,
-        )
-        if experiment_dir is None:
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            suffix = config.experiment.baseline_preset or condition_name
-            experiment_dir = (
-                self._project_root
-                / config.paths.data_dir
-                / "experiments"
-                / f"{timestamp}-{seed}-{suffix}"
-            )
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-
-        source_skills_dir = self._project_root / config.paths.skills_dir
-        runtime_skills_dir = shutil.copytree(
-            source_skills_dir,
-            experiment_dir / "skills",
-        )
-
-        with open(experiment_dir / "config.toml", "wb") as f:
-            tomli_w.dump(config.model_dump(exclude_none=True), f)
-
-        if benchmark_repo is None:
-            benchmark_repo = build_benchmark_repo(self._project_root, config)
-        return build_experiment_runtime(
-            config=config,
-            condition_name=condition_name,
-            runtime_skills_dir=runtime_skills_dir,
-            experiment_dir=experiment_dir,
-            benchmark_repo=benchmark_repo,
-            remote_harbor_config=None,
-            harbor_runner=harbor_runner,
-        )
-
-    def create_matrix_dir(
-        self,
-        seed: int,
-        data_dir: str,
-        run_id: str | None = None,
-    ) -> Path:
+def build_experiment(
+    *,
+    project_root: Path,
+    config: Config,
+    seed: int,
+    condition_name: ConditionName,
+    experiment_dir: Path | None = None,
+    benchmark_repo: SkillFlowRepository | None = None,
+    harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
+) -> ExperimentRuntime:
+    validate_experiment_design(
+        condition=condition_name,
+        skill_updates=config.experiment.skill_updates,
+        baseline_preset=config.experiment.baseline_preset,
+    )
+    if experiment_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        suffix = run_id or f"{seed}-baseline-matrix"
-        matrix_dir = (
-            self._project_root / data_dir / "experiments" / f"{timestamp}-{suffix}"
+        suffix = config.experiment.baseline_preset or condition_name
+        experiment_dir = (
+            project_root
+            / config.paths.data_dir
+            / "experiments"
+            / f"{timestamp}-{seed}-{suffix}"
         )
-        matrix_dir.mkdir(parents=True, exist_ok=True)
-        return matrix_dir
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    runtime_skills_dir = shutil.copytree(
+        project_root / config.paths.skills_dir,
+        experiment_dir / "skills",
+    )
+
+    with open(experiment_dir / "config.toml", "wb") as f:
+        tomli_w.dump(config.model_dump(exclude_none=True), f)
+
+    if benchmark_repo is None:
+        benchmark_repo = build_benchmark_repo(project_root, config)
+    return build_experiment_runtime(
+        config=config,
+        condition_name=condition_name,
+        runtime_skills_dir=runtime_skills_dir,
+        experiment_dir=experiment_dir,
+        benchmark_repo=benchmark_repo,
+        remote_harbor_config=None,
+        harbor_runner=harbor_runner,
+    )
+
+
+def create_matrix_dir(
+    *,
+    project_root: Path,
+    seed: int,
+    data_dir: str,
+    run_id: str | None = None,
+) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = run_id or f"{seed}-baseline-matrix"
+    matrix_dir = project_root / data_dir / "experiments" / f"{timestamp}-{suffix}"
+    matrix_dir.mkdir(parents=True, exist_ok=True)
+    return matrix_dir
 
 
 def build_benchmark_repo(project_root: Path, config: Config) -> SkillFlowRepository:
@@ -236,7 +229,7 @@ def build_experiment_runtime(
 
 def build_matrix_runtimes(
     *,
-    factory: ExperimentFactory,
+    project_root: Path,
     base_config: Config,
     seed: int,
     matrix_dir: Path,
@@ -256,7 +249,8 @@ def build_matrix_runtimes(
         preset = get_baseline_preset(preset_name)
         row_config = preset.build_config(base_config, seed=seed)
         experiment_dir = matrix_dir if flatten_single_row else matrix_dir / preset_name
-        runtime = factory.build(
+        runtime = build_experiment(
+            project_root=project_root,
             config=row_config,
             seed=seed,
             condition_name=preset.condition_name,

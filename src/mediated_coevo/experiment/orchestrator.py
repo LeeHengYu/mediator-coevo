@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import random
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,18 +32,13 @@ from mediated_coevo.diffusion import (
     DiffusionArtifact,
     DiffusionStore,
     DiffusionSubscription,
-    LLMRouterSoftmaxRoute,
     TaskGraphSnapshot,
     diffusion_channel_for_artifact,
     emit_diffusion_artifacts,
-    llm_router_softmax_candidates,
     render_diffusion_subscriptions,
     select_capped_broadcast_subscriptions,
-    select_llm_router_softmax_routes,
     select_random_k_subscriptions,
     select_top_k_similarity_subscriptions,
-    target_profile_for_snapshot,
-    transfer_signal_for_artifact,
 )
 from mediated_coevo.evolution.compactor import build_planner_signal
 from mediated_coevo.evolution.candidates import (
@@ -837,10 +831,6 @@ class Orchestrator:
             or current_iteration is None
         ):
             return None
-        if policy_name == "llm_router_softmax" and current_iteration == 0:
-            self._record_empty_diffusion_context(task_id, current_iteration)
-            return None
-
         await self._prepare_diffusion_subscriptions(
             target_task_id=task_id,
             current_iteration=current_iteration,
@@ -941,16 +931,6 @@ class Orchestrator:
         self._diffusion_store.store_graph_snapshot(snapshot, overwrite=True)
         self._diffusion_snapshot_by_iteration[current_iteration] = snapshot
 
-        if self.config.diffusion.policy == "llm_router_softmax":
-            await self._prepare_llm_router_softmax_subscriptions(
-                target_task_ids=target_task_ids,
-                current_iteration=current_iteration,
-                artifacts=artifacts,
-                snapshot=snapshot,
-            )
-            self._diffusion_prepared_iterations.add(current_iteration)
-            return
-
         for target_id in target_task_ids:
             eligible_artifacts = [
                 artifact
@@ -983,276 +963,6 @@ class Orchestrator:
                 )
 
         self._diffusion_prepared_iterations.add(current_iteration)
-
-    async def _prepare_llm_router_softmax_subscriptions(
-        self,
-        *,
-        target_task_ids: list[str],
-        current_iteration: int,
-        artifacts: list[DiffusionArtifact],
-        snapshot: TaskGraphSnapshot,
-    ) -> None:
-        source_artifacts = [
-            artifact
-            for artifact in artifacts
-            if artifact.source_iteration == current_iteration - 1
-        ]
-        router_scores, candidate_targets_by_artifact = await self._llm_router_scores(
-            artifacts=source_artifacts,
-            target_task_ids=target_task_ids,
-            snapshot=snapshot,
-            current_iteration=current_iteration,
-        )
-        routes = select_llm_router_softmax_routes(
-            eligible_artifacts=source_artifacts,
-            snapshot=snapshot,
-            target_task_ids=target_task_ids,
-            target_iteration=current_iteration,
-            top_k_candidates=self.config.diffusion.softmax_top_k_candidates,
-            temperature=self.config.diffusion.softmax_temperature,
-            seed=self.config.experiment.seed,
-            router_scores=router_scores,
-            router_weight=self.config.diffusion.llm_router_weight,
-            router_model=self.config.diffusion.llm_router_model,
-            candidate_target_ids_by_artifact=candidate_targets_by_artifact,
-        )
-        routes_by_target: dict[str, list[LLMRouterSoftmaxRoute]] = {}
-        for route in routes:
-            routes_by_target.setdefault(route.target_task_id, []).append(route)
-            self._record_llm_router_softmax_decision(route, snapshot=snapshot)
-            self._update_router_memory(route)
-
-        for target_id, target_routes in routes_by_target.items():
-            selected_routes = sorted(
-                target_routes,
-                key=lambda route: (
-                    -route.decision.selected_similarity_index,
-                    route.subscription.artifact.artifact_id,
-                ),
-            )[: self.config.diffusion.max_artifacts]
-            subscriptions = [route.subscription for route in selected_routes]
-            if not subscriptions:
-                continue
-            self._diffusion_store.save_selected_artifact_store(
-                target_task_id=target_id,
-                target_iteration=current_iteration,
-                subscriptions=subscriptions,
-                snapshot_id=snapshot.snapshot_id,
-            )
-            self._record_prepared_diffusion_context(
-                target_id,
-                current_iteration,
-                snapshot=snapshot,
-                eligible_count=len(
-                    [
-                        artifact
-                        for artifact in source_artifacts
-                        if artifact.source_task_id != target_id
-                    ]
-                ),
-                subscriptions=subscriptions,
-            )
-            self._diffusion_sub_board[(current_iteration, target_id)] = subscriptions
-
-    async def _llm_router_scores(
-        self,
-        *,
-        artifacts: list[DiffusionArtifact],
-        target_task_ids: list[str],
-        snapshot: TaskGraphSnapshot,
-        current_iteration: int,
-    ) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, list[str]]]:
-        scores: dict[tuple[str, str], dict[str, Any]] = {}
-        candidate_targets_by_artifact: dict[str, list[str]] = {}
-        for artifact in artifacts:
-            packet = self._llm_router_packet(
-                artifact=artifact,
-                target_task_ids=target_task_ids,
-                snapshot=snapshot,
-            )
-            if not packet["candidates"]:
-                continue
-            candidate_targets_by_artifact[artifact.artifact_id] = [
-                str(candidate["target"]) for candidate in packet["candidates"]
-            ]
-            try:
-                result = await self.mediator.llm_client.complete(
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                "Score source-to-target transfer fit. Return only "
-                                "JSON: {\"scores\":[{\"target\":\"...\","
-                                "\"score\":0.0,\"confidence\":0.0,"
-                                "\"rationale\":\"...\"}]}. Values are in [0,1]."
-                            ),
-                        },
-                        {"role": "user", "content": json.dumps(packet, sort_keys=True)},
-                    ],
-                    model=self.config.diffusion.llm_router_model,
-                    max_tokens=900,
-                    temperature=0.0,
-                    budget_label="diffusion.llm_router",
-                    condition_name=self.config.experiment.condition_name,
-                )
-            except Exception as exc:  # pragma: no cover - network/provider path
-                logger.warning(
-                    "LLM router failed for source artifact %s at iteration %d: %s",
-                    artifact.artifact_id,
-                    current_iteration,
-                    exc,
-                )
-                self._diffusion_store.append_audit_record(
-                    "llm_router_decisions.jsonl",
-                    {
-                        "status": "error",
-                        "stream_iteration": current_iteration,
-                        "source_artifact_id": artifact.artifact_id,
-                        "source_task_id": artifact.source_task_id,
-                        "model": self.config.diffusion.llm_router_model,
-                        "error": _truncate_router_text(str(exc), 500),
-                        "packet": packet,
-                        "timestamp": time.time(),
-                    },
-                )
-                continue
-            parsed = _parse_router_scores(str(result.get("content") or ""))
-            self._diffusion_store.append_audit_record(
-                "llm_router_decisions.jsonl",
-                {
-                    "status": "ok" if parsed else "parse_empty",
-                    "stream_iteration": current_iteration,
-                    "source_artifact_id": artifact.artifact_id,
-                    "source_task_id": artifact.source_task_id,
-                    "model": self.config.diffusion.llm_router_model,
-                    "input_tokens": result.get("input_tokens"),
-                    "output_tokens": result.get("output_tokens"),
-                    "content": result.get("content"),
-                    "parsed_scores": parsed,
-                    "packet": packet,
-                    "timestamp": time.time(),
-                },
-            )
-            for target_id, row in parsed.items():
-                scores[(artifact.artifact_id, target_id)] = row
-        return scores, candidate_targets_by_artifact
-
-    def _llm_router_packet(
-        self,
-        *,
-        artifact: DiffusionArtifact,
-        target_task_ids: list[str],
-        snapshot: TaskGraphSnapshot,
-    ) -> dict[str, Any]:
-        candidates = llm_router_softmax_candidates(
-            artifact=artifact,
-            snapshot=snapshot,
-            target_task_ids=target_task_ids,
-            router_scores={},
-            router_weight=0.0,
-            router_model=self.config.diffusion.llm_router_model,
-        )[: self.config.diffusion.softmax_top_k_candidates]
-        signal = transfer_signal_for_artifact(artifact)
-        return {
-            "source": {
-                "artifact_id": artifact.artifact_id,
-                "task": artifact.source_task_id,
-                "source_iteration": artifact.source_iteration,
-                "verifier_reward": artifact.verifier_reward,
-                "judge_reward": artifact.judge_reward,
-                "artifact_type": artifact.artifact_type.value,
-                "risk_level": artifact.risk_level.value,
-                "signal": signal,
-                "recent_log_excerpt": _truncate_router_text(artifact.content, 1400),
-            },
-            "candidates": [
-                {
-                    "target": candidate["target_task_id"],
-                    "edge_weight": (
-                        candidate["score_components"].get("edge_weight")
-                    ),
-                    "deterministic_score": candidate["score_components"].get(
-                        "deterministic_similarity_index"
-                    ),
-                    "deterministic_rationale": _truncate_router_text(
-                        (
-                            "graph={graph_score}; reward={reward_score}; "
-                            "signal={signal_overlap}"
-                        ).format(**candidate["score_components"]),
-                        420,
-                    ),
-                    "target_profile": target_profile_for_snapshot(
-                        snapshot,
-                        str(candidate["target_task_id"]),
-                    ),
-                    "score_components": candidate["score_components"],
-                }
-                for candidate in candidates
-            ],
-            "instruction": (
-                "Prefer concrete contract/formula reuse and failure prevention. "
-                "Penalize noun-copy risk, circular reuse, and unrelated targets."
-            ),
-        }
-
-    def _update_router_memory(self, route: LLMRouterSoftmaxRoute) -> None:
-        self._diffusion_store.update_routing_memory(
-            artifact=route.subscription.artifact,
-            target_task_id=route.target_task_id,
-            route_metadata=route.subscription.metadata,
-        )
-
-    def _record_llm_router_softmax_decision(
-        self,
-        route: LLMRouterSoftmaxRoute,
-        *,
-        snapshot: TaskGraphSnapshot,
-    ) -> None:
-        selected_target = route.target_task_id
-        for candidate in route.decision.candidate_distribution:
-            target_id = str(candidate["target_task_id"])
-            if target_id == selected_target:
-                continue
-            artifact = route.subscription.artifact
-            self._diffusion_store.append_diffused_record(
-                DiffusedRecord(
-                    artifact_id=artifact.artifact_id,
-                    source_task_id=artifact.source_task_id,
-                    source_iteration=artifact.source_iteration,
-                    source_run_id=artifact.source_run_id,
-                    target_task_id=target_id,
-                    target_iteration=route.decision.target_iteration,
-                    snapshot_id=snapshot.snapshot_id,
-                    policy_name=route.subscription.policy_name,
-                    relation=str(candidate.get("relation") or "candidate"),
-                    reason="softmax_candidate_not_selected",
-                    eligible=True,
-                    selected=False,
-                    rendered=False,
-                    verifier_reward=artifact.verifier_reward,
-                    judge_reward=artifact.judge_reward,
-                    success=(
-                        None
-                        if artifact.verifier_reward is None
-                        else artifact.verifier_reward == 1.0
-                    ),
-                    regression=True
-                    if artifact.metadata.get("regression") is True
-                    else None,
-                    metadata={
-                        "artifact_type": artifact.artifact_type.value,
-                        "risk_level": artifact.risk_level.value,
-                        "diffusion_channel": route.subscription.context_channel,
-                        "candidate_probability": candidate.get("probability"),
-                        "candidate_similarity_index": candidate.get(
-                            "similarity_index"
-                        ),
-                        "selected_target_task_id": selected_target,
-                        "selection_seed": route.decision.selection_seed,
-                        "random_marker": route.decision.random_marker,
-                    },
-                )
-            )
 
     def _select_diffusion_subscriptions(
         self,
@@ -2361,55 +2071,6 @@ class Orchestrator:
             if llm_client is not None and hasattr(llm_client, "drain_token_events"):
                 events.extend(llm_client.drain_token_events())
         return events
-
-
-def _parse_router_scores(content: str) -> dict[str, dict[str, Any]]:
-    cleaned = content.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
-        cleaned = re.sub(r"```$", "", cleaned).strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-        if match is None:
-            return {}
-        try:
-            payload = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return {}
-    rows = payload.get("scores") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        return {}
-    parsed: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        target = row.get("target")
-        score = row.get("score")
-        if not isinstance(target, str) or not isinstance(score, (int, float)):
-            continue
-        confidence = row.get("confidence", 0.0)
-        parsed[target] = {
-            "score": max(0.0, min(1.0, float(score))),
-            "confidence": max(
-                0.0,
-                min(
-                    1.0,
-                    float(confidence) if isinstance(confidence, (int, float)) else 0.0,
-                ),
-            ),
-            "rationale": _truncate_router_text(str(row.get("rationale") or ""), 420),
-        }
-    return parsed
-
-
-def _truncate_router_text(text: str, limit: int) -> str:
-    cleaned = " ".join(str(text).split())
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[: max(0, limit - 20)] + " ...[truncated]"
-
 
 def _edge_weight(
     snapshot: TaskGraphSnapshot,

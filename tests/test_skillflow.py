@@ -24,13 +24,10 @@ from mediated_coevo.cli import skillflow as skillflow_cli
 from mediated_coevo.main import app
 
 
-def test_repository_resolves_tasks_family_and_task_set(tmp_path: Path) -> None:
+def test_repository_resolves_tasks_and_lists_family(tmp_path: Path) -> None:
     root = tmp_path / "skillflow"
     _write_task(root / "tasks" / "family-a" / "task-one", family="family-a")
     _write_task(root / "tasks" / "family-b" / "task-two", family="family-b")
-    task_set_dir = root / "task_sets"
-    task_set_dir.mkdir()
-    (task_set_dir / "smoke.txt").write_text("family-a/task-one\n")
     repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
 
     task = repo.resolve("family-a/task-one")
@@ -38,9 +35,6 @@ def test_repository_resolves_tasks_family_and_task_set(tmp_path: Path) -> None:
     assert task.task_id == "family-a/task-one"
     assert task.family == "family-a"
     assert repo.list_local_task_ids(family="family-a") == ["family-a/task-one"]
-    assert repo.resolve_selection(tasks=[], family=None, task_set="smoke") == [
-        "family-a/task-one"
-    ]
 
 
 def test_family_selection_bootstraps_task_stream_with_replacement(

@@ -20,7 +20,6 @@ DiffusionPolicyName: TypeAlias = Literal[
     "capped_broadcast",
     "random_k",
     "top_k_similarity",
-    "llm_router_softmax",
 ]
 SIMILARITY_DIFFUSION_GRAPH_NAMES = frozenset(
     {"task_similarity", "precomputed_similarity"}
@@ -191,7 +190,6 @@ class BenchmarkSelectionConfig(BaseModel):
 
     tasks: list[str] = Field(default_factory=list)
     family: str | None = None
-    task_set: str | None = None
 
 
 class ExperimentConfig(BaseModel):
@@ -257,10 +255,6 @@ class DiffusionConfig(BaseModel):
     max_artifacts: int = Field(ge=1)
     top_k_neighbors: int = Field(ge=1)
     avoid_recheck_max_artifacts: int = Field(default=1, ge=0)
-    softmax_temperature: float = Field(default=1.0, gt=0)
-    softmax_top_k_candidates: int = Field(default=3, ge=1)
-    llm_router_model: str = "openrouter/openai/gpt-5.2"
-    llm_router_weight: float = Field(default=0.30, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_policy_graph_combination(self) -> Self:
@@ -282,7 +276,7 @@ class DiffusionConfig(BaseModel):
                     "diffusion.policy='top_k_similarity' requires "
                     f"diffusion.graph to be one of: {allowed_graphs}"
                 )
-        elif self.policy != "llm_router_softmax" and self.graph != "none":
+        elif self.graph != "none":
             errors.append(
                 f"diffusion.policy={self.policy!r} requires diffusion.graph='none'"
             )

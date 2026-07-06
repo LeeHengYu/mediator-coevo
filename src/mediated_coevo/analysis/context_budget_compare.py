@@ -32,7 +32,6 @@ COMPARABILITY_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("experiment", "baseline_preset"),
     ("experiment", "benchmark_selection", "tasks"),
     ("experiment", "benchmark_selection", "family"),
-    ("experiment", "benchmark_selection", "task_set"),
     ("experiment", "skill_updates", "executor"),
     ("experiment", "skill_updates", "planner"),
     ("experiment", "skill_updates", "mediator"),

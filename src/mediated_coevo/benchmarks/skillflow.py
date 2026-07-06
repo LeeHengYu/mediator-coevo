@@ -174,23 +174,6 @@ class SkillFlowRepository:
                 task_ids.append(task.task_id)
         return sorted(dict.fromkeys(task_ids))
 
-    def resolve_selection(
-        self,
-        *,
-        tasks: list[str] | None,
-        family: str | None,
-        task_set: str | None,
-    ) -> list[str]:
-        """Resolve CLI task, family, and task-set selectors."""
-        selected: list[str] = []
-        if tasks:
-            selected.extend(tasks)
-        if family:
-            selected.extend(self.list_local_task_ids(family=family))
-        if task_set:
-            selected.extend(self._resolve_task_set(task_set))
-        return _dedupe(selected)
-
     def list_remote_task_ids(self, *, family: str | None = None) -> list[str]:
         """Return task IDs advertised by the configured remote SkillFlow dataset."""
         task_ids = self._cached_remote_task_ids()
@@ -399,22 +382,6 @@ class SkillFlowRepository:
             with suppress(ValueError):
                 return task_dir.relative_to(task_root).as_posix()
         return task_dir.name
-
-    def _resolve_task_set(self, task_set: str) -> list[str]:
-        task_set_path = self.root_dir / "task_sets" / f"{task_set}.txt"
-        if task_set_path.exists():
-            return [
-                line.strip()
-                for line in task_set_path.read_text().splitlines()
-                if line.strip() and not line.strip().startswith("#")
-            ]
-        task_ids = self.list_local_task_ids(family=task_set)
-        if task_ids:
-            return task_ids
-        raise FileNotFoundError(
-            f"SkillFlow task set {task_set!r} was not found under "
-            f"{task_set_path.parent}"
-        )
 
     def _load_task(self, task_dir: Path, task_id: str) -> SkillFlowTask:
         instruction_path = task_dir / "instruction.md"

@@ -31,9 +31,10 @@ from mediated_coevo.experiment.conditions import (
     validate_experiment_design,
 )
 from mediated_coevo.experiment.runtime_factory import (
-    ExperimentFactory,
     build_benchmark_repo,
+    build_experiment,
     build_matrix_runtimes,
+    create_matrix_dir,
 )
 from mediated_coevo.cli.config import _run_config_overrides
 from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
@@ -313,15 +314,12 @@ def _stub_matrix_runtime_build(monkeypatch, tmp_path):
         task_ids = ["task-A"]
         family = "family-a"
 
-    class Factory:
-        def __init__(self, project_root):
-            self.project_root = project_root
-
-        def create_matrix_dir(self, *, seed, data_dir, run_id=None):
-            captured["matrix_seed"] = seed
-            captured["matrix_data_dir"] = data_dir
-            captured["matrix_run_id"] = run_id
-            return tmp_path / "matrix"
+    def capture_matrix_dir(*, project_root, seed, data_dir, run_id=None):
+        captured["matrix_project_root"] = project_root
+        captured["matrix_seed"] = seed
+        captured["matrix_data_dir"] = data_dir
+        captured["matrix_run_id"] = run_id
+        return tmp_path / "matrix"
 
     def capture_matrix_build(**kwargs):
         captured.update(kwargs)
@@ -343,7 +341,7 @@ def _stub_matrix_runtime_build(monkeypatch, tmp_path):
         "resolve_task_selection",
         lambda **kwargs: Selection(),
     )
-    monkeypatch.setattr(matrix_module, "ExperimentFactory", Factory)
+    monkeypatch.setattr(matrix_module, "create_matrix_dir", capture_matrix_dir)
     monkeypatch.setattr(
         matrix_module,
         "build_matrix_runtimes",
@@ -476,12 +474,8 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
         preloaded_diffusion_artifact_store_count=0,
     )
 
-    class Factory:
-        def __init__(self, project_root):
-            self.project_root = project_root
-
-        def create_matrix_dir(self, *, seed, data_dir, run_id=None):
-            return tmp_path / "matrix"
+    def fake_matrix_dir(*, project_root, seed, data_dir, run_id=None):
+        return tmp_path / "matrix"
 
     def build_rows(**kwargs):
         row_config = get_baseline_preset(BASELINE_PRESET_NAMES[1]).build_config(
@@ -515,7 +509,7 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
         "resolve_task_selection",
         lambda **kwargs: selection,
     )
-    monkeypatch.setattr(matrix_module, "ExperimentFactory", Factory)
+    monkeypatch.setattr(matrix_module, "create_matrix_dir", fake_matrix_dir)
     monkeypatch.setattr(matrix_module, "build_matrix_runtimes", build_rows)
     monkeypatch.setattr(
         matrix_module,
@@ -1140,7 +1134,8 @@ def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path)
     experiment_dir = tmp_path / "experiment"
 
     with pytest.raises(ExperimentDesignError, match="no_feedback"):
-        ExperimentFactory(tmp_path).build(
+        build_experiment(
+            project_root=tmp_path,
             config=config,
             seed=42,
             condition_name="no_feedback",
@@ -1150,7 +1145,7 @@ def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path)
     assert not experiment_dir.exists()
 
 
-def test_factory_build_uses_experiment_local_skill_store_by_default(tmp_path):
+def test_build_experiment_uses_experiment_local_skill_store_by_default(tmp_path):
     _write_skill(tmp_path, "executor", "# Executor\n")
     _write_skill(tmp_path, "planner", "# Planner\n")
     _write_skill(tmp_path, "mediator", "# Mediator\n")
@@ -1158,7 +1153,8 @@ def test_factory_build_uses_experiment_local_skill_store_by_default(tmp_path):
     config.paths.skills_dir = "skills"
     experiment_dir = tmp_path / "experiment"
 
-    runtime = ExperimentFactory(tmp_path).build(
+    runtime = build_experiment(
+        project_root=tmp_path,
         config=config,
         seed=42,
         condition_name=config.experiment.condition_name,
@@ -1180,8 +1176,9 @@ def test_factory_build_uses_experiment_local_skill_store_by_default(tmp_path):
     )
 
 
-def test_factory_create_matrix_dir_accepts_run_id_suffix(tmp_path):
-    matrix_dir = ExperimentFactory(tmp_path).create_matrix_dir(
+def test_create_matrix_dir_accepts_run_id_suffix(tmp_path):
+    matrix_dir = create_matrix_dir(
+        project_root=tmp_path,
         seed=42,
         data_dir="data",
         run_id="csm-matrix-skill-none-diffusion-none",
@@ -1208,7 +1205,7 @@ def test_matrix_runtimes_use_isolated_skill_copies_and_shared_config(tmp_path):
     )
 
     rows = build_matrix_runtimes(
-        factory=ExperimentFactory(tmp_path),
+        project_root=tmp_path,
         base_config=config,
         seed=123,
         matrix_dir=matrix_dir,
@@ -1283,7 +1280,7 @@ def test_matrix_runtimes_can_build_only_selected_presets(tmp_path):
     selected_preset = BASELINE_PRESET_NAMES[3]
 
     rows = build_matrix_runtimes(
-        factory=ExperimentFactory(tmp_path),
+        project_root=tmp_path,
         base_config=config,
         seed=123,
         matrix_dir=matrix_dir,
@@ -1313,7 +1310,7 @@ def test_matrix_runtimes_can_flatten_single_selected_preset(tmp_path):
     selected_preset = BASELINE_PRESET_NAMES[3]
 
     rows = build_matrix_runtimes(
-        factory=ExperimentFactory(tmp_path),
+        project_root=tmp_path,
         base_config=config,
         seed=123,
         matrix_dir=matrix_dir,
@@ -1348,7 +1345,7 @@ def test_matrix_runtimes_reject_flattened_multi_row_matrix(tmp_path):
 
     with pytest.raises(ValueError, match="requires exactly one matrix preset"):
         build_matrix_runtimes(
-            factory=ExperimentFactory(tmp_path),
+            project_root=tmp_path,
             base_config=config,
             seed=123,
             matrix_dir=matrix_dir,

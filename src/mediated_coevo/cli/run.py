@@ -59,7 +59,6 @@ def run_skillflow_experiment(
     random.seed(seed)
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
-    config.experiment.benchmark_selection.task_set = None
 
     prepare_llm_credentials_or_exit(config)
     if remote_harbor_config is None:
@@ -204,7 +203,7 @@ def run(
             "--diffusion-policy",
             help=(
                 "Override diffusion.policy. Allowed: none | capped_broadcast | "
-                "random_k | top_k_similarity | llm_router_softmax."
+                "random_k | top_k_similarity."
             ),
         ),
     ] = None,
