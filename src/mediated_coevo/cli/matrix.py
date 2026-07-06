@@ -12,7 +12,6 @@ import typer
 from mediated_coevo.cli.config import (
     _load_config_or_bad_parameter,
     _run_config_overrides,
-    _task_ids_from_repeatable_cli,
 )
 from mediated_coevo.cli.experiment import (
     PROJECT_ROOT,
@@ -44,20 +43,9 @@ from mediated_coevo.experiment.runtime_factory import (
 
 
 def matrix(
-    tasks: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--task",
-            help="SkillFlow task ID. Repeat the option or provide comma-separated IDs.",
-        ),
-    ] = None,
     family: Annotated[
         str | None,
-        typer.Option("--family", help="Run all local tasks in this SkillFlow family."),
-    ] = None,
-    task_set: Annotated[
-        str | None,
-        typer.Option("--task-set", help="Named local SkillFlow task set."),
+        typer.Option("--family", help="SkillFlow family to bootstrap into a stream."),
     ] = None,
     iterations: int | None = typer.Option(
         None,
@@ -211,6 +199,8 @@ def matrix(
             "diffusion.graph; use --diffusion-max-artifacts or "
             "--diffusion-top-k-neighbors for shared matrix knobs"
         )
+    if family is None:
+        raise typer.BadParameter("provide --family")
     selected_indexes = _parse_matrix_row_indexes(row_indexes)
     if selected_indexes is None:
         preset_names = list(BASELINE_PRESET_NAMES)
@@ -251,10 +241,12 @@ def matrix(
     repository = build_benchmark_repo(PROJECT_ROOT, config)
     selection = resolve_task_selection(
         repository=repository,
-        tasks=_task_ids_from_repeatable_cli(tasks),
         family=family,
-        task_set=task_set,
+        seed=config.experiment.seed,
     )
+    config.experiment.benchmark_selection.tasks = selection.task_ids
+    config.experiment.benchmark_selection.family = selection.family
+    config.experiment.benchmark_selection.task_set = None
     factory = ExperimentFactory(PROJECT_ROOT)
     seed = config.experiment.seed
     iterations = config.experiment.num_iterations
@@ -274,7 +266,10 @@ def matrix(
     )
 
     print_task_selection(selection)
-    console.print(f"[bold]Iterations per row:[/] {iterations}")
+    if selection.family is not None:
+        console.print(f"[bold]Task stream length per row:[/] {len(selection.task_ids)}")
+    else:
+        console.print(f"[bold]Iterations per row:[/] {iterations}")
     console.print(f"[bold]Seed per row:[/] {seed}")
     print_experiment_controls(config)
     console.print(f"[bold]Matrix:[/] {matrix_dir}")
@@ -311,9 +306,7 @@ def matrix(
             )
         _write_matrix_invocation_metadata(
             row_dir=row.runtime.experiment_dir,
-            tasks=_task_ids_from_repeatable_cli(tasks),
             family=family,
-            task_set=task_set,
             selected_task_ids=selection.task_ids,
             iterations=iterations,
             seed=seed,
@@ -416,9 +409,7 @@ def _parse_matrix_row_indexes(value: str | None) -> list[int] | None:
 def _write_matrix_invocation_metadata(
     *,
     row_dir: Path,
-    tasks: list[str],
-    family: str | None,
-    task_set: str | None,
+    family: str,
     selected_task_ids: list[str],
     iterations: int,
     seed: int,
@@ -436,9 +427,7 @@ def _write_matrix_invocation_metadata(
 ) -> None:
     """Persist matrix CLI inputs that are not fully represented in config.toml."""
     payload = {
-        "tasks": tasks,
         "family": family,
-        "task_set": task_set,
         "selected_task_ids": selected_task_ids,
         "iterations": iterations,
         "seed": seed,

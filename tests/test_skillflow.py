@@ -16,6 +16,10 @@ from mediated_coevo.benchmarks import (
     SkillFlowSyncConfig,
     parse_skillflow_execution_trace,
 )
+from mediated_coevo.cli.experiment import (
+    BOOTSTRAP_FAMILY_TASK_COUNT,
+    resolve_task_selection,
+)
 from mediated_coevo.cli import skillflow as skillflow_cli
 from mediated_coevo.main import app
 
@@ -37,6 +41,25 @@ def test_repository_resolves_tasks_family_and_task_set(tmp_path: Path) -> None:
     assert repo.resolve_selection(tasks=[], family=None, task_set="smoke") == [
         "family-a/task-one"
     ]
+
+
+def test_family_selection_bootstraps_task_stream_with_replacement(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skillflow"
+    _write_task(root / "tasks" / "family-a" / "task-one", family="family-a")
+    _write_task(root / "tasks" / "family-a" / "task-two", family="family-a")
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+
+    selection = resolve_task_selection(
+        repository=repo,
+        family="family-a",
+        seed=42,
+    )
+
+    assert len(selection.task_ids) == BOOTSTRAP_FAMILY_TASK_COUNT
+    assert set(selection.task_ids) <= {"family-a/task-one", "family-a/task-two"}
+    assert len(set(selection.task_ids)) < len(selection.task_ids)
 
 
 def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None:

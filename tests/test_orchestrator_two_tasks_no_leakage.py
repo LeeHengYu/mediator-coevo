@@ -367,6 +367,52 @@ async def test_run_experiment_two_tasks_keeps_feedback_and_metrics_task_scoped(
     ]
 
 
+@pytest.mark.asyncio
+async def test_family_selection_runs_task_ids_as_one_stream(tmp_path):
+    config = Config(
+        models={
+            "planner": "test-planner",
+            "executor": "test-executor",
+            "mediator": "test-mediator",
+            "judge": "test-judge",
+        },
+        budgets=budgets_config(),
+        experiment=experiment_config(),
+        diffusion=diffusion_config(),
+    )
+    config.experiment.benchmark_selection.family = "family-a"
+    config.experiment.condition_name = "learned_mediator"
+    config.experiment.coevo_interval = 99
+    config.experiment.advisor_buffer_max = 99
+    planner = _Planner(metrics_path=tmp_path / "metrics.jsonl")
+    orchestrator = Orchestrator(
+        planner=planner,  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        mediator=_Mediator(),  # type: ignore[arg-type]
+        skill_store=_SkillStore(),  # type: ignore[arg-type]
+        artifact_store=ArtifactStore(base_dir=tmp_path / "artifacts"),
+        history_store=HistoryStore(history_dir=tmp_path / "history"),
+        benchmark_repo=_TaskRepo(),  # type: ignore[arg-type]
+        config=config,
+        experiment_dir=tmp_path,
+        skill_advisor=_Advisor(),  # type: ignore[arg-type]
+    )
+
+    records = await orchestrator.run_experiment(
+        ["task-A", "task-B"],
+        num_iterations=99,
+    )
+
+    assert [(record.task_id, record.iteration) for record in records] == [
+        ("task-A", 0),
+        ("task-B", 1),
+    ]
+    assert planner.metrics_rows_before_plan == [
+        ("task-A", 0, []),
+        ("task-B", 1, [("task-A", 0)]),
+    ]
+
+
 def test_snapshot_and_write_metrics_records_skill_update_ledger(tmp_path):
     config = Config(
         models={

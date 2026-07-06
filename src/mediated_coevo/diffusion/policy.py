@@ -172,8 +172,7 @@ def select_llm_router_softmax_routes(
 ) -> list[LLMRouterSoftmaxRoute]:
     """Route each source artifact to one selected target.
 
-    This implements the logical-batch checkpoint used by the tmp WRA runs:
-    each source contributes at most one selected transfer target. Missing LLM
+    Each source contributes at most one selected transfer target. Missing LLM
     router rows fall back to deterministic affinity instead of killing the edge.
     """
     if top_k_candidates <= 0 or temperature <= 0:

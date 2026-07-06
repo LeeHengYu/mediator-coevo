@@ -261,9 +261,6 @@ class DiffusionConfig(BaseModel):
     softmax_top_k_candidates: int = Field(default=3, ge=1)
     llm_router_model: str = "openrouter/openai/gpt-5.2"
     llm_router_weight: float = Field(default=0.30, ge=0, le=1)
-    logical_seed_count: int = Field(default=3, ge=1)
-    logical_min_active_tasks: int = Field(default=2, ge=1)
-    consecutive_iteration_limit: int = Field(default=2, ge=1)
 
     @model_validator(mode="after")
     def validate_policy_graph_combination(self) -> Self:

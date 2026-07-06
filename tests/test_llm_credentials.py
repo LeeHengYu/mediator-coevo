@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -156,10 +157,18 @@ def test_run_cli_fails_fast_when_openrouter_key_is_missing(monkeypatch):
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(run_module, "ensure_harbor_available", fail_harbor_check)
+    monkeypatch.setattr(
+        run_module,
+        "resolve_task_selection",
+        lambda **kwargs: SimpleNamespace(
+            task_ids=["demo/task-one"],
+            family="demo",
+        ),
+    )
 
     result = CliRunner().invoke(
         app,
-        ["run", "--task", "demo", "--run-id", "credential-check"],
+        ["run", "--family", "demo", "--run-id", "credential-check"],
     )
 
     assert result.exit_code == 1

@@ -294,11 +294,7 @@ def print_context_budget_comparison(comparison: Any) -> None:
 
 
 def print_task_selection(selection: Any) -> None:
-    console.print(f"[bold]SkillFlow tasks:[/] {selection.task_ids}")
-    if selection.family is not None:
-        console.print(f"[bold]Family:[/] {selection.family}")
-    if selection.task_set is not None:
-        console.print(f"[bold]Task set:[/] {selection.task_set}")
+    console.print(f"[bold]Family:[/] {selection.family}")
 
 
 def print_experiment_controls(config: Config) -> None:

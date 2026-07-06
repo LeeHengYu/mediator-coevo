@@ -16,7 +16,6 @@ from mediated_coevo.core.config import Config
 from mediated_coevo.cli.config import (
     _load_config_or_bad_parameter,
     _run_config_overrides,
-    _task_ids_from_repeatable_cli,
 )
 from mediated_coevo.cli.experiment import (
     PROJECT_ROOT,
@@ -60,7 +59,7 @@ def run_skillflow_experiment(
     random.seed(seed)
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
-    config.experiment.benchmark_selection.task_set = selection.task_set
+    config.experiment.benchmark_selection.task_set = None
 
     prepare_llm_credentials_or_exit(config)
     if remote_harbor_config is None:
@@ -112,7 +111,10 @@ def run_skillflow_experiment(
             "[bold]Harbor runtime:[/] "
             f"GCP VM {remote_harbor_config.vm_name} ({remote_harbor_config.zone})"
         )
-    console.print(f"[bold]Iterations:[/] {iterations}")
+    if selection.family is not None:
+        console.print(f"[bold]Task stream length:[/] {len(selection.task_ids)}")
+    else:
+        console.print(f"[bold]Iterations:[/] {iterations}")
     console.print(f"[bold]Condition:[/] {condition_name}")
     console.print(
         f"[bold]Skill updates:[/] {config.experiment.skill_updates.model_dump()}"
@@ -140,21 +142,10 @@ def run_skillflow_experiment(
 
 
 def run(
-    tasks: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--task",
-            help="SkillFlow task ID. Repeat the option or provide comma-separated IDs.",
-        ),
-    ] = None,
     family: Annotated[
-        str | None,
-        typer.Option("--family", help="Run all local tasks in this SkillFlow family."),
-    ] = None,
-    task_set: Annotated[
-        str | None,
-        typer.Option("--task-set", help="Named local SkillFlow task set."),
-    ] = None,
+        str,
+        typer.Option("--family", help="SkillFlow family to bootstrap into a stream."),
+    ],
     iterations: Annotated[
         int | None,
         typer.Option(help="Number of iterations. Overrides experiment.num_iterations."),
@@ -307,9 +298,8 @@ def run(
     repository = build_benchmark_repo(PROJECT_ROOT, config)
     selection = resolve_task_selection(
         repository=repository,
-        tasks=_task_ids_from_repeatable_cli(tasks),
         family=family,
-        task_set=task_set,
+        seed=config.experiment.seed,
     )
     if cloud:
         try:

@@ -137,7 +137,7 @@ class DiffusionStore:
         subscriptions: list,
         snapshot_id: str | None,
     ) -> Path:
-        """Persist the selected transfer set for one logical target."""
+        """Persist the selected transfer set for one stream target."""
         store_dir = (
             self._base_dir
             / "selected"
@@ -151,8 +151,8 @@ class DiffusionStore:
             selected = _selected_candidate_metadata(subscription.metadata)
             metadata = {
                 **artifact.metadata,
-                "logical_iteration_source": artifact.source_iteration,
-                "logical_iteration_target": target_iteration,
+                "stream_iteration_source": artifact.source_iteration,
+                "stream_iteration_target": target_iteration,
                 "intended_target_task_id": target_task_id,
                 "selected_store_snapshot_id": snapshot_id,
                 "agent_selected_similarity_index": selected.get("similarity_index"),
@@ -181,7 +181,7 @@ class DiffusionStore:
                     "source": "llm_router_softmax_main_infra",
                     "intended_target_task_id": target_task_id,
                     "sources": sources,
-                    "logical_iteration": target_iteration,
+                    "stream_iteration": target_iteration,
                     "snapshot_id": snapshot_id,
                 },
                 indent=2,

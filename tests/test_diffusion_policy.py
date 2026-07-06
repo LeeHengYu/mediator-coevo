@@ -288,7 +288,7 @@ class _RouterLLM:
 
 
 @pytest.mark.asyncio
-async def test_logical_scheduler_activates_llm_routes_and_min_rescue(tmp_path) -> None:
+async def test_llm_router_prepares_context_for_fixed_stream_target(tmp_path) -> None:
     config = Config(
         models=models_config(),
         budgets=budgets_config(),
@@ -299,8 +299,7 @@ async def test_logical_scheduler_activates_llm_routes_and_min_rescue(tmp_path) -
             graph="none",
             max_artifacts=3,
             top_k_neighbors=3,
-            logical_seed_count=2,
-            softmax_top_k_candidates=2,
+            softmax_top_k_candidates=3,
         ),
     )
     orch = Orchestrator.__new__(Orchestrator)
@@ -313,7 +312,6 @@ async def test_logical_scheduler_activates_llm_routes_and_min_rescue(tmp_path) -
     orch._diffusion_snapshot_by_iteration = {}
     orch._diffusion_context_by_target = {}
     orch._diffusion_target_task_ids = ["task-A", "task-B", "task-C"]
-    orch._logical_task_run_iterations = {"task-A": [0], "task-B": [0]}
 
     for artifact in [
         _artifact("a-outcome", source_task_id="task-A", source_iteration=0),
@@ -321,77 +319,25 @@ async def test_logical_scheduler_activates_llm_routes_and_min_rescue(tmp_path) -
     ]:
         orch._diffusion_store.store_artifact(artifact)
 
-    active = await orch._logical_next_active_task_ids(
-        all_task_ids=["task-A", "task-B", "task-C"],
-        next_iteration=1,
+    await orch._prepare_diffusion_subscriptions(
+        target_task_id="task-C",
+        current_iteration=1,
     )
 
-    assert active == ["task-C", "task-A"]
+    assert not hasattr(Orchestrator, "_logical_next_active_task_ids")
     assert (1, "task-C") in orch._diffusion_sub_board
     assert (tmp_path / "diffusion" / "llm_router_decisions.jsonl").is_file()
     selected_store = tmp_path / "diffusion" / "selected" / "L0001-task-C"
-    assert (selected_store / "manifest.json").is_file()
+    manifest = json.loads((selected_store / "manifest.json").read_text())
+    assert manifest["stream_iteration"] == 1
     assert (tmp_path / "diffusion" / "routing_memory.json").is_file()
-    safeguard_rows = [
+    assert not (tmp_path / "diffusion" / "activation_safeguards.jsonl").exists()
+    router_rows = [
         json.loads(line)
-        for line in (
-            tmp_path / "diffusion" / "activation_safeguards.jsonl"
-        ).read_text().splitlines()
+        for line in (tmp_path / "diffusion" / "llm_router_decisions.jsonl")
+        .read_text()
+        .splitlines()
     ]
-    assert safeguard_rows[0]["event"] == "wildcard_min_active_rescue"
-
-
-@pytest.mark.asyncio
-async def test_logical_scheduler_drops_consecutive_and_rescues_two_tasks(
-    tmp_path,
-) -> None:
-    config = Config(
-        models=models_config(),
-        budgets=budgets_config(),
-        experiment=experiment_config(),
-        diffusion=DiffusionConfig(
-            enabled=True,
-            policy="llm_router_softmax",
-            graph="none",
-            max_artifacts=3,
-            top_k_neighbors=3,
-            logical_seed_count=2,
-            logical_min_active_tasks=2,
-            consecutive_iteration_limit=2,
-        ),
-    )
-    orch = Orchestrator.__new__(Orchestrator)
-    orch.config = config
-    orch.experiment_dir = tmp_path
-    orch._diffusion_store = DiffusionStore(tmp_path / "diffusion")
-    orch._diffusion_sub_board = {(2, "task-A"): []}
-    orch._diffusion_prepared_iterations = {2}
-    orch._diffusion_snapshot_by_iteration = {
-        2: TaskGraphSnapshot(
-            run_id="run-1",
-            iteration=2,
-            task_ids=["task-A", "task-B", "task-C"],
-            graph_policy="broadcast",
-        )
-    }
-    orch._diffusion_context_by_target = {}
-    orch._diffusion_target_task_ids = ["task-A", "task-B", "task-C"]
-    orch._logical_task_run_iterations = {"task-A": [0, 1], "task-B": [1]}
-
-    active = await orch._logical_next_active_task_ids(
-        all_task_ids=["task-A", "task-B", "task-C"],
-        next_iteration=2,
-    )
-
-    assert active == ["task-C", "task-B"]
-    rows = [
-        json.loads(line)
-        for line in (
-            tmp_path / "diffusion" / "activation_safeguards.jsonl"
-        ).read_text().splitlines()
-    ]
-    assert [row["event"] for row in rows] == [
-        "drop_consecutive_activation",
-        "wildcard_min_active_rescue",
-        "wildcard_min_active_rescue",
-    ]
+    assert router_rows
+    assert all("stream_iteration" in row for row in router_rows)
+    assert all("logical_iteration" not in row for row in router_rows)

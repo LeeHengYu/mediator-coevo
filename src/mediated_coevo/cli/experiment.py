@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,16 +28,15 @@ from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.cli.output import console, print_result_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+BOOTSTRAP_FAMILY_TASK_COUNT = 8
 
 
 @dataclass(frozen=True)
 class TaskSelection:
-    """Resolved SkillFlow task selectors for one run."""
+    """Resolved SkillFlow task stream for one run."""
 
     task_ids: list[str]
-    tasks: list[str]
-    family: str | None
-    task_set: str | None
+    family: str
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -51,22 +51,16 @@ def setup_logging(verbose: bool = False) -> None:
 def resolve_task_selection(
     *,
     repository: SkillFlowRepository,
-    tasks: list[str] | None,
-    family: str | None,
-    task_set: str | None,
+    family: str,
+    seed: int | None = None,
 ) -> TaskSelection:
-    selected = repository.resolve_selection(
-        tasks=tasks,
-        family=family,
-        task_set=task_set,
-    )
+    selected = repository.list_local_task_ids(family=family)
     if not selected:
-        raise typer.BadParameter("provide --task, --family, or --task-set")
+        raise typer.BadParameter(f"no local SkillFlow tasks found for family {family!r}")
+    selected = random.Random(seed).choices(selected, k=BOOTSTRAP_FAMILY_TASK_COUNT)
     return TaskSelection(
         task_ids=selected,
-        tasks=tasks or [],
         family=family,
-        task_set=task_set,
     )
 
 

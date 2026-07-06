@@ -311,8 +311,7 @@ def _stub_matrix_runtime_build(monkeypatch, tmp_path):
 
     class Selection:
         task_ids = ["task-A"]
-        family = None
-        task_set = None
+        family = "family-a"
 
     class Factory:
         def __init__(self, project_root):
@@ -363,8 +362,8 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
         app,
         [
             "matrix",
-            "--task",
-            "task-A",
+            "--family",
+            "family-a",
             "--index",
             "3",
             "--run-id",
@@ -380,6 +379,9 @@ def test_matrix_index_runs_only_selected_row(monkeypatch, tmp_path):
     assert captured["benchmark_repo"] is repository
     assert captured["matrix_seed"] == 42
     assert captured["matrix_run_id"] == "custom-matrix-run"
+    base_config = captured["base_config"]
+    assert base_config.experiment.benchmark_selection.tasks == ["task-A"]
+    assert base_config.experiment.benchmark_selection.family == "family-a"
 
 
 def test_matrix_index_accepts_comma_separated_rows(monkeypatch, tmp_path):
@@ -391,8 +393,8 @@ def test_matrix_index_accepts_comma_separated_rows(monkeypatch, tmp_path):
         app,
         [
             "matrix",
-            "--task",
-            "task-A",
+            "--family",
+            "family-a",
             "--index",
             "1,3",
             "--config-dir",
@@ -463,7 +465,7 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
     saved = tmp_path / "saved"
     source.save_artifact_store(saved, store_id="warmup")
     repository = object()
-    selection = SimpleNamespace(task_ids=["task-A"], family=None, task_set=None)
+    selection = SimpleNamespace(task_ids=["task-A"], family="family-a")
     orch = SimpleNamespace(
         config=None,
         experiment_dir=tmp_path / "row-experiment",
@@ -540,8 +542,8 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
         app,
         [
             "matrix",
-            "--task",
-            "task-A",
+            "--family",
+            "family-a",
             "--index",
             "1",
             "--artifact",
@@ -563,7 +565,7 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
     assert orch.preloaded_diffusion_artifact_store_path == str(saved)
     assert orch.preloaded_diffusion_artifact_store_count == 1
     assert "command" not in invocation
-    assert invocation["tasks"] == ["task-A"]
+    assert invocation["family"] == "family-a"
     assert invocation["selected_task_ids"] == ["task-A"]
     assert invocation["row_indexes_argument"] == "1"
     assert invocation["selected_indexes"] == [1]
@@ -1047,7 +1049,7 @@ def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
 
     with pytest.raises(typer.BadParameter, match="no_feedback"):
         run_module.run(
-            tasks=["task-A"],
+            family="family-a",
             iterations=1,
             seed=42,
             condition="no_feedback",
@@ -1056,7 +1058,7 @@ def test_run_command_validates_design_before_harbor(monkeypatch, tmp_path):
         )
 
 
-def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path):
+def test_run_command_requires_family_before_harbor(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     _write_minimal_config(config_dir)
 
@@ -1065,14 +1067,25 @@ def test_run_command_requires_task_selection_before_harbor(monkeypatch, tmp_path
 
     monkeypatch.setattr(run_module, "ensure_harbor_available", fail_if_called)
 
-    with pytest.raises(typer.BadParameter, match="provide --task"):
-        run_module.run(
-            iterations=1,
-            seed=42,
-            condition="learned_mediator",
-            skill_updates="all",
-            config_dir=config_dir,
-        )
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--iterations",
+            "1",
+            "--seed",
+            "42",
+            "--condition",
+            "learned_mediator",
+            "--skill-updates",
+            "all",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--family" in result.output
 
 
 def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
@@ -1089,6 +1102,14 @@ def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
         lambda config: config,
     )
     monkeypatch.setattr(run_module, "ensure_harbor_available", lambda config: None)
+    monkeypatch.setattr(
+        run_module,
+        "resolve_task_selection",
+        lambda **kwargs: SimpleNamespace(
+            task_ids=["family-a/task-one"],
+            family="family-a",
+        ),
+    )
 
     def capture_run(**kwargs):
         captured.update(kwargs)
@@ -1096,7 +1117,7 @@ def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
     monkeypatch.setattr(run_module, "run_skillflow_experiment", capture_run)
 
     run_module.run(
-        tasks=["task-A"],
+        family="family-a",
         config_dir=config_dir,
     )
 

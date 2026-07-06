@@ -178,7 +178,6 @@ class Orchestrator:
         self._diffusion_prepared_iterations: set[int] = set()
         self._diffusion_snapshot_by_iteration: dict[int, TaskGraphSnapshot] = {}
         self._diffusion_target_task_ids: list[str] = []
-        self._logical_task_run_iterations: dict[str, list[int]] = {}
 
     async def run_experiment(
         self,
@@ -188,11 +187,8 @@ class Orchestrator:
         """Run the full experiment loop."""
         if num_iterations is None:
             num_iterations = self.config.experiment.num_iterations
-        if self._uses_logical_batch_scheduler():
-            return await self._run_logical_batch_experiment(
-                task_ids,
-                num_iterations,
-            )
+        if self.config.experiment.benchmark_selection.family is not None:
+            return await self._run_task_stream(task_ids)
         records: list[IterationRecord] = []
         selection = self.config.experiment.benchmark_selection
         self._diffusion_target_task_ids = list(task_ids)
@@ -237,45 +233,33 @@ class Orchestrator:
         )
         return records
 
-    async def _run_logical_batch_experiment(
+    async def _run_task_stream(
         self,
         task_ids: list[str],
-        num_iterations: int,
     ) -> list[IterationRecord]:
-        """Run activated logical batches for source-to-target diffusion policies."""
+        """Run one externally ordered task stream."""
         records: list[IterationRecord] = []
         selection = self.config.experiment.benchmark_selection
         self._diffusion_target_task_ids = list(task_ids)
         self._diffusion_sub_board.clear()
         self._diffusion_prepared_iterations.clear()
         self._diffusion_snapshot_by_iteration.clear()
-        self._logical_task_run_iterations.clear()
         self.executor_skill_gate.validation_task_pool = [
             *selection.tasks,
             *task_ids,
         ]
 
-        active_task_ids = self._logical_seed_task_ids(task_ids)
-        for iteration in range(num_iterations):
+        for iteration, task_id in enumerate(task_ids):
             self._release_staged_cross_task_reports()
-            if not active_task_ids:
-                logger.info(
-                    "Logical batch stopped: no active tasks at iteration %d",
-                    iteration,
-                )
-                break
-
-            for task_id in active_task_ids:
-                logger.info(
-                    "=== Logical iteration %d/%d | Task: %s ===",
-                    iteration + 1,
-                    num_iterations,
-                    task_id,
-                )
-                record = await self._run_iteration(task_id, iteration)
-                self._record_logical_task_run(task_id, iteration)
-                records.append(record)
-                self._snapshot_and_write_metrics(iteration, [record])
+            logger.info(
+                "=== Stream task %d/%d | Task: %s ===",
+                iteration + 1,
+                len(task_ids),
+                task_id,
+            )
+            record = await self._run_iteration(task_id, iteration)
+            records.append(record)
+            self._snapshot_and_write_metrics(iteration, [record])
 
             coevolution_record: IterationRecord | None = None
             if (iteration + 1) % self.config.experiment.coevo_interval == 0:
@@ -289,138 +273,11 @@ class Orchestrator:
                     coevolution_record=coevolution_record,
                 )
 
-            if iteration + 1 >= num_iterations:
-                break
-            active_task_ids = await self._logical_next_active_task_ids(
-                all_task_ids=task_ids,
-                next_iteration=iteration + 1,
-            )
-
         logger.info(
-            "Logical batch experiment complete: %d records across %d max iterations",
+            "Task stream complete: %d records",
             len(records),
-            num_iterations,
         )
-        self._write_logical_router_reporting_board(records)
         return records
-
-    def _uses_logical_batch_scheduler(self) -> bool:
-        return (
-            self.config.diffusion.enabled
-            and self.config.diffusion.policy == "llm_router_softmax"
-        )
-
-    def _logical_seed_task_ids(self, task_ids: list[str]) -> list[str]:
-        seed_count = min(self.config.diffusion.logical_seed_count, len(task_ids))
-        if seed_count >= len(task_ids):
-            return list(task_ids)
-        return random.Random(self.config.experiment.seed).sample(task_ids, seed_count)
-
-    def _record_logical_task_run(self, task_id: str, iteration: int) -> None:
-        self._logical_task_run_iterations.setdefault(task_id, []).append(iteration)
-
-    async def _logical_next_active_task_ids(
-        self,
-        *,
-        all_task_ids: list[str],
-        next_iteration: int,
-    ) -> list[str]:
-        await self._prepare_diffusion_subscriptions(
-            target_task_id=all_task_ids[0],
-            current_iteration=next_iteration,
-        )
-        active = {
-            task_id
-            for iteration, task_id in self._diffusion_sub_board
-            if iteration == next_iteration
-        }
-        for task_id in list(active):
-            if self._would_make_too_many_consecutive_runs(task_id, next_iteration):
-                self._diffusion_sub_board.pop((next_iteration, task_id), None)
-                active.remove(task_id)
-                self._record_activation_safeguard(
-                    event="drop_consecutive_activation",
-                    target_task_id=task_id,
-                    target_iteration=next_iteration,
-                    reason=(
-                        "task would exceed diffusion.consecutive_iteration_limit"
-                    ),
-                )
-
-        min_active = min(
-            len(all_task_ids),
-            self.config.diffusion.logical_min_active_tasks,
-        )
-        while len(active) < min_active:
-            rescue_candidates = [
-                task_id
-                for task_id in all_task_ids
-                if task_id not in active
-                and not self._would_make_too_many_consecutive_runs(
-                    task_id,
-                    next_iteration,
-                )
-            ]
-            if not rescue_candidates:
-                break
-            target_id = sorted(rescue_candidates, key=self._logical_task_order_key)[0]
-            active.add(target_id)
-            self._record_empty_diffusion_context(
-                target_id,
-                next_iteration,
-                snapshot=self._diffusion_snapshot_by_iteration.get(next_iteration),
-            )
-            self._record_activation_safeguard(
-                event="wildcard_min_active_rescue",
-                target_task_id=target_id,
-                target_iteration=next_iteration,
-                reason=f"logical wave needs at least {min_active} active tasks",
-            )
-
-        return sorted(active, key=self._logical_task_order_key)
-
-    def _logical_task_order_key(self, task_id: str) -> tuple[int, int, str]:
-        return (
-            self._logical_task_run_count(task_id),
-            self._logical_task_last_seen(task_id),
-            task_id,
-        )
-
-    def _logical_task_run_count(self, task_id: str) -> int:
-        return len(self._logical_task_run_iterations.get(task_id, []))
-
-    def _logical_task_last_seen(self, task_id: str) -> int:
-        return max(self._logical_task_run_iterations.get(task_id, []), default=-999)
-
-    def _would_make_too_many_consecutive_runs(
-        self,
-        task_id: str,
-        next_iteration: int,
-    ) -> bool:
-        limit = self.config.diffusion.consecutive_iteration_limit
-        return all(
-            iteration in self._logical_task_run_iterations.get(task_id, [])
-            for iteration in range(next_iteration - limit, next_iteration)
-        )
-
-    def _record_activation_safeguard(
-        self,
-        *,
-        event: str,
-        target_task_id: str,
-        target_iteration: int,
-        reason: str,
-    ) -> None:
-        self._diffusion_store.append_audit_record(
-            "activation_safeguards.jsonl",
-            {
-                "event": event,
-                "target_task_id": target_task_id,
-                "target_iteration": target_iteration,
-                "reason": reason,
-                "timestamp": time.time(),
-            },
-        )
 
     def _release_staged_cross_task_reports(self) -> None:
         """Promote cross-task reports only at iteration boundaries."""
@@ -1163,7 +1020,7 @@ class Orchestrator:
         for route in routes:
             routes_by_target.setdefault(route.target_task_id, []).append(route)
             self._record_llm_router_softmax_decision(route, snapshot=snapshot)
-            self._update_logical_router_memory(route)
+            self._update_router_memory(route)
 
         for target_id, target_routes in routes_by_target.items():
             selected_routes = sorted(
@@ -1249,7 +1106,7 @@ class Orchestrator:
                     "llm_router_decisions.jsonl",
                     {
                         "status": "error",
-                        "logical_iteration": current_iteration,
+                        "stream_iteration": current_iteration,
                         "source_artifact_id": artifact.artifact_id,
                         "source_task_id": artifact.source_task_id,
                         "model": self.config.diffusion.llm_router_model,
@@ -1264,7 +1121,7 @@ class Orchestrator:
                 "llm_router_decisions.jsonl",
                 {
                     "status": "ok" if parsed else "parse_empty",
-                    "logical_iteration": current_iteration,
+                    "stream_iteration": current_iteration,
                     "source_artifact_id": artifact.artifact_id,
                     "source_task_id": artifact.source_task_id,
                     "model": self.config.diffusion.llm_router_model,
@@ -1338,7 +1195,7 @@ class Orchestrator:
             ),
         }
 
-    def _update_logical_router_memory(self, route: LLMRouterSoftmaxRoute) -> None:
+    def _update_router_memory(self, route: LLMRouterSoftmaxRoute) -> None:
         self._diffusion_store.update_routing_memory(
             artifact=route.subscription.artifact,
             target_task_id=route.target_task_id,
@@ -1651,118 +1508,6 @@ class Orchestrator:
             self.freeze_diffusion_artifact_store
         )
 
-    def _write_logical_router_reporting_board(
-        self,
-        records: list[IterationRecord],
-    ) -> None:
-        """Write a compact logical-router observability board."""
-        if not records:
-            return
-        run_count_board: dict[str, dict[str, Any]] = {}
-        for task_id in self._diffusion_target_task_ids:
-            task_records = [record for record in records if record.task_id == task_id]
-            run_count_board[task_id] = {
-                "run_count": len(task_records),
-                "logical_iterations": [record.iteration for record in task_records],
-                "successes": sum(1 for record in task_records if record.success),
-                "last_reward": task_records[-1].reward if task_records else None,
-            }
-
-        selected_diffused_records = [
-            diffused
-            for diffused in self._diffusion_store.query_diffused_records(recent=None)
-            if diffused.policy_name == "llm_router_softmax" and diffused.selected
-        ]
-        selected_counts = {task_id: 0 for task_id in self._diffusion_target_task_ids}
-        for diffused in selected_diffused_records:
-            if diffused.target_task_id in selected_counts:
-                selected_counts[diffused.target_task_id] += 1
-        total_selected = sum(selected_counts.values())
-        max_share = (
-            max(count / total_selected for count in selected_counts.values())
-            if total_selected
-            else 0.0
-        )
-
-        router_decisions = self._diffusion_store.load_audit_records(
-            "llm_router_decisions.jsonl"
-        )
-        cumulative_cost = 0.0
-        cumulative_successes = 0
-        checkpoint_efficiency: list[dict[str, Any]] = []
-        for iteration in sorted({record.iteration for record in records}):
-            iteration_records = [
-                record for record in records if record.iteration == iteration
-            ]
-            for record in iteration_records:
-                trace_metadata = (
-                    record.execution_trace.harbor_metadata
-                    if record.execution_trace is not None
-                    else {}
-                )
-                cumulative_cost += _optional_float(
-                    trace_metadata.get("agent_result.cost_usd")
-                )
-                cumulative_successes += int(bool(record.success))
-            checkpoint_efficiency.append(
-                {
-                    "logical_iteration": iteration,
-                    "iteration_runs": len(iteration_records),
-                    "cumulative_runs": sum(
-                        1 for record in records if record.iteration <= iteration
-                    ),
-                    "cumulative_successes": cumulative_successes,
-                    "executor_reported_cost_usd": round(cumulative_cost, 6),
-                    "successes_per_dollar": (
-                        round(cumulative_successes / cumulative_cost, 6)
-                        if cumulative_cost
-                        else None
-                    ),
-                }
-            )
-
-        board = {
-            "source": "llm_router_softmax_main_infra",
-            "generated_at": time.time(),
-            "run_count_board": run_count_board,
-            "skipped_tasks": [
-                task_id
-                for task_id, row in run_count_board.items()
-                if row["run_count"] == 0
-            ],
-            "selection_concentration": {
-                "selected_target_counts": selected_counts,
-                "max_selected_target_share": round(max_share, 6),
-                "over_exploitation_flag": (
-                    max_share > 0.4
-                    or any(count >= 3 for count in selected_counts.values())
-                ),
-            },
-            "router_usage": {
-                "calls": len(router_decisions),
-                "ok_calls": sum(
-                    1 for row in router_decisions if row.get("status") == "ok"
-                ),
-                "fallbacks": sum(
-                    1 for row in router_decisions if row.get("status") != "ok"
-                ),
-                "prompt_tokens": sum(
-                    int(row.get("input_tokens") or 0) for row in router_decisions
-                ),
-                "completion_tokens": sum(
-                    int(row.get("output_tokens") or 0) for row in router_decisions
-                ),
-                "model": self.config.diffusion.llm_router_model,
-            },
-            "checkpoint_efficiency": checkpoint_efficiency,
-            "safeguard_events": self._diffusion_store.load_audit_records(
-                "activation_safeguards.jsonl"
-            ),
-        }
-        path = self.experiment_dir / "diffusion" / "logical_router_reporting_board.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(board, indent=2, sort_keys=True), encoding="utf-8")
-
     def _ensure_diffusion_runtime_state(self) -> None:
         if not hasattr(self, "_diffusion_store"):
             self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
@@ -1784,8 +1529,6 @@ class Orchestrator:
             self._diffusion_snapshot_by_iteration = {}
         if not hasattr(self, "_diffusion_target_task_ids"):
             self._diffusion_target_task_ids = []
-        if not hasattr(self, "_logical_task_run_iterations"):
-            self._logical_task_run_iterations = {}
 
     async def _coevolve(
         self,
@@ -2680,13 +2423,6 @@ def _edge_weight(
         ):
             return edge.weight
     return None
-
-
-def _optional_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def _valid_planner_reflection_candidates(

@@ -274,7 +274,7 @@ Run the local smoke task:
 
 ```bash
 uv run medcoevo run \
-  --task smoke-skillflow \
+  --family smoke \
   --iterations 1 \
   --condition no_feedback \
   --skill-updates none \
@@ -297,7 +297,7 @@ uv run medcoevo run \
   --run-id all-wra-top-k-similarity
 ```
 
-Run one family with the logical softmax batch scheduler:
+Run one family with the LLM router diffusion policy:
 
 ```bash
 uv run medcoevo run \
@@ -349,17 +349,15 @@ remote dataset.
 
 ## CLI Overview
 
-Pick tasks with one of:
+Pick the experiment family:
 
-- `--task <id>`: one task; repeat the flag or use commas.
-- `--family <name>`: all cached tasks in a family.
-- `--task-set <name>`: file under `benchmarks/skillflow/task_sets/`.
+- `--family <name>`: bootstrap an 8-task stream from the cached family, with replacement.
 
 Remote Harbor run on the configured GCP VM:
 
 ```bash
 uv run medcoevo run \
-  --task smoke-skillflow \
+  --family smoke \
   --iterations 1 \
   --seed 1 \
   --cloud \
@@ -387,7 +385,7 @@ Cheap matrix smoke:
 
 ```bash
 uv run medcoevo matrix \
-  --task smoke-skillflow \
+  --family smoke \
   --iterations 1 \
   --seed 1
 ```
@@ -554,7 +552,7 @@ from `test_tasks/` and flattened into the local `tasks/` cache, so runtime task
 IDs are available directly under `tasks/<Family>/<Task>/`:
 
 ```bash
-uv run medcoevo run --task Distribution-Center-Auditing/harbor_returns_disposition_audit
+uv run medcoevo run --family Distribution-Center-Auditing
 ```
 
 | `--config-dir` | `config/` | Directory containing `default.toml`. |
@@ -580,7 +578,7 @@ outputs stay under local `data/experiments/`.
 
 ```bash
 uv run medcoevo run \
-  --task smoke-skillflow \
+  --family smoke \
   --iterations 1 \
   --condition no_feedback \
   --skill-updates none \
@@ -801,8 +799,8 @@ docker info
 Missing SkillFlow task
 
 Use `uv run medcoevo list`, download with `uv run medcoevo sync --tasks ...`,
-select an existing local `--task`, or add a task under
-`benchmarks/skillflow/tasks/`.
+select an existing local `--family`, or add a task under
+`benchmarks/skillflow/tasks/<Family>/`.
 
 Missing SkillFlow prebuilt image
 
