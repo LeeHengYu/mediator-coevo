@@ -44,8 +44,18 @@ from mediated_coevo.experiment.runtime_factory import (
 
 def matrix(
     family: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--family",
+            help="SkillFlow family to bootstrap into a stream. Repeat for multiple.",
+        ),
+    ] = None,
+    split: Annotated[
         str | None,
-        typer.Option("--family", help="SkillFlow family to bootstrap into a stream."),
+        typer.Option(
+            "--split",
+            help="Optional task split to sample from: train | validation | test.",
+        ),
     ] = None,
     iterations: int | None = typer.Option(
         None,
@@ -199,7 +209,7 @@ def matrix(
             "diffusion.graph; use --diffusion-max-artifacts or "
             "--diffusion-top-k-neighbors for shared matrix knobs"
         )
-    if family is None:
+    if not family:
         raise typer.BadParameter("provide --family")
     selected_indexes = _parse_matrix_row_indexes(row_indexes)
     if selected_indexes is None:
@@ -243,6 +253,7 @@ def matrix(
         repository=repository,
         family=family,
         seed=config.experiment.seed,
+        split=split,
     )
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
@@ -305,7 +316,8 @@ def matrix(
             )
         _write_matrix_invocation_metadata(
             row_dir=row.runtime.experiment_dir,
-            family=family,
+            family=selection.family,
+            split=getattr(selection, "split", None),
             selected_task_ids=selection.task_ids,
             iterations=iterations,
             seed=seed,
@@ -409,6 +421,7 @@ def _write_matrix_invocation_metadata(
     *,
     row_dir: Path,
     family: str,
+    split: str | None,
     selected_task_ids: list[str],
     iterations: int,
     seed: int,
@@ -427,6 +440,7 @@ def _write_matrix_invocation_metadata(
     """Persist matrix CLI inputs that are not fully represented in config.toml."""
     payload = {
         "family": family,
+        "split": split,
         "selected_task_ids": selected_task_ids,
         "iterations": iterations,
         "seed": seed,

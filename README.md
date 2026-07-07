@@ -287,6 +287,9 @@ remote dataset.
 Pick the experiment family:
 
 - `--family <name>`: bootstrap an 8-task stream from the cached family, with replacement.
+- Repeat `--family` to sample from multiple cached families.
+- `--split train|validation|test`: optionally sample from a deterministic 60/20/20
+  split of the selected family pool.
 
 Remote Harbor run on the configured GCP VM:
 

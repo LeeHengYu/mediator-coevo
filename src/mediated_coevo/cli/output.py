@@ -294,7 +294,11 @@ def print_context_budget_comparison(comparison: Any) -> None:
 
 
 def print_task_selection(selection: Any) -> None:
-    console.print(f"[bold]Family:[/] {selection.family}")
+    families = getattr(selection, "families", None)
+    label = ", ".join(families) if families else selection.family
+    console.print(f"[bold]Family:[/] {label}")
+    if getattr(selection, "split", None):
+        console.print(f"[bold]Split:[/] {selection.split}")
 
 
 def print_experiment_controls(config: Config) -> None:

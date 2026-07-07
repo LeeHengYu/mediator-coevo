@@ -1111,6 +1111,8 @@ def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
         lambda **kwargs: SimpleNamespace(
             task_ids=["family-a/task-one"],
             family="family-a",
+            families=("family-a",),
+            split=kwargs.get("split"),
         ),
     )
 
@@ -1120,13 +1122,64 @@ def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
     monkeypatch.setattr(run_module, "run_skillflow_experiment", capture_run)
 
     run_module.run(
-        family="family-a",
+        family=["family-a"],
         config_dir=config_dir,
     )
 
     assert captured["iterations"] == 2
     assert captured["seed"] == 42
     assert captured["condition_name"] == "learned_mediator"
+
+
+def test_run_command_forwards_repeated_families_and_split(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        run_module,
+        "prepare_llm_credentials_or_exit",
+        lambda config: config,
+    )
+    monkeypatch.setattr(run_module, "ensure_harbor_available", lambda config: None)
+    monkeypatch.setattr(run_module, "build_benchmark_repo", lambda *args: object())
+
+    def capture_selection(**kwargs):
+        captured["family"] = kwargs["family"]
+        captured["split"] = kwargs["split"]
+        return SimpleNamespace(
+            task_ids=["family-a/task-one"],
+            family="family-a,family-b",
+            families=("family-a", "family-b"),
+            split=kwargs["split"],
+        )
+
+    monkeypatch.setattr(run_module, "resolve_task_selection", capture_selection)
+    monkeypatch.setattr(
+        run_module,
+        "run_skillflow_experiment",
+        lambda **kwargs: captured.update({"run_called": True}),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--family",
+            "family-a",
+            "--family",
+            "family-b",
+            "--split",
+            "validation",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["family"] == ["family-a", "family-b"]
+    assert captured["split"] == "validation"
+    assert captured["run_called"] is True
 
 
 def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path):

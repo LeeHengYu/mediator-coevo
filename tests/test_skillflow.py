@@ -56,6 +56,35 @@ def test_family_selection_bootstraps_task_stream_with_replacement(
     assert len(set(selection.task_ids)) < len(selection.task_ids)
 
 
+def test_family_selection_accepts_multiple_families_and_split(tmp_path: Path) -> None:
+    root = tmp_path / "skillflow"
+    for index in range(1, 5):
+        _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
+        _write_task(root / "tasks" / "family-b" / f"task-{index}", family="family-b")
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+
+    validation = resolve_task_selection(
+        repository=repo,
+        family=["family-a", "family-b"],
+        seed=42,
+        split="validation",
+    )
+    all_tasks = set(repo.list_local_task_ids(family=None))
+    train = resolve_task_selection(
+        repository=repo,
+        family=["family-a", "family-b"],
+        seed=42,
+        split="train",
+    )
+
+    assert validation.families == ("family-a", "family-b")
+    assert validation.family == "family-a,family-b"
+    assert validation.split == "validation"
+    assert len(validation.task_ids) == BOOTSTRAP_FAMILY_TASK_COUNT
+    assert set(validation.task_ids) <= all_tasks
+    assert set(validation.task_ids).isdisjoint(set(train.task_ids))
+
+
 def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None:
     root = tmp_path / "skillflow"
     task_dir = root / "tasks" / "demo"

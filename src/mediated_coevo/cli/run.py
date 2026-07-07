@@ -142,9 +142,19 @@ def run_skillflow_experiment(
 
 def run(
     family: Annotated[
-        str,
-        typer.Option("--family", help="SkillFlow family to bootstrap into a stream."),
-    ],
+        list[str] | None,
+        typer.Option(
+            "--family",
+            help="SkillFlow family to bootstrap into a stream. Repeat for multiple.",
+        ),
+    ] = None,
+    split: Annotated[
+        str | None,
+        typer.Option(
+            "--split",
+            help="Optional task split to sample from: train | validation | test.",
+        ),
+    ] = None,
     iterations: Annotated[
         int | None,
         typer.Option(help="Number of iterations. Overrides experiment.num_iterations."),
@@ -299,6 +309,7 @@ def run(
         repository=repository,
         family=family,
         seed=config.experiment.seed,
+        split=split,
     )
     if cloud:
         try:

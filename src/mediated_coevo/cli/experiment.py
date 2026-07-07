@@ -8,6 +8,7 @@ import random
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, Sequence
 
 import typer
 from rich.logging import RichHandler
@@ -29,6 +30,8 @@ from mediated_coevo.cli.output import console, print_result_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BOOTSTRAP_FAMILY_TASK_COUNT = 8
+TaskSplitName = Literal["train", "validation", "test"]
+TASK_SPLIT_NAMES = frozenset({"train", "validation", "test"})
 
 
 @dataclass(frozen=True)
@@ -36,7 +39,13 @@ class TaskSelection:
     """Resolved SkillFlow task stream for one run."""
 
     task_ids: list[str]
-    family: str
+    families: tuple[str, ...]
+    split: TaskSplitName | None = None
+
+    @property
+    def family(self) -> str:
+        """Compact label for persisted metadata and old call sites."""
+        return ",".join(self.families)
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -51,17 +60,77 @@ def setup_logging(verbose: bool = False) -> None:
 def resolve_task_selection(
     *,
     repository: SkillFlowRepository,
-    family: str,
+    family: str | Sequence[str] | None,
     seed: int | None = None,
+    split: str | None = None,
 ) -> TaskSelection:
-    selected = repository.list_local_task_ids(family=family)
+    families = _normalize_families(family)
+    selected: list[str] = []
+    for family_name in families:
+        family_task_ids = repository.list_local_task_ids(family=family_name)
+        if not family_task_ids:
+            raise typer.BadParameter(
+                f"no local SkillFlow tasks found for family {family_name!r}"
+            )
+        selected.extend(family_task_ids)
+    selected = sorted(dict.fromkeys(selected))
+    selected = _select_split_pool(selected, seed=seed, split=split)
     if not selected:
-        raise typer.BadParameter(f"no local SkillFlow tasks found for family {family!r}")
+        raise typer.BadParameter("selected task split is empty")
     selected = random.Random(seed).choices(selected, k=BOOTSTRAP_FAMILY_TASK_COUNT)
     return TaskSelection(
         task_ids=selected,
-        family=family,
+        families=tuple(families),
+        split=_normalize_split(split),
     )
+
+
+def _normalize_families(family: str | Sequence[str] | None) -> list[str]:
+    if family is None:
+        raise typer.BadParameter("provide --family")
+    raw_families = [family] if isinstance(family, str) else list(family)
+    families = list(
+        dict.fromkeys(family_name.strip() for family_name in raw_families if family_name.strip())
+    )
+    if not families:
+        raise typer.BadParameter("provide --family")
+    return families
+
+
+def _normalize_split(split: str | None) -> TaskSplitName | None:
+    if split is None:
+        return None
+    normalized = split.strip().lower()
+    if normalized not in TASK_SPLIT_NAMES:
+        allowed = ", ".join(sorted(TASK_SPLIT_NAMES))
+        raise typer.BadParameter(f"invalid split {split!r}; expected one of: {allowed}")
+    return normalized  # type: ignore[return-value]
+
+
+def _select_split_pool(
+    task_ids: list[str],
+    *,
+    seed: int | None,
+    split: str | None,
+) -> list[str]:
+    split_name = _normalize_split(split)
+    if split_name is None:
+        return task_ids
+    if len(task_ids) < 3:
+        raise typer.BadParameter("train/validation/test split requires at least 3 tasks")
+    shuffled = list(task_ids)
+    random.Random(seed).shuffle(shuffled)
+    validation_count = max(1, len(shuffled) // 5)
+    test_count = max(1, len(shuffled) // 5)
+    train_count = len(shuffled) - validation_count - test_count
+    if train_count < 1:
+        raise typer.BadParameter("train/validation/test split leaves no training tasks")
+    pools = {
+        "train": shuffled[:train_count],
+        "validation": shuffled[train_count : train_count + validation_count],
+        "test": shuffled[train_count + validation_count :],
+    }
+    return pools[split_name]
 
 
 def ensure_harbor_available(config: Config) -> None:
