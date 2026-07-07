@@ -1031,13 +1031,11 @@ class Orchestrator:
             recent=None,
             before_iteration=current_iteration,
         )
-        return next(
-            (
-                snapshot
-                for snapshot in snapshots
-                if snapshot.graph_policy == "langchain_graph"
-            ),
-            None,
+        snapshot = _latest_langchain_snapshot(snapshots)
+        if snapshot is not None:
+            return snapshot
+        return _latest_langchain_snapshot(
+            self._diffusion_store.query_graph_snapshots(recent=None)
         )
 
     def _get_langchain_graph_policy(self) -> LangChainGraphPolicy:
@@ -2184,6 +2182,19 @@ def _edge_weight(
         ):
             return edge.weight
     return None
+
+
+def _latest_langchain_snapshot(
+    snapshots: list[TaskGraphSnapshot],
+) -> TaskGraphSnapshot | None:
+    return next(
+        (
+            snapshot
+            for snapshot in snapshots
+            if snapshot.graph_policy == "langchain_graph"
+        ),
+        None,
+    )
 
 
 def _valid_planner_reflection_candidates(

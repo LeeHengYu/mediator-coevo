@@ -13,6 +13,7 @@ from mediated_coevo.diffusion import (
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
+    DiffusionStore,
     DiffusionSubscription,
     LangChainGraphPolicyResult,
     REUSE_SUCCESS_CHANNEL,
@@ -745,6 +746,38 @@ async def test_langchain_graph_policy_gets_same_task_causal_artifacts_only(tmp_p
     assert fake_policy.artifact_ids_seen == ["old-same-task"]
     assert bundle.diffusion_context is not None
     assert "same-node prior hint" in bundle.diffusion_context
+
+
+def test_langchain_graph_uses_carried_seed_snapshot_at_first_iteration(tmp_path):
+    orch = Orchestrator.__new__(Orchestrator)
+    orch._diffusion_store = DiffusionStore(tmp_path / "diffusion")
+    seed_snapshot = TaskGraphSnapshot(
+        snapshot_id="seed-snapshot",
+        run_id="old-run",
+        iteration=7,
+        task_ids=["old-node"],
+        graph_policy="langchain_graph",
+    )
+    current_snapshot = TaskGraphSnapshot(
+        snapshot_id="current-snapshot",
+        run_id="new-run",
+        iteration=0,
+        task_ids=["new-node"],
+        graph_policy="langchain_graph",
+    )
+    orch._diffusion_store.store_graph_snapshot(seed_snapshot)
+
+    assert (
+        orch._latest_langchain_graph_snapshot(current_iteration=0).snapshot_id
+        == "seed-snapshot"
+    )
+
+    orch._diffusion_store.store_graph_snapshot(current_snapshot)
+
+    assert (
+        orch._latest_langchain_graph_snapshot(current_iteration=1).snapshot_id
+        == "current-snapshot"
+    )
 
 
 @pytest.mark.asyncio

@@ -208,9 +208,17 @@ def _snapshot_from_graph_decision(
     task_profile: dict[str, Any],
     graph_decision: dict[str, Any],
 ) -> TaskGraphSnapshot:
-    node_id = str(graph_decision.get("node_id") or task_profile["task_id"])
+    raw_node_id = str(graph_decision.get("node_id") or task_profile["task_id"])
     metadata = dict(previous_snapshot.metadata) if previous_snapshot else {}
     task_nodes = dict(metadata.get("task_nodes", {}))
+    known_node_ids = set(task_nodes)
+    if previous_snapshot:
+        known_node_ids.update(previous_snapshot.task_ids)
+    node_id = _canonical_graph_node_id(
+        raw_node_id,
+        current_task_id=str(task_profile["task_id"]),
+        known_node_ids=known_node_ids,
+    )
     node_record = dict(task_nodes.get(node_id, {}))
     node_record.setdefault("task_ids", [])
     node_record["task_ids"] = [*node_record["task_ids"], task_profile["task_id"]]
@@ -221,20 +229,33 @@ def _snapshot_from_graph_decision(
     assignments = dict(metadata.get("task_assignments", {}))
     assignments[f"{iteration}:{task_profile['task_id']}"] = node_id
     metadata["task_assignments"] = assignments
-    metadata["latest_graph_decision"] = graph_decision
+    metadata["latest_graph_decision"] = {
+        **graph_decision,
+        "node_id": node_id,
+        "raw_node_id": raw_node_id,
+    }
     metadata["current_node_id"] = node_id
 
     task_ids = list(previous_snapshot.task_ids) if previous_snapshot else []
     if node_id not in task_ids:
         task_ids.append(node_id)
+    valid_edge_nodes = set(task_ids)
 
     edges = list(previous_snapshot.edge_records) if previous_snapshot else []
     keyed_edges = {
         (edge.source_task_id, edge.target_task_id, edge.relation): edge for edge in edges
     }
     for edge in graph_decision.get("edges", []):
-        source = str(edge.get("source_node_id") or edge.get("source_task_id") or "")
-        target = str(edge.get("target_node_id") or edge.get("target_task_id") or node_id)
+        source = _canonical_graph_node_id(
+            str(edge.get("source_node_id") or edge.get("source_task_id") or ""),
+            current_task_id=str(task_profile["task_id"]),
+            known_node_ids=valid_edge_nodes,
+        )
+        target = _canonical_graph_node_id(
+            str(edge.get("target_node_id") or edge.get("target_task_id") or node_id),
+            current_task_id=str(task_profile["task_id"]),
+            known_node_ids=valid_edge_nodes,
+        )
         if not source or not target:
             continue
         relation = str(edge.get("relation") or "agent_transfer_prior")
@@ -257,6 +278,29 @@ def _snapshot_from_graph_decision(
         graph_policy="langchain_graph",
         metadata=metadata,
     )
+
+
+def _canonical_graph_node_id(
+    raw_node_id: str,
+    *,
+    current_task_id: str,
+    known_node_ids: set[str],
+) -> str:
+    """Return a known graph node ID when the agent emits an unambiguous alias."""
+    node_id = raw_node_id.strip()
+    if not node_id:
+        return ""
+    if node_id == current_task_id or node_id in known_node_ids:
+        return node_id
+
+    suffix_matches = [
+        known_node_id
+        for known_node_id in known_node_ids
+        if known_node_id.endswith(f"/{node_id}")
+    ]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+    return node_id if "/" in node_id else ""
 
 
 def _subscriptions_from_diffusion_decision(
@@ -360,8 +404,10 @@ _GRAPH_SYSTEM_PROMPT = (
 
 _DIFFUSION_SYSTEM_PROMPT = (
     "You implement π(t, k_t, G_t, B_{t-1}) for graph-aware experience "
-    "diffusion. You may inspect the whole causal artifact store through tools. "
-    "Use the graph as a prior/index, not an access-control boundary. Select "
-    "only artifacts likely to help under the artifact budget. Return only the "
-    "required JSON object."
+    "diffusion. You may inspect the whole causal artifact store through tools, "
+    "using the current graph node and incoming graph neighbors as transfer "
+    "priors rather than hard eligibility filters. Select only artifacts likely "
+    "to help under the artifact budget, and explain selections outside the "
+    "strongest graph priors explicitly. "
+    "Return only the required JSON object."
 )

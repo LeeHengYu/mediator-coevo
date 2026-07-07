@@ -553,6 +553,7 @@ data/experiments/<timestamp>-<run-id>/
 |   `-- skill_updates/
 |-- history/
 |-- jobs/
+|-- harnesses/
 |-- skills/
 |-- skills_snapshots/
 |-- task-graph/
@@ -572,6 +573,9 @@ Important files:
   and readable diffs for post-run regression analysis.
 - `history/`: feedback history entries, rejected proposal batches, and rejected
   reflection candidates.
+- `harnesses/`: learned repo-root harness overlays. When `--harness-dir` is
+  used, the source harness is copied to `harnesses/seed/` and recorded in
+  `harnesses/active_harness.json`.
 - `skills/`: run-local skill copy.
 - `skills_snapshots/`: committed skill snapshots.
 - `task-graph/`: run-local precomputed graph artifacts when graph-aware
@@ -589,6 +593,26 @@ Diffusion output includes:
 - `diffusion/diffused_records.jsonl`: audit ledger for eligible, selected, and
   rendered artifact routes. Softmax policies also write not-selected candidate
   rows with candidate probabilities and selected-target metadata.
+
+To start a new batch from a validated learned harness snapshot, pass the
+snapshot as a repo-root overlay:
+
+```bash
+uv run medcoevo run \
+  --harness-dir data/experiments/<run>/harnesses/<update-id> \
+  --family Weighted-Risk-Assessment \
+  --family HWPX-Document-Automation \
+  --split validation \
+  --condition learned_mediator \
+  --skill-updates none \
+  --diffusion-enabled \
+  --diffusion-policy langchain_graph \
+  --diffusion-graph none
+```
+
+The overlay may either contain `src/`, `config/`, or `tests/` directly, or put
+those paths under an `overlay/` subdirectory. Root-level `manifest.*` files are
+kept as metadata and are not copied into the repo.
 
 Executor policy observability fields in `metrics.jsonl`:
 

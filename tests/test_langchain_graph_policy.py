@@ -75,17 +75,98 @@ class _FakeLangChainGraphPolicy(LangChainGraphPolicy):
         }
 
 
+class _SuffixNodeLangChainGraphPolicy(LangChainGraphPolicy):
+    async def _run_graph_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "node_id": "weighted-campus-energy-balance-calc",
+            "node_action": "created",
+            "edges": [
+                {
+                    "source_node_id": "Excel-Formula-Statistics-Base",
+                    "target_node_id": "weighted-campus-energy-balance-calc",
+                    "relation": "transfer_prior",
+                    "weight": 0.85,
+                    "reason": "hallucinated base node",
+                }
+            ],
+            "reason": "agent emitted a task slug instead of the existing node id",
+        }
+
+    async def _run_diffusion_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {"selected_artifacts": []}
+
+
+class _FullStoreArtifactLangChainGraphPolicy(LangChainGraphPolicy):
+    async def _run_graph_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "node_id": "node-task-A",
+            "node_action": "reused",
+            "edges": [],
+            "reason": "same task belongs to existing node",
+        }
+
+    async def _run_diffusion_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "selected_artifacts": [
+                {
+                    "artifact_id": "artifact-C",
+                    "relation": "unrelated_full_store_pick",
+                    "reason": "useful despite weak graph prior",
+                    "context_channel": REUSE_SUCCESS_CHANNEL,
+                },
+                {
+                    "artifact_id": "artifact-A",
+                    "relation": "same_node_history",
+                    "reason": "same node artifact should remain eligible",
+                    "context_channel": REUSE_SUCCESS_CHANNEL,
+                },
+            ]
+        }
+
+
 @pytest.mark.asyncio
-async def test_langchain_graph_reuses_duplicate_node_and_selects_from_full_store():
+async def test_langchain_graph_reuses_duplicate_node_and_selects_graph_neighbor():
     previous = TaskGraphSnapshot(
         run_id="run-1",
         iteration=0,
-        task_ids=["node-task-A"],
+        task_ids=["node-task-A", "node-task-C"],
         graph_policy="langchain_graph",
         metadata={
             "task_nodes": {
                 "node-task-A": {
                     "task_ids": ["task-A"],
+                    "last_iteration": 0,
+                },
+                "node-task-C": {
+                    "task_ids": ["task-C"],
                     "last_iteration": 0,
                 }
             }
@@ -115,3 +196,106 @@ async def test_langchain_graph_reuses_duplicate_node_and_selects_from_full_store
         "artifact-C"
     ]
     assert result.subscriptions[0].relation == "full_store_override"
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_allows_agent_selected_full_store_artifacts():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=["node-task-A", "node-task-C"],
+        graph_policy="langchain_graph",
+        metadata={
+            "task_nodes": {
+                "node-task-A": {
+                    "task_ids": ["task-A"],
+                    "last_iteration": 0,
+                },
+                "node-task-C": {
+                    "task_ids": ["task-C"],
+                    "last_iteration": 0,
+                },
+            }
+        },
+    )
+    policy = _FullStoreArtifactLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=2,
+    )
+
+    result = await policy.prepare(
+        task_profile={"task_id": "task-A", "instruction": "same task"},
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[
+            _artifact("artifact-A", source_task_id="task-A"),
+            _artifact("artifact-C", source_task_id="task-C"),
+        ],
+    )
+
+    assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
+        "artifact-C",
+        "artifact-A"
+    ]
+    assert result.subscriptions[0].relation == "unrelated_full_store_pick"
+    assert result.subscriptions[1].relation == "same_node_history"
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_canonicalizes_duplicate_task_slug_and_drops_unknown_edges():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=4,
+        task_ids=[
+            "Weighted-Risk-Assessment/weighted-campus-energy-balance-calc",
+            "Weighted-Risk-Assessment/api-sla-at-risk-calc",
+        ],
+        graph_policy="langchain_graph",
+        metadata={
+            "task_nodes": {
+                "Weighted-Risk-Assessment/weighted-campus-energy-balance-calc": {
+                    "task_ids": [
+                        "Weighted-Risk-Assessment/weighted-campus-energy-balance-calc"
+                    ],
+                    "last_iteration": 0,
+                },
+                "Weighted-Risk-Assessment/api-sla-at-risk-calc": {
+                    "task_ids": ["Weighted-Risk-Assessment/api-sla-at-risk-calc"],
+                    "last_iteration": 4,
+                },
+            }
+        },
+    )
+    policy = _SuffixNodeLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=2,
+    )
+
+    result = await policy.prepare(
+        task_profile={
+            "task_id": "Weighted-Risk-Assessment/weighted-campus-energy-balance-calc",
+            "instruction": "same weighted workbook task",
+        },
+        current_iteration=5,
+        previous_snapshot=previous,
+        artifacts=[],
+    )
+
+    canonical_id = "Weighted-Risk-Assessment/weighted-campus-energy-balance-calc"
+    assert result.snapshot.task_ids == [
+        canonical_id,
+        "Weighted-Risk-Assessment/api-sla-at-risk-calc",
+    ]
+    assert result.snapshot.metadata["current_node_id"] == canonical_id
+    assert (
+        result.snapshot.metadata["latest_graph_decision"]["raw_node_id"]
+        == "weighted-campus-energy-balance-calc"
+    )
+    assert result.snapshot.metadata["latest_graph_decision"]["node_id"] == canonical_id
+    assert result.snapshot.metadata["task_nodes"][canonical_id]["task_ids"] == [
+        canonical_id,
+        canonical_id,
+    ]
+    assert result.snapshot.edge_records == []
