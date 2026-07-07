@@ -32,6 +32,7 @@ from mediated_coevo.diffusion import (
     DiffusionArtifact,
     DiffusionStore,
     DiffusionSubscription,
+    LangChainGraphPolicy,
     TaskGraphSnapshot,
     diffusion_channel_for_artifact,
     emit_diffusion_artifacts,
@@ -170,6 +171,8 @@ class Orchestrator:
         self.preloaded_diffusion_artifact_store_path: str | None = None
         self.preloaded_diffusion_artifact_store_count = 0
         self._diffusion_prepared_iterations: set[int] = set()
+        self._langchain_graph_prepared_targets: set[tuple[int, str]] = set()
+        self._langchain_graph_policy: Any | None = None
         self._diffusion_snapshot_by_iteration: dict[int, TaskGraphSnapshot] = {}
         self._diffusion_target_task_ids: list[str] = []
 
@@ -188,6 +191,7 @@ class Orchestrator:
         self._diffusion_target_task_ids = list(task_ids)
         self._diffusion_sub_board.clear()
         self._diffusion_prepared_iterations.clear()
+        self._langchain_graph_prepared_targets.clear()
         self._diffusion_snapshot_by_iteration.clear()
         self.executor_skill_gate.validation_task_pool = [
             *selection.tasks,
@@ -237,6 +241,7 @@ class Orchestrator:
         self._diffusion_target_task_ids = list(task_ids)
         self._diffusion_sub_board.clear()
         self._diffusion_prepared_iterations.clear()
+        self._langchain_graph_prepared_targets.clear()
         self._diffusion_snapshot_by_iteration.clear()
         self.executor_skill_gate.validation_task_pool = [
             *selection.tasks,
@@ -904,6 +909,14 @@ class Orchestrator:
         target_task_id: str,
         current_iteration: int,
     ) -> None:
+        policy_name = self.config.diffusion.policy
+        if policy_name == "langchain_graph":
+            await self._prepare_langchain_graph_subscriptions(
+                target_task_id=target_task_id,
+                current_iteration=current_iteration,
+            )
+            return
+
         if current_iteration in self._diffusion_prepared_iterations:
             return
 
@@ -963,6 +976,89 @@ class Orchestrator:
                 )
 
         self._diffusion_prepared_iterations.add(current_iteration)
+
+    async def _prepare_langchain_graph_subscriptions(
+        self,
+        *,
+        target_task_id: str,
+        current_iteration: int,
+    ) -> None:
+        key = (current_iteration, target_task_id)
+        if key in self._langchain_graph_prepared_targets:
+            return
+
+        artifacts = self._diffusion_store.query_artifacts(
+            recent=None,
+            before_source_iteration=current_iteration,
+        )
+        previous_snapshot = self._latest_langchain_graph_snapshot(
+            current_iteration=current_iteration,
+        )
+        result = await self._get_langchain_graph_policy().prepare(
+            task_profile=self._diffusion_task_profile(target_task_id),
+            current_iteration=current_iteration,
+            previous_snapshot=previous_snapshot,
+            artifacts=artifacts,
+        )
+        self._diffusion_store.store_graph_snapshot(result.snapshot, overwrite=True)
+        self._diffusion_snapshot_by_iteration[current_iteration] = result.snapshot
+        self._record_prepared_diffusion_context(
+            target_task_id,
+            current_iteration,
+            snapshot=result.snapshot,
+            eligible_count=len(artifacts),
+            subscriptions=result.subscriptions,
+        )
+        self._record_unselected_diffusion_candidates(
+            target_task_id=target_task_id,
+            current_iteration=current_iteration,
+            eligible_artifacts=artifacts,
+            subscriptions=result.subscriptions,
+            snapshot=result.snapshot,
+        )
+        if result.subscriptions:
+            self._diffusion_sub_board[(current_iteration, target_task_id)] = (
+                result.subscriptions
+            )
+        self._langchain_graph_prepared_targets.add(key)
+
+    def _latest_langchain_graph_snapshot(
+        self,
+        *,
+        current_iteration: int,
+    ) -> TaskGraphSnapshot | None:
+        snapshots = self._diffusion_store.query_graph_snapshots(
+            recent=None,
+            before_iteration=current_iteration,
+        )
+        return next(
+            (
+                snapshot
+                for snapshot in snapshots
+                if snapshot.graph_policy == "langchain_graph"
+            ),
+            None,
+        )
+
+    def _get_langchain_graph_policy(self) -> LangChainGraphPolicy:
+        if self._langchain_graph_policy is None:
+            self._langchain_graph_policy = LangChainGraphPolicy(
+                model=self.config.models.mediator,
+                run_id=self.experiment_dir.name,
+                max_artifacts=self.config.diffusion.max_artifacts,
+            )
+        return self._langchain_graph_policy
+
+    def _diffusion_task_profile(self, task_id: str) -> dict[str, Any]:
+        task = self.benchmark_repo.resolve(task_id)
+        task_config = getattr(task, "task_config", {})
+        if hasattr(task_config, "model_dump"):
+            task_config = task_config.model_dump(mode="json")
+        return {
+            "task_id": task_id,
+            "instruction": getattr(task, "instruction", ""),
+            "task_config": task_config,
+        }
 
     def _select_diffusion_subscriptions(
         self,
@@ -1235,6 +1331,10 @@ class Orchestrator:
             self.preloaded_diffusion_artifact_store_count = 0
         if not hasattr(self, "_diffusion_prepared_iterations"):
             self._diffusion_prepared_iterations = set()
+        if not hasattr(self, "_langchain_graph_prepared_targets"):
+            self._langchain_graph_prepared_targets = set()
+        if not hasattr(self, "_langchain_graph_policy"):
+            self._langchain_graph_policy = None
         if not hasattr(self, "_diffusion_snapshot_by_iteration"):
             self._diffusion_snapshot_by_iteration = {}
         if not hasattr(self, "_diffusion_target_task_ids"):

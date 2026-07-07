@@ -122,6 +122,8 @@ Current diffusion policy values:
 - `top_k_similarity`: render eligible artifacts from the strongest incoming
   graph neighbors for the target task, capped by `diffusion.max_artifacts` and
   `diffusion.top_k_neighbors`.
+- `langchain_graph`: use LangChain graph and diffusion agents to assign the
+  current task node and select causal artifacts from the full artifact store.
 
 The graph precompute command scores directed SkillFlow edge candidates using
 family rankings, metadata, task resources, output shape, and instruction text.

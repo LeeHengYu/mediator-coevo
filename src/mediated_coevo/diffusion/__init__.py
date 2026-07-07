@@ -9,6 +9,7 @@ from .graph import (
     TaskProfilesArtifact,
     adjacency_from_snapshot,
 )
+from .langchain_graph import LangChainGraphPolicy, LangChainGraphPolicyResult
 from .models import (
     DiffusedRecord,
     DiffusionArtifact,
@@ -43,6 +44,8 @@ __all__ = [
     "DiffusionNetwork",
     "DiffusionContextBundle",
     "DiffusionSubscription",
+    "LangChainGraphPolicy",
+    "LangChainGraphPolicyResult",
     "REUSE_SUCCESS_CHANNEL",
     "DiffusedRecord",
     "DiffusionStore",

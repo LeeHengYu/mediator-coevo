@@ -989,6 +989,14 @@ def test_load_config_requires_diffusion_top_k_neighbors_from_toml_or_overrides(
             },
             "random_k.*diffusion.graph='none'",
         ),
+        (
+            {
+                "enabled": True,
+                "policy": "langchain_graph",
+                "graph": "task_similarity",
+            },
+            "langchain_graph.*diffusion.graph='none'",
+        ),
     ],
 )
 def test_load_config_rejects_invalid_diffusion_combinations(
@@ -1019,6 +1027,7 @@ def test_load_config_rejects_invalid_diffusion_combinations(
             "policy": "top_k_similarity",
             "graph": "precomputed_similarity",
         },
+        {"enabled": True, "policy": "langchain_graph", "graph": "none"},
     ],
 )
 def test_load_config_accepts_valid_diffusion_combinations(tmp_path, overrides):

@@ -13,6 +13,10 @@ from mediated_coevo.diffusion import (
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
+    DiffusionSubscription,
+    LangChainGraphPolicyResult,
+    REUSE_SUCCESS_CHANNEL,
+    TaskGraphSnapshot,
 )
 from mediated_coevo.experiment.conditions import get_executor_proposal_feedback
 from mediated_coevo.cli.config import _run_config_overrides
@@ -369,6 +373,42 @@ class _Advisor:
     llm_client = _PlannerLLM()
 
 
+class _FakeLangChainGraphPolicy:
+    def __init__(self) -> None:
+        self.artifact_ids_seen: list[str] = []
+
+    async def prepare(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> LangChainGraphPolicyResult:
+        self.artifact_ids_seen = [artifact.artifact_id for artifact in artifacts]
+        selected = next(
+            artifact for artifact in artifacts if artifact.artifact_id == "old-same-task"
+        )
+        return LangChainGraphPolicyResult(
+            snapshot=TaskGraphSnapshot(
+                run_id="run-1",
+                iteration=current_iteration,
+                task_ids=["node-task-A"],
+                graph_policy="langchain_graph",
+                metadata={"current_node_id": "node-task-A"},
+            ),
+            subscriptions=[
+                DiffusionSubscription(
+                    artifact=selected,
+                    policy_name="langchain_graph",
+                    relation="same_node",
+                    reason="fake selected old same-task artifact",
+                    context_channel=REUSE_SUCCESS_CHANNEL,
+                )
+            ],
+        )
+
+
 def _orchestrator(
     tmp_path: Path,
     condition: str,
@@ -671,6 +711,40 @@ async def test_diffusion_context_is_condition_independent_and_priority_routed(
     assert "diffused hint" in bundle.diffusion_context
     assert bundle.cross_task_prior is None
     assert "explicit cross-task report" not in bundle.flatten()
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_policy_gets_same_task_causal_artifacts_only(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    fake_policy = _FakeLangChainGraphPolicy()
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "langchain_graph"
+    orch._langchain_graph_policy = fake_policy
+    orch._ensure_diffusion_runtime_state()
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="old-same-task",
+        source_task_id="task-A",
+        source_iteration=0,
+        content="same-node prior hint",
+    )
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="future-artifact",
+        source_task_id="task-B",
+        source_iteration=2,
+        content="future hint",
+    )
+
+    bundle = await orch._build_prior_context_bundle(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    assert fake_policy.artifact_ids_seen == ["old-same-task"]
+    assert bundle.diffusion_context is not None
+    assert "same-node prior hint" in bundle.diffusion_context
 
 
 @pytest.mark.asyncio

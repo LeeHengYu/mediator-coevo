@@ -20,6 +20,7 @@ DiffusionPolicyName: TypeAlias = Literal[
     "capped_broadcast",
     "random_k",
     "top_k_similarity",
+    "langchain_graph",
 ]
 SIMILARITY_DIFFUSION_GRAPH_NAMES = frozenset(
     {"task_similarity", "precomputed_similarity"}
@@ -275,6 +276,12 @@ class DiffusionConfig(BaseModel):
                 errors.append(
                     "diffusion.policy='top_k_similarity' requires "
                     f"diffusion.graph to be one of: {allowed_graphs}"
+                )
+        elif self.policy == "langchain_graph":
+            if self.graph != "none":
+                errors.append(
+                    "diffusion.policy='langchain_graph' constructs its graph "
+                    "automatically and requires diffusion.graph='none'"
                 )
         elif self.graph != "none":
             errors.append(

@@ -203,7 +203,7 @@ def run(
             "--diffusion-policy",
             help=(
                 "Override diffusion.policy. Allowed: none | capped_broadcast | "
-                "random_k | top_k_similarity."
+                "random_k | top_k_similarity | langchain_graph."
             ),
         ),
     ] = None,
