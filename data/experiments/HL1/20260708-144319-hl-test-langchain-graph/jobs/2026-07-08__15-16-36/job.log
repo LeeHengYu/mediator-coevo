@@ -1,0 +1,207 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Complete the HWPX project proposal document by following these steps precisely:
+
+## Step 1: Inspect the workspace
+```bash
+ls /root/
+cat /root/project_proposal.json
+```
+Examine the JSON file to understand all key-value pairs available for replacement.
+
+## Step 2: Inspect the HWPX template structure
+```bash
+cd /root/
+mkdir -p /tmp/hwpx_work
+cp project_proposal_template.hwpx /tmp/hwpx_work/template.zip
+cd /tmp/hwpx_work
+unzip template.zip -d template_extracted
+find template_extracted -name '"'"'*.xml'"'"' | head -20
+```
+
+## Step 3: Inspect the main content XML files
+Look at the section XML files (likely under `Contents/` directory) to find all `{{...}}` placeholders and understand the XML structure:
+```bash
+find template_extracted -name '"'"'*.xml'"'"' -exec grep -l '"'"'{{\|}}'"'"' {} \;
+```
+Then cat each file that contains placeholders to understand the full structure.
+
+## Step 4: Write and execute a Python script
+Create a Python script `/tmp/hwpx_work/process.py` that does the following:
+
+### 4a. Load JSON data
+- Read `/root/project_proposal.json`
+- For the budget value: remove commas but keep the leading currency symbol (e.g., `₩1,500,000,000` → `₩1500000000`)
+
+### 4b. Process HWPX (ZIP-based) document
+- Open `project_proposal_template.hwpx` as a ZIP
+- For each XML file in the archive, parse with `lxml.etree` (use the namespaces found in the document)
+- For each `<hp:p>` paragraph element:
+  1. Find all `<hp:t>` elements within it (at any depth)
+  2. Concatenate all their `.text` values (use empty string for None)
+  3. Perform all `{{key}}` placeholder replacements using the JSON data
+  4. **Month span appending**: If the concatenated text contains phase lines (단계1, 단계2, 단계3), calculate the month span from the date range in that line. The date ranges use format like `2025.01 ~ 2025.03`. Calculate months = (end_year - start_year) * 12 + (end_month - start_month + 1). Append ` (N개월)` after the phase text. Specifically:
+     - 단계1 line → append `(3개월)`
+     - 단계2 line → append `(3개월)`  
+     - 단계3 line → append `(1개월)`
+     But calculate these dynamically from the actual date ranges in the text rather than hardcoding.
+  5. Put the final text into the first `<hp:t>` element'"'"'s `.text`
+  6. Clear `.text` of all subsequent `<hp:t>` elements (set to empty string `""`)
+  7. If any replacement was made, remove all `<hp:lineSegArray>` child elements from that `<hp:p>` to clear stale layout cache
+
+### 4c. Repackage
+- Write all files (modified XMLs and unmodified files) into a new ZIP at `/root/project_proposal_ready.hwpx`
+- Preserve the original ZIP structure and all non-XML files as-is
+
+### 4d. Validation
+- After creating the output, re-open it as ZIP, parse all XML files, and verify:
+  - No `{{` or `}}` text remains anywhere
+  - The file is a valid ZIP
+  - Key values from JSON appear in the document
+
+## Step 5: Run the script
+```bash
+cd /tmp/hwpx_work
+python3 process.py
+```
+
+## Step 6: Verify the output
+```bash
+python3 -c "
+import zipfile
+zf = zipfile.ZipFile('"'"'/root/project_proposal_ready.hwpx'"'"', '"'"'r'"'"')
+for name in zf.namelist():
+    data = zf.read(name)
+    text = data.decode('"'"'utf-8'"'"', errors='"'"'ignore'"'"')
+    if '"'"'{{'"'"' in text or '"'"'}}'"'"' in text:
+        print(f'"'"'FAIL: placeholder found in {name}'"'"')
+        # Show context
+        import re
+        for m in re.finditer(r'"'"'.{0,40}\{\{.{0,40}'"'"', text):
+            print(f'"'"'  Context: {m.group()}'"'"')
+print('"'"'Validation complete'"'"')
+zf.close()
+"
+```
+
+## Key Implementation Notes:
+- Use `lxml.etree` for XML parsing to handle namespaces properly
+- Register all namespaces found in the document before parsing/serializing to preserve them
+- When writing XML back, use `xml_declaration=True, encoding='"'"'UTF-8'"'"', standalone=True` (or match original declaration)
+- For the month calculation from date ranges like `2025.01 ~ 2025.03`: parse both dates, compute difference as `(end_year - start_year) * 12 + end_month - start_month + 1`
+- The phase line pattern to match: look for lines containing `단계` followed by a date range pattern like `YYYY.MM ~ YYYY.MM`, then append the calculated month span
+- Budget normalization: use regex to find the budget value, remove commas, keep currency symbol
+- Ensure the output ZIP uses the same compression method as the original
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260708-144319-hl-test-langchain-graph/jobs/2026-07-08__15-16-36/run-72ba0f6a__8pz2vfd/agent/trajectory.json

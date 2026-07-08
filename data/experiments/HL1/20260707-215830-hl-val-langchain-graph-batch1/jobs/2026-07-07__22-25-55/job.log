@@ -1,0 +1,257 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Complete the following task to update a HWPX renewal playbook.
+
+## Goal
+Revise `renewal_playbook.hwpx` using `renewal_update.json` and `followups.csv`, saving the result to `/root/renewal_playbook_updated.hwpx`.
+
+## Steps
+
+### 1. Inspect the input files
+- Read `renewal_update.json` to identify the new values for: customer name, current owner, renewal window, pricing band, escalation contact, and pricing note.
+- Read `followups.csv` to get the follow-up items. Note the `sequence` column for ordering.
+- Unzip `renewal_playbook.hwpx` to a temp directory (e.g., `/tmp/hwpx_work/`). List the contents.
+- Read `Contents/section0.xml` — this is the main document content. Identify the XML namespaces used.
+
+### 2. Write and run a Python script that does the following:
+
+```python
+import json, csv, os, zipfile, shutil
+from lxml import etree
+
+# --- Config ---
+SOURCE_HWPX = '"'"'<path_to>/renewal_playbook.hwpx'"'"'
+UPDATE_JSON = '"'"'<path_to>/renewal_update.json'"'"'
+FOLLOWUPS_CSV = '"'"'<path_to>/followups.csv'"'"'
+OUTPUT_HWPX = '"'"'/root/renewal_playbook_updated.hwpx'"'"'
+WORK_DIR = '"'"'/tmp/hwpx_work'"'"'
+
+# --- Load inputs ---
+with open(UPDATE_JSON) as f:
+    updates = json.load(f)
+with open(FOLLOWUPS_CSV) as f:
+    reader = csv.DictReader(f)
+    followups = sorted(reader, key=lambda r: int(r['"'"'sequence'"'"']))
+
+# --- Unzip ---
+if os.path.exists(WORK_DIR):
+    shutil.rmtree(WORK_DIR)
+os.makedirs(WORK_DIR)
+with zipfile.ZipFile(SOURCE_HWPX, '"'"'r'"'"') as z:
+    z.extractall(WORK_DIR)
+
+# --- Parse section0.xml ---
+section_path = os.path.join(WORK_DIR, '"'"'Contents'"'"', '"'"'section0.xml'"'"')
+tree = etree.parse(section_path)
+root = tree.getroot()
+nsmap = {
+    '"'"'hp'"'"': '"'"'http://www.hancom.co.kr/hwpml/2011/paragraph'"'"',
+    '"'"'hs'"'"': '"'"'http://www.hancom.co.kr/hwpml/2011/section'"'"',
+}
+# Also check for other possible namespace URIs in the actual file
+# Adjust nsmap based on what you find in the root element'"'"'s nsmap
+
+# --- Helper: get full text of a paragraph ---
+def para_text(p, ns):
+    texts = p.findall('"'"'.//hp:t'"'"', ns)
+    return '"'"''"'"'.join((t.text or '"'"''"'"') for t in texts)
+
+# --- Helper: set full text of a paragraph (put all text in first <hp:t>, clear rest) ---
+def set_para_text(p, new_text, ns):
+    texts = p.findall('"'"'.//hp:t'"'"', ns)
+    if texts:
+        texts[0].text = new_text
+        for t in texts[1:]:
+            t.text = '"'"''"'"'
+    # Remove layout cache from this paragraph
+    remove_layout_cache(p, ns)
+
+def remove_layout_cache(p, ns):
+    for tag in ['"'"'hp:lineSegArray'"'"', '"'"'hp:linesegarray'"'"']:
+        for elem in p.findall(tag, ns):
+            p.remove(elem)
+    # Also try without namespace
+    for child in list(p):
+        local = etree.QName(child.tag).localname.lower()
+        if local in ('"'"'linesegarray'"'"',):
+            p.remove(child)
+```
+
+The script should:
+
+a) **Build a mapping of old values → new values** from the JSON. The JSON likely has fields like `customer_name`, `current_owner`, `renewal_window`, `pricing_band`, `escalation_contact`, `pricing_note` with old and new values (or just new values — inspect the JSON to determine the structure). You'"'"'ll also need to identify the OLD values by reading the current XML text.
+
+b) **Iterate over all paragraphs** (`//hp:p`). For each paragraph:
+   - Get the full concatenated text.
+   - If it contains any of the old field values, replace them with the new values using string replacement.
+   - If it'"'"'s one of the three follow-up lines, mark it for replacement.
+   - If the text equals the appendix sentence `이 부록 문단은 그대로 유지해야 합니다.`, skip it entirely.
+   - For any modified paragraph, call `set_para_text()` and `remove_layout_cache()`.
+
+c) **Replace the three follow-up lines** with the CSV items in sequence order. Identify the follow-up paragraphs by their pattern (they likely have a numbered or bulleted format). Replace their text content with the CSV follow-up items. If there are exactly 3 old follow-up lines and N new ones, handle accordingly (likely 3→3 replacement).
+
+d) **Write back** the modified XML to `section0.xml`.
+
+e) **Repackage as .hwpx ZIP** with these critical requirements:
+   - The `mimetype` file MUST be the first entry in the ZIP.
+   - The `mimetype` entry MUST be stored uncompressed (compression=ZIP_STORED).
+   - All other files use ZIP_DEFLATED.
+   - Preserve the original directory structure.
+
+```python
+# --- Repackage ---
+with zipfile.ZipFile(OUTPUT_HWPX, '"'"'w'"'"') as zout:
+    # mimetype first, uncompressed
+    mimetype_path = os.path.join(WORK_DIR, '"'"'mimetype'"'"')
+    zout.write(mimetype_path, '"'"'mimetype'"'"', compress_type=zipfile.ZIP_STORED)
+    # All other files
+    for dirpath, dirnames, filenames in os.walk(WORK_DIR):
+        for fn in sorted(filenames):
+            full = os.path.join(dirpath, fn)
+            arcname = os.path.relpath(full, WORK_DIR)
+            if arcname == '"'"'mimetype'"'"':
+                continue
+            zout.write(full, arcname, compress_type=zipfile.ZIP_DEFLATED)
+```
+
+### 3. Adapt the script based on actual file contents
+Before running the final script, first inspect:
+- The exact structure of `renewal_update.json` (print it)
+- The exact columns and content of `followups.csv` (print it)
+- The full text content of `section0.xml` (print the text of each paragraph)
+
+Then adapt the replacement logic accordingly. The key is:
+- Every occurrence of old values must be replaced (not just first occurrence)
+- Follow-up lines must be replaced in `sequence` order from the CSV
+- The appendix sentence must remain exactly as-is
+- No duplicate/stale content should remain
+
+### 4. Validate
+- Unzip the output file and verify it'"'"'s a valid ZIP
+- Parse the output `section0.xml` and verify:
+  - New values appear where expected
+  - Old values do NOT appear anywhere
+  - The appendix sentence is preserved exactly
+  - Follow-up items match the CSV in sequence order
+  - No `<hp:lineSegArray>` (or similar layout-cache) elements exist in modified paragraphs
+  - `mimetype` is the first entry and is uncompressed
+
+### 5. Run the verifier
+```bash
+cd /root && python -m pytest test_output.py -v
+```
+
+If any test fails, read the failure message carefully, fix the issue, and re-run.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260707-215830-hl-val-langchain-graph-batch1/jobs/2026-07-07__22-25-55/run-50d4cfa8__5qhsiQN/agent/trajectory.json

@@ -1,0 +1,152 @@
+# Task Instruction
+
+Perform the following steps to complete the HWPX project-proposal task:
+
+1. **Inspect the workspace.** List files in `/root/` and the task directory to locate `project_proposal_template.hwpx` and `project_proposal.json`. Read the JSON file to understand all key-value pairs.
+
+2. **Understand the HWPX format.** A `.hwpx` file is a ZIP archive containing XML files. The main document content is typically in `Contents/section0.xml` (or similar). Unzip the template to a temporary directory to inspect the XML structure.
+
+3. **Write and execute a Python script** that does the following:
+
+   a. **Load the JSON** from `project_proposal.json`.
+
+   b. **Open the HWPX ZIP**, iterate over all entries, and for XML files (especially the section XML files under `Contents/`), parse them.
+
+   c. **Handle fragmented placeholders.** Placeholders like `{{project_name}}` may be split across multiple `<hp:t>` elements within a single `<hp:p>` paragraph. For each paragraph:
+      - Concatenate the text content of all `<hp:t>` elements.
+      - Check if the concatenated text contains any `{{...}}` placeholder.
+      - If yes, perform all replacements on the concatenated string.
+      - Write the full replaced text into the first `<hp:t>` element and clear (set to empty string) all subsequent `<hp:t>` elements in that paragraph.
+
+   d. **Replacement rules:**
+      - For each `{{key}}` placeholder, substitute the corresponding value from the JSON.
+      - **Budget normalization:** If the JSON value for the budget field contains commas (e.g., `₩50,000,000`), remove the commas but keep the currency symbol (e.g., `₩50000000`).
+      - **Phase month-span appending:** After replacing placeholders in lines containing phase information (`단계1`, `단계2`, `단계3`), parse the date range already present in that line (e.g., `2025.01 ~ 2025.03`) to compute the number of months, then append ` (N개월)` to the end of that line's text. The expected results are: `단계1` → `(3개월)`, `단계2` → `(3개월)`, `단계3` → `(1개월)`.
+
+   e. **Remove stale layout caches.** For every paragraph (`<hp:p>`) whose text was modified, find and remove any `<hp:lineSegArray>` child element. This prevents overlapping-character rendering artifacts.
+
+   f. **Preserve everything else.** All Korean labels, static note lines, non-modified paragraphs, and non-XML ZIP entries must be copied unchanged.
+
+   g. **Reassemble the HWPX.** Write all files (modified XMLs and unchanged entries) into a new ZIP archive at `/root/project_proposal_ready.hwpx`.
+
+4. **Validate the output:**
+   - Unzip `/root/project_proposal_ready.hwpx` to a temp directory.
+   - Parse the section XML and concatenate all text.
+   - Verify: no `{{` or `}}` remains anywhere in the text.
+   - Verify: the budget value has no commas but retains the currency symbol.
+   - Verify: lines with `단계1`, `단계2`, `단계3` end with the correct `(N개월)` suffix.
+   - Verify: no `<hp:lineSegArray>` elements exist in modified paragraphs.
+   - Print confirmation of each check.
+
+5. **Run the verifier** if a test file exists (e.g., `pytest test_output.py -v`) to confirm the task passes.
+
+**Important implementation notes:**
+- Use `xml.etree.ElementTree` with proper namespace handling. Register namespaces before parsing to avoid namespace prefix changes in output.
+- When computing month spans, handle the date format present in the document (likely `YYYY.MM ~ YYYY.MM`). Calculate months as `(end_year - start_year) * 12 + (end_month - start_month)`.
+- Use `zipfile.ZipFile` for both reading and writing. Preserve compression type and other ZIP metadata where possible.
+- The XML namespace for HWP elements is typically `http://www.hancom.co.kr/hwpml/2016/HwpCorePrimitive` or similar — inspect the actual XML to get the correct namespace URIs before hardcoding them.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

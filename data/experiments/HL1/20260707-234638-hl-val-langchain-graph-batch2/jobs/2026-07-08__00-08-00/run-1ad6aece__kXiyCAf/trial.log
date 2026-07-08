@@ -1,0 +1,222 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following steps in order to produce `/root/renewal_playbook_updated.hwpx`.
+
+## Context
+
+A `.hwpx` file is an OPC/ZIP package (like `.docx`) containing XML files that describe a Korean word-processor document. The editable body text lives inside one or more XML files (typically `Contents/section0.xml` or similar). You will unzip, patch the XML, and rezip.
+
+## Step 0 – Inspect inputs
+
+```bash
+cat /root/renewal_update.json
+cat /root/followups.csv
+```
+
+Note every field in the JSON (customer name, current owner, renewal window, pricing band, escalation contact, pricing note) and every row in the CSV (with its `sequence` column for ordering).
+
+Also inspect the original hwpx:
+```bash
+cp /root/renewal_playbook.hwpx /tmp/renewal_playbook.zip
+mkdir -p /tmp/hwpx_orig
+cd /tmp/hwpx_orig && unzip -o /tmp/renewal_playbook.zip
+find /tmp/hwpx_orig -type f | sort
+```
+
+Identify every XML file that could contain body text (look under `Contents/`). Read each one and note the structure.
+
+## Step 1 – Understand the XML structure
+
+For each XML body file (e.g., `Contents/section0.xml`):
+```bash
+cat /tmp/hwpx_orig/Contents/section0.xml
+```
+
+Identify:
+- Where the old customer name, owner, renewal window, pricing band, escalation contact, and pricing note appear.
+- Where the three follow-up lines appear.
+- Where the appendix sentence `이 부록 문단은 그대로 유지해야 합니다.` appears.
+- Any layout-cache or character-position elements (e.g., `<hp:linesegarray>`, `<hp:lineSegArray>`, `<hp:lineseg>`, or similar elements that cache glyph/line layout).
+
+## Step 2 – Write a Python script to patch
+
+Write `/tmp/patch_hwpx.py` that:
+
+1. Reads `renewal_update.json` to get the new values for each field.
+2. Reads `followups.csv`, sorts rows by the `sequence` column, and extracts the follow-up text lines.
+3. Parses the section XML file(s) using `lxml.etree` (preferred) or `xml.etree.ElementTree`, preserving namespaces.
+4. For every text node (`<hp:t>` or whichever element holds paragraph text) in editable sections:
+   a. Replaces every occurrence of the OLD customer name with the NEW customer name.
+   b. Similarly for current owner, renewal window, pricing band, escalation contact, and pricing note.
+   c. Identifies the three consecutive follow-up paragraphs and replaces them with the CSV items in sequence order. Remove old follow-up paragraphs and insert new ones in their place (same XML structure, just different text). The number of follow-up items from the CSV dictates the number of replacement paragraphs.
+5. Does NOT modify the appendix sentence `이 부록 문단은 그대로 유지해야 합니다.`.
+6. For every paragraph element whose text was modified, removes all child layout-cache elements. These are typically `<hp:linesegarray>` or `<hp:lineSegArray>` (and their children). Removing them ensures the word processor recalculates layout on open, preventing overlapping characters. Be thorough: search for any element whose local name contains `lineseg`, `LineSeg`, `lineSegArray`, `linesegarray`, or similar layout-cache patterns, and remove them from modified paragraphs.
+7. Writes the patched XML back, preserving the XML declaration and encoding.
+
+### Critical details for the script:
+- Parse the XML with `lxml.etree.parse()` using a parser that preserves CDATA if present.
+- When serializing back, use `xml_declaration=True` and match the original encoding.
+- Identify old values by reading the original XML text content before patching. Print them so you can verify.
+- Handle the case where a single `<hp:t>` element may contain a full line of text, or text may be split across multiple `<hp:run>` elements within a paragraph.
+
+## Step 3 – Rebuild the hwpx package
+
+After patching:
+```bash
+cd /tmp/hwpx_orig
+zip -r /root/renewal_playbook_updated.hwpx . -x '"'"'*.DS_Store'"'"'
+```
+
+Use `zipfile` in Python if the shell zip doesn'"'"'t preserve the structure correctly. The key requirement: the resulting ZIP must have the same directory structure as the original.
+
+## Step 4 – Validate
+
+1. Verify the output is a valid ZIP:
+```bash
+python3 -c "import zipfile; z=zipfile.ZipFile('"'"'/root/renewal_playbook_updated.hwpx'"'"'); print(z.namelist()); z.close()"
+```
+
+2. Extract and grep the patched XML to confirm:
+   - New customer name appears, old does not.
+   - New owner, renewal window, pricing band, escalation contact, pricing note appear; old values do not.
+   - Follow-up lines match CSV content in sequence order.
+   - Appendix sentence is intact.
+   - No `linesegarray`/`lineSegArray` elements remain in modified paragraphs.
+
+```bash
+mkdir -p /tmp/hwpx_verify
+cd /tmp/hwpx_verify && unzip -o /root/renewal_playbook_updated.hwpx
+cat /tmp/hwpx_verify/Contents/section0.xml
+```
+
+Search explicitly for old values:
+```bash
+grep -r '"'"'OLD_CUSTOMER_NAME'"'"' /tmp/hwpx_verify/Contents/ || echo '"'"'OK: old customer name not found'"'"'
+```
+(Replace OLD_CUSTOMER_NAME with the actual old value you discovered in Step 1.)
+
+Search for the appendix:
+```bash
+grep '"'"'이 부록 문단은 그대로 유지해야 합니다'"'"' /tmp/hwpx_verify/Contents/
+```
+
+If any check fails, diagnose, fix the script, and re-run from Step 3.
+
+## Important Reminders
+- Do NOT skip reading the actual XML structure before writing the patch script. The element names, namespaces, and nesting are critical.
+- The follow-up replacement must remove old lines (not leave duplicates) and insert new ones in `sequence` order from the CSV.
+- Layout-cache removal is essential for modified paragraphs only. Do not strip them from unmodified paragraphs.
+- The final file must be at exactly `/root/renewal_playbook_updated.hwpx`.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260707-234638-hl-val-langchain-graph-batch2/jobs/2026-07-08__00-08-00/run-1ad6aece__kXiyCAf/agent/trajectory.json
