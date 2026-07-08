@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -188,18 +189,18 @@ def _tools(
     artifacts_by_id = {artifact.artifact_id: artifact for artifact in artifacts}
 
     def read_graph() -> dict[str, Any]:
-        """Return the current task graph snapshot."""
+        """Return the current graph snapshot, including agent-authored edge weights."""
         if snapshot is None:
             return {"task_ids": [], "edge_records": [], "metadata": {}}
         return snapshot.model_dump(mode="json")
 
     def query_artifacts(recent: int | None = None) -> list[dict[str, Any]]:
-        """Return causally available artifacts, newest first."""
+        """Return artifacts used as evidence for graph edges and transfer weights."""
         selected = artifacts if recent is None else artifacts[:recent]
         return [_artifact_summary(artifact) for artifact in selected]
 
     def get_artifact(artifact_id: str) -> dict[str, Any]:
-        """Return one full artifact by artifact_id."""
+        """Return full artifact evidence for calibrating a graph edge weight."""
         artifact = artifacts_by_id.get(artifact_id)
         if artifact is None:
             return {"error": f"unknown artifact_id: {artifact_id}"}
@@ -279,14 +280,18 @@ def _snapshot_from_graph_decision(
             current_task_id=str(task_profile["task_id"]),
             known_node_ids=valid_edge_nodes,
         )
-        if not source or not target:
+        try:
+            weight = float(edge["weight"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not source or not target or not math.isfinite(weight):
             continue
         relation = str(edge.get("relation") or "agent_transfer_prior")
         keyed_edges[(source, target, relation)] = TaskGraphEdgeRecord(
             source_task_id=source,
             target_task_id=target,
             relation=relation,
-            weight=float(edge.get("weight", 1.0)),
+            weight=weight,
             metadata={
                 "reason": str(edge.get("reason") or ""),
                 **dict(edge.get("metadata") or {}),
@@ -398,7 +403,11 @@ _GRAPH_OUTPUT_SCHEMA = {
             "source_node_id": "string",
             "target_node_id": "string",
             "relation": "string",
-            "weight": "float transfer prior",
+            "weight": (
+                "required real-number transfer prior chosen by the graph agent; "
+                "normally 0.0-1.0, where larger means stronger expected artifact "
+                "usefulness but not a hard dependency"
+            ),
             "reason": "string",
         }
     ],
@@ -421,7 +430,10 @@ _GRAPH_SYSTEM_PROMPT = (
     "incoming task matches an existing node or creates a new node. Duplicate "
     "task text may reuse the same node. Maintain directed transfer-prior edges "
     "with weights where larger means stronger expected artifact usefulness, not "
-    "a hard dependency. Use tools when you need graph or artifact details. "
+    "a hard dependency. For every edge you create or update, directly assign "
+    "weight as a real-number score; infrastructure persists your score and does "
+    "not calculate it for you. Use tools to inspect previous edge weights and "
+    "artifact evidence before calibrating a new score. "
     "Return only the required JSON object."
 )
 

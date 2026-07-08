@@ -12,6 +12,7 @@ from mediated_coevo.diffusion import (
     REUSE_SUCCESS_CHANNEL,
     TaskGraphSnapshot,
 )
+from mediated_coevo.diffusion import langchain_graph as langchain_graph_module
 
 
 def _artifact(
@@ -150,6 +151,40 @@ class _FullStoreArtifactLangChainGraphPolicy(LangChainGraphPolicy):
                 },
             ]
         }
+
+
+class _MissingWeightLangChainGraphPolicy(LangChainGraphPolicy):
+    async def _run_graph_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "node_id": "node-task-A",
+            "node_action": "reused",
+            "edges": [
+                {
+                    "source_node_id": "node-task-C",
+                    "target_node_id": "node-task-A",
+                    "relation": "agent_transfer_prior",
+                    "reason": "missing score should not become a max prior",
+                }
+            ],
+            "reason": "agent forgot the transfer-prior weight",
+        }
+
+    async def _run_diffusion_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {"selected_artifacts": []}
 
 
 @pytest.mark.asyncio
@@ -299,3 +334,49 @@ async def test_langchain_graph_canonicalizes_duplicate_task_slug_and_drops_unkno
         canonical_id,
     ]
     assert result.snapshot.edge_records == []
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_requires_agent_authored_edge_weight():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=["node-task-A", "node-task-C"],
+        graph_policy="langchain_graph",
+        metadata={
+            "task_nodes": {
+                "node-task-A": {"task_ids": ["task-A"], "last_iteration": 0},
+                "node-task-C": {"task_ids": ["task-C"], "last_iteration": 0},
+            }
+        },
+    )
+    policy = _MissingWeightLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=2,
+    )
+
+    result = await policy.prepare(
+        task_profile={"task_id": "task-A", "instruction": "same task"},
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[],
+    )
+
+    assert result.snapshot.edge_records == []
+
+
+def test_graph_agent_prompt_and_tools_define_weight_as_agent_output():
+    prompt = langchain_graph_module._GRAPH_SYSTEM_PROMPT
+    weight_schema = langchain_graph_module._GRAPH_OUTPUT_SCHEMA["edges"][0]["weight"]
+    tool_docs = "\n".join(
+        tool.__doc__ or "" for tool in langchain_graph_module._tools(None, [])
+    )
+
+    assert "directly assign weight as a real-number score" in prompt
+    assert "does not calculate it for you" in prompt
+    assert "required real-number transfer prior chosen by the graph agent" in (
+        weight_schema
+    )
+    assert "agent-authored edge weights" in tool_docs
+    assert "calibrating a graph edge weight" in tool_docs
