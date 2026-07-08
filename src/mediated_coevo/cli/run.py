@@ -64,6 +64,7 @@ def run_skillflow_experiment(
     random.seed(seed)
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
+    config.experiment.benchmark_selection.split = selection.split
 
     prepare_llm_credentials_or_exit(config)
     if remote_harbor_config is None:

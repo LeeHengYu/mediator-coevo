@@ -994,13 +994,25 @@ class Orchestrator:
         previous_snapshot = self._latest_langchain_graph_snapshot(
             current_iteration=current_iteration,
         )
-        result = await self._get_langchain_graph_policy().prepare(
-            task_profile=self._diffusion_task_profile(target_task_id),
-            current_iteration=current_iteration,
-            previous_snapshot=previous_snapshot,
-            artifacts=artifacts,
-        )
-        self._diffusion_store.store_graph_snapshot(result.snapshot, overwrite=True)
+        task_profile = self._diffusion_task_profile(target_task_id)
+        if self._uses_fixed_langchain_graph():
+            if previous_snapshot is None:
+                self._langchain_graph_prepared_targets.add(key)
+                return
+            result = await self._get_langchain_graph_policy().select_with_fixed_graph(
+                task_profile=task_profile,
+                current_iteration=current_iteration,
+                snapshot=previous_snapshot,
+                artifacts=artifacts,
+            )
+        else:
+            result = await self._get_langchain_graph_policy().prepare(
+                task_profile=task_profile,
+                current_iteration=current_iteration,
+                previous_snapshot=previous_snapshot,
+                artifacts=artifacts,
+            )
+            self._diffusion_store.store_graph_snapshot(result.snapshot, overwrite=True)
         self._diffusion_snapshot_by_iteration[current_iteration] = result.snapshot
         self._record_prepared_diffusion_context(
             target_task_id,
@@ -1021,6 +1033,12 @@ class Orchestrator:
                 result.subscriptions
             )
         self._langchain_graph_prepared_targets.add(key)
+
+    def _uses_fixed_langchain_graph(self) -> bool:
+        return self.config.experiment.benchmark_selection.split in {
+            "validation",
+            "test",
+        }
 
     def _latest_langchain_graph_snapshot(
         self,

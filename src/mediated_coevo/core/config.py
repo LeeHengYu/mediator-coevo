@@ -22,6 +22,7 @@ DiffusionPolicyName: TypeAlias = Literal[
     "top_k_similarity",
     "langchain_graph",
 ]
+TaskSplitName: TypeAlias = Literal["train", "validation", "test"]
 SIMILARITY_DIFFUSION_GRAPH_NAMES = frozenset(
     {"task_similarity", "precomputed_similarity"}
 )
@@ -191,6 +192,7 @@ class BenchmarkSelectionConfig(BaseModel):
 
     tasks: list[str] = Field(default_factory=list)
     family: str | None = None
+    split: TaskSplitName | None = None
 
 
 class ExperimentConfig(BaseModel):

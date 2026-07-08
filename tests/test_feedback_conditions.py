@@ -410,6 +410,50 @@ class _FakeLangChainGraphPolicy:
         )
 
 
+class _FixedGraphLangChainPolicy:
+    def __init__(self) -> None:
+        self.prepare_called = False
+        self.selected_snapshot_id: str | None = None
+        self.artifact_ids_seen: list[str] = []
+
+    async def prepare(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> LangChainGraphPolicyResult:
+        self.prepare_called = True
+        raise AssertionError("validation must not update the task graph")
+
+    async def select_with_fixed_graph(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> LangChainGraphPolicyResult:
+        self.selected_snapshot_id = snapshot.snapshot_id
+        self.artifact_ids_seen = [artifact.artifact_id for artifact in artifacts]
+        selected = next(
+            artifact for artifact in artifacts if artifact.artifact_id == "old-same-task"
+        )
+        return LangChainGraphPolicyResult(
+            snapshot=snapshot,
+            subscriptions=[
+                DiffusionSubscription(
+                    artifact=selected,
+                    policy_name="langchain_graph",
+                    relation="fixed_graph_selection",
+                    reason="selected using fixed validation graph",
+                    context_channel=REUSE_SUCCESS_CHANNEL,
+                )
+            ],
+        )
+
+
 def _orchestrator(
     tmp_path: Path,
     condition: str,
@@ -778,6 +822,47 @@ def test_langchain_graph_uses_carried_seed_snapshot_at_first_iteration(tmp_path)
         orch._latest_langchain_graph_snapshot(current_iteration=1).snapshot_id
         == "current-snapshot"
     )
+
+
+@pytest.mark.asyncio
+async def test_validation_langchain_graph_uses_fixed_snapshot_for_context(tmp_path):
+    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
+    fake_policy = _FixedGraphLangChainPolicy()
+    orch.config.experiment.benchmark_selection.split = "validation"
+    orch.config.diffusion.enabled = True
+    orch.config.diffusion.policy = "langchain_graph"
+    orch._langchain_graph_policy = fake_policy
+    orch._ensure_diffusion_runtime_state()
+    seed_snapshot = TaskGraphSnapshot(
+        snapshot_id="seed-snapshot",
+        run_id="train-run",
+        iteration=7,
+        task_ids=["node-task-A"],
+        graph_policy="langchain_graph",
+        metadata={"current_node_id": "node-task-A"},
+    )
+    orch._diffusion_store.store_graph_snapshot(seed_snapshot)
+    _store_diffusion_artifact(
+        orch,
+        artifact_id="old-same-task",
+        source_task_id="task-A",
+        source_iteration=0,
+        content="validation should use fixed graph",
+    )
+
+    bundle = await orch._build_prior_context_bundle(
+        "learned_mediator",
+        "task-A",
+        current_iteration=1,
+    )
+
+    snapshots = orch._diffusion_store.query_graph_snapshots(recent=None)
+    assert fake_policy.prepare_called is False
+    assert fake_policy.selected_snapshot_id == "seed-snapshot"
+    assert fake_policy.artifact_ids_seen == ["old-same-task"]
+    assert [snapshot.snapshot_id for snapshot in snapshots] == ["seed-snapshot"]
+    assert bundle.diffusion_context is not None
+    assert "validation should use fixed graph" in bundle.diffusion_context
 
 
 @pytest.mark.asyncio

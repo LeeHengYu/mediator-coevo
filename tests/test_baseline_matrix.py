@@ -1182,6 +1182,59 @@ def test_run_command_forwards_repeated_families_and_split(monkeypatch, tmp_path)
     assert captured["run_called"] is True
 
 
+def test_run_skillflow_experiment_persists_selection_split(monkeypatch, tmp_path):
+    config = _config()
+    config.paths.data_dir = "data"
+    config.paths.skills_dir = "skills"
+    (tmp_path / "skills" / "executor").mkdir(parents=True)
+    (tmp_path / "skills" / "executor" / "SKILL.md").write_text("# executor\n")
+    monkeypatch.setattr(run_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        run_module,
+        "prepare_llm_credentials_or_exit",
+        lambda config: config,
+    )
+    monkeypatch.setattr(run_module, "ensure_harbor_available", lambda config: None)
+    monkeypatch.setattr(run_module, "build_benchmark_repo", lambda *args: object())
+    monkeypatch.setattr(
+        run_module,
+        "materialize_task_graph_for_diffusion",
+        lambda **kwargs: None,
+    )
+    runtime = SimpleNamespace(
+        experiment_dir=tmp_path / "runtime",
+        orchestrator=SimpleNamespace(history_store=object()),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "build_experiment_runtime",
+        lambda **kwargs: runtime,
+    )
+    monkeypatch.setattr(run_module, "run_experiment_or_exit", lambda *args: [])
+    monkeypatch.setattr(run_module, "write_and_print_result_summary", lambda **kwargs: None)
+    monkeypatch.setattr(run_module, "annotate_judge_rewards_or_exit", lambda **kwargs: None)
+    selection = run_module.TaskSelection(
+        task_ids=["family-a/task-one"],
+        families=("family-a",),
+        split="validation",
+    )
+
+    run_module.run_skillflow_experiment(
+        config=config,
+        selection=selection,
+        iterations=1,
+        seed=42,
+        condition_name="learned_mediator",
+        run_id="split-persist",
+    )
+
+    config_paths = list((tmp_path / "data" / "experiments").glob("*/config.toml"))
+    assert config.experiment.benchmark_selection.split == "validation"
+    assert len(config_paths) == 1
+    saved = tomllib.loads(config_paths[0].read_text())
+    assert saved["experiment"]["benchmark_selection"]["split"] == "validation"
+
+
 def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path):
     for skill_name in ("executor", "planner", "mediator"):
         _write_skill(tmp_path, skill_name, f"# {skill_name}\n")

@@ -77,6 +77,29 @@ class LangChainGraphPolicy:
             ),
         )
 
+    async def select_with_fixed_graph(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> LangChainGraphPolicyResult:
+        diffusion_decision = await self._run_diffusion_agent(
+            task_profile=task_profile,
+            current_iteration=current_iteration,
+            snapshot=snapshot,
+            artifacts=artifacts,
+        )
+        return LangChainGraphPolicyResult(
+            snapshot=snapshot,
+            subscriptions=_subscriptions_from_diffusion_decision(
+                diffusion_decision=diffusion_decision,
+                artifacts=artifacts,
+                max_artifacts=self.max_artifacts,
+            ),
+        )
+
     async def _run_graph_agent(
         self,
         *,
