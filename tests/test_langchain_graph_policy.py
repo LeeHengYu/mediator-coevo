@@ -153,6 +153,33 @@ class _FullStoreArtifactLangChainGraphPolicy(LangChainGraphPolicy):
         }
 
 
+class _EmptySelectionSameTaskLangChainGraphPolicy(LangChainGraphPolicy):
+    async def _run_graph_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "node_id": "node-task-A",
+            "node_action": "reused",
+            "edges": [],
+            "reason": "same task belongs to existing node",
+        }
+
+    async def _run_diffusion_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {"selected_artifacts": []}
+
+
 class _MissingWeightLangChainGraphPolicy(LangChainGraphPolicy):
     async def _run_graph_agent(
         self,
@@ -275,6 +302,43 @@ async def test_langchain_graph_allows_agent_selected_full_store_artifacts():
     ]
     assert result.subscriptions[0].relation == "unrelated_full_store_pick"
     assert result.subscriptions[1].relation == "same_node_history"
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_falls_back_to_same_task_when_agent_selects_none():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=["node-task-A", "node-task-C"],
+        graph_policy="langchain_graph",
+        metadata={
+            "task_nodes": {
+                "node-task-A": {"task_ids": ["task-A"], "last_iteration": 0},
+                "node-task-C": {"task_ids": ["task-C"], "last_iteration": 0},
+            }
+        },
+    )
+    policy = _EmptySelectionSameTaskLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=1,
+    )
+
+    result = await policy.prepare(
+        task_profile={"task_id": "task-A", "instruction": "same task"},
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[
+            _artifact("artifact-C", source_task_id="task-C"),
+            _artifact("artifact-A", source_task_id="task-A"),
+        ],
+    )
+
+    assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
+        "artifact-A"
+    ]
+    assert result.subscriptions[0].relation == "same_task_prior"
+    assert result.subscriptions[0].metadata == {"fallback": "empty_agent_selection"}
 
 
 @pytest.mark.asyncio

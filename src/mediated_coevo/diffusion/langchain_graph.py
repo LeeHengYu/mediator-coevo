@@ -73,6 +73,8 @@ class LangChainGraphPolicy:
             snapshot=snapshot,
             subscriptions=_subscriptions_from_diffusion_decision(
                 diffusion_decision=diffusion_decision,
+                task_profile=task_profile,
+                snapshot=snapshot,
                 artifacts=artifacts,
                 max_artifacts=self.max_artifacts,
             ),
@@ -96,6 +98,8 @@ class LangChainGraphPolicy:
             snapshot=snapshot,
             subscriptions=_subscriptions_from_diffusion_decision(
                 diffusion_decision=diffusion_decision,
+                task_profile=task_profile,
+                snapshot=snapshot,
                 artifacts=artifacts,
                 max_artifacts=self.max_artifacts,
             ),
@@ -334,9 +338,13 @@ def _canonical_graph_node_id(
 def _subscriptions_from_diffusion_decision(
     *,
     diffusion_decision: dict[str, Any],
+    task_profile: dict[str, Any],
+    snapshot: TaskGraphSnapshot,
     artifacts: list[DiffusionArtifact],
     max_artifacts: int,
 ) -> list[DiffusionSubscription]:
+    if max_artifacts <= 0:
+        return []
     artifacts_by_id = {artifact.artifact_id: artifact for artifact in artifacts}
     subscriptions: list[DiffusionSubscription] = []
     seen: set[str] = set()
@@ -363,7 +371,109 @@ def _subscriptions_from_diffusion_decision(
         seen.add(artifact_id)
         if len(subscriptions) >= max_artifacts:
             break
+    if not subscriptions:
+        subscriptions.extend(
+            _fallback_subscriptions(
+                task_profile=task_profile,
+                snapshot=snapshot,
+                artifacts=artifacts,
+                max_artifacts=max_artifacts,
+            )
+        )
     return subscriptions
+
+
+def _fallback_subscriptions(
+    *,
+    task_profile: dict[str, Any],
+    snapshot: TaskGraphSnapshot,
+    artifacts: list[DiffusionArtifact],
+    max_artifacts: int,
+) -> list[DiffusionSubscription]:
+    if max_artifacts <= 0:
+        return []
+    current_task_id = str(task_profile["task_id"])
+    task_nodes = dict(snapshot.metadata.get("task_nodes") or {})
+    current_node_id = str(snapshot.metadata.get("current_node_id") or current_task_id)
+    current_node = dict(task_nodes.get(current_node_id) or {})
+    same_node_task_ids = {current_task_id}
+    same_node_task_ids.update(str(task_id) for task_id in current_node.get("task_ids", []))
+
+    node_by_task_id: dict[str, str] = {}
+    for node_id, node in task_nodes.items():
+        for task_id in dict(node).get("task_ids", []):
+            node_by_task_id[str(task_id)] = str(node_id)
+    incoming_weight_by_node = {
+        edge.source_task_id: edge.weight
+        for edge in snapshot.edge_records
+        if edge.target_task_id == current_node_id
+    }
+
+    ranked: list[tuple[float, str, str, str, str, DiffusionArtifact]] = []
+    for artifact in artifacts:
+        source_node_id = node_by_task_id.get(artifact.source_task_id)
+        if artifact.source_task_id == current_task_id:
+            base_score = 300.0
+            relation = "same_task_prior"
+            reason = "fallback selected same-task artifact after empty agent selection"
+        elif artifact.source_task_id in same_node_task_ids:
+            base_score = 250.0
+            relation = "same_node_prior"
+            reason = "fallback selected same-node artifact after empty agent selection"
+        elif source_node_id in incoming_weight_by_node:
+            base_score = 100.0 + 100.0 * incoming_weight_by_node[source_node_id]
+            relation = "graph_prior_fallback"
+            reason = "fallback selected incoming graph-prior artifact after empty agent selection"
+        else:
+            continue
+        score = base_score + _artifact_quality_score(artifact)
+        channel = (
+            REUSE_SUCCESS_CHANNEL
+            if _artifact_reward(artifact) >= 0.5
+            else AVOID_RECHECK_CHANNEL
+        )
+        ranked.append((score, artifact.artifact_id, relation, reason, channel, artifact))
+
+    ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    subscriptions: list[DiffusionSubscription] = []
+    seen: set[str] = set()
+    for _, _, relation, reason, channel, artifact in ranked:
+        if artifact.artifact_id in seen:
+            continue
+        subscriptions.append(
+            DiffusionSubscription(
+                artifact=artifact,
+                policy_name="langchain_graph",
+                relation=relation,
+                reason=reason,
+                context_channel=channel,
+                metadata={"fallback": "empty_agent_selection"},
+            )
+        )
+        seen.add(artifact.artifact_id)
+        if len(subscriptions) >= max_artifacts:
+            break
+    return subscriptions
+
+
+def _artifact_quality_score(artifact: DiffusionArtifact) -> float:
+    artifact_type = getattr(artifact.artifact_type, "value", artifact.artifact_type)
+    type_score = {
+        "mediator_report_summary": 3.0,
+        "debug_hint": 2.0,
+        "run_outcome": 1.0,
+    }.get(str(artifact_type), 0.0)
+    return 10.0 * _artifact_reward(artifact) + type_score
+
+
+def _artifact_reward(artifact: DiffusionArtifact) -> float:
+    reward = artifact.verifier_reward
+    if reward is None:
+        reward = artifact.judge_reward
+    try:
+        return float(reward or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _last_message_text(result: Any) -> str:
