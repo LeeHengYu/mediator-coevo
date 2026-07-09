@@ -1,0 +1,169 @@
+# Task Instruction
+
+## Task: Populate formulas and calculations in /root/data/workbook.xlsx
+
+### Preparation
+1. Copy `/root/data/workbook.xlsx` to `/root/output/result.xlsx` first, then work exclusively on `/root/output/result.xlsx`.
+2. Install `openpyxl` if not already available: `pip install openpyxl`.
+3. Before making any changes, inspect the workbook thoroughly:
+   - Read sheet names to confirm `Task` and `Data` exist.
+   - Print the contents of `Task` sheet rows 1-55 (all columns A through M) to understand the layout: column D series codes, row 10 years, yellow cell regions, and the structure of H35:L47 and H50:L50.
+   - Print the contents of `Data` sheet rows 1-40 (all relevant columns) to understand the data layout, especially rows 21-38.
+   - Identify exactly which columns on `Data` sheet contain the data and what the header row structure looks like.
+   - Print the exact values in Task!D12:D17, D19:D24, D26:D31 (series codes) and H10:L10 (years).
+
+### Step 1: Populate lookup formulas in H12:L17, H19:L24, H26:L31
+
+For each cell in these ranges, write a spreadsheet formula (not a computed value) that looks up data from the `Data` sheet rows 21:38.
+
+**Important formula construction rules:**
+- Use one of: VLOOKUP+MATCH, HLOOKUP+MATCH, XLOOKUP+MATCH, or INDEX+MATCH.
+- Each formula must use TWO inputs: (1) the series code from column D of the current row on `Task` sheet, and (2) the year from row 10 of the current column on `Task` sheet.
+- Inspect the `Data` sheet carefully to determine the correct orientation:
+  - If data is arranged with series codes in a column and years across the top, INDEX(MATCH for row, MATCH for column) is natural.
+  - Determine the exact range references for the data block, header row (years), and key column (series codes) on the `Data` sheet.
+- Use absolute references (with $) for the data range and relative references for the lookup values so formulas can be consistent across the block.
+- Write actual Excel formula strings into cells (e.g., `cell.value = '=INDEX(...)'`), do NOT compute values in Python.
+
+### Step 2: Net capacity headroom in H35:L40 and statistics in H42:L47
+
+**H35:L40 - Net capacity headroom:**
+For each of the 6 hospital clusters (rows 35-40) and each year column (H-L):
+- Formula: `(Available Care Slots - Occupied Care Slots) / Staffed Bed Capacity * 100`
+- The three input blocks are in H12:L17 (one block), H19:L24 (another block), and H26:L31 (third block).
+- Inspect the Task sheet to determine which block corresponds to which metric (Available Care Slots, Occupied Care Slots, Staffed Bed Capacity). Look at labels/headers near rows 11, 18, 25 to identify them.
+- Write spreadsheet formulas (not computed values).
+
+**H42:L47 - Column-wise statistics:**
+For each year column (H through L), calculate these over the 6 values in rows 35-40 of that column:
+- Row 42: Minimum → `=MIN(H35:H40)` pattern
+- Row 43: Maximum → `=MAX(H35:H40)` pattern  
+- Row 44: Median → `=MEDIAN(H35:H40)` pattern
+- Row 45: Simple mean → `=AVERAGE(H35:H40)` pattern
+- Row 46: 25th percentile → `=PERCENTILE(H35:H40,0.25)` pattern
+- Row 47: 75th percentile → `=PERCENTILE(H35:H40,0.75)` pattern
+- **IMPORTANT**: Verify which row corresponds to which statistic by checking labels in column D or nearby columns for rows 42-47. Do not assume the order above; use the actual labels.
+
+### Step 3: Weighted mean in H50:L50
+For each year column, use SUMPRODUCT:
+`=SUMPRODUCT(H35:H40, H26:H31) / SUM(H26:H31)` pattern
+- This computes the weighted mean of Net capacity headroom (H35:H40) weighted by Staffed Bed Capacity (H26:H31).
+- Write as a spreadsheet formula.
+
+### Final checks
+1. After writing all formulas, re-read the workbook and print a sample of cells to confirm formulas are stored as strings starting with `=`.
+2. Confirm no new sheets were added.
+3. Confirm the file is saved to `/root/output/result.xlsx`.
+4. Do NOT add macros, VBA, external links, or helper tabs.
+5. Do NOT change any existing formatting - use `openpyxl` with `keep_vba=False` and be careful not to strip styles. When loading, do NOT use `data_only=True`.
+
+### Critical openpyxl notes
+- Load with `openpyxl.load_workbook('/root/output/result.xlsx')` (no special flags that would strip formatting).
+- When writing formulas, just assign the formula string to `cell.value`.
+- Save with `wb.save('/root/output/result.xlsx')`.
+- If the workbook has any defined names or print areas, don't modify them.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@meituan.com, author_name=CatPaw Task Engineer, category=spreadsheet-formula-reuse, difficulty=hard, tags=[excel, formulas, lookup, statistics, weighted-mean].
+Verifier config: timeout_sec=600.0.

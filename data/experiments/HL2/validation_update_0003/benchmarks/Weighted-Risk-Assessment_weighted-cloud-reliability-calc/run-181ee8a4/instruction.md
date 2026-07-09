@@ -1,0 +1,192 @@
+# Task Instruction
+
+Execute the following steps precisely to produce /root/output/result.xlsx from /root/data/workbook.xlsx.
+
+## Preliminary Inspection
+
+1. Open /root/data/workbook.xlsx with openpyxl (data_only=False to preserve formulas).
+2. Inspect the `Task` sheet:
+   - Print rows 10-12 (columns D-L) to see the year header row and the first data series row.
+   - Print rows 19-20, 26-27, 35-36, 42-43, 50 (columns D-L) to understand the layout.
+   - Specifically note what is in column D for rows 12-17, 19-24, 26-31, 35-40 (these are the series codes / region labels).
+3. Inspect the `Data` sheet:
+   - Print rows 21-38 (columns A-Z or at least A-R) to see the source data layout.
+   - Identify which column holds the series code and which row/column holds the year values.
+4. Print all findings before writing any formulas.
+
+## Step 1: Lookup Formulas in H12:L17, H19:L24, H26:L31
+
+Use the `INDEX/MATCH` pattern. For each cell, the formula must reference:
+- The series code from column D of **that same row** (use `$D12`, `$D13`, etc. — column-locked but row-relative)
+- The year from row 10 of **that same column** (use `H$10`, `I$10`, etc. — row-locked but column-relative)
+
+The exact formula template for cell H12 should be something like:
+```
+=INDEX(Data!$B$21:$R$38,MATCH($D12,Data!$A$21:$A$38,0),MATCH(H$10,Data!$B$20:$R$20,0))
+```
+Adjust the ranges based on what you find during inspection (the actual column/row extents of the Data sheet). The key principle:
+- The lookup_value for the row match is `$D12` (column D locked, row relative)
+- The lookup_value for the column match is `H$10` (row 10 locked, column relative)
+- The data range and lookup vectors on the Data sheet should be fully absolute ($).
+
+Fill all 6 rows × 5 columns in each of the three blocks. When writing formulas for rows 12-17, make sure each row references its own row number (D12, D13, D14, D15, D16, D17). Same for rows 19-24 and 26-31. Do NOT copy the row-12 formula with absolute row references to other rows.
+
+**CRITICAL**: After writing all lookup formulas, print back a sample of cells (e.g., H12, H13, H17, H19, H24, H26, H31) to verify the formula text contains the correct row-relative references.
+
+## Step 2: Net Reliability Gap in H35:L40
+
+The formula for each cell in H35:L40 is:
+```
+=(H12 - H19) / H26 * 100
+```
+where H12 corresponds to "Successful API Requests" for the region in that row, H19 to "Failed API Requests", and H26 to "Compute Capacity".
+
+**CRITICAL**: The row offsets must be correct for EACH of the 6 regions:
+- H35: =(H12 - H19) / H26 * 100
+- H36: =(H13 - H20) / H27 * 100
+- H37: =(H14 - H21) / H28 * 100
+- H38: =(H15 - H22) / H29 * 100
+- H39: =(H16 - H23) / H30 * 100
+- H40: =(H17 - H24) / H31 * 100
+
+And similarly for columns I, J, K, L. Each column uses its own column letter but the same row pattern.
+
+Do NOT use absolute row references like $12, $19, $26 here. Each row must reference its own corresponding data rows.
+
+After writing, print back H35:H40 formula text to confirm row references increment correctly.
+
+## Step 2 continued: Summary Statistics in H42:L47
+
+For each column (H through L):
+- Row 42: =MIN(H35:H40)
+- Row 43: =MAX(H35:H40)
+- Row 44: =MEDIAN(H35:H40)
+- Row 45: =AVERAGE(H35:H40)
+- Row 46: =PERCENTILE(H35:H40,0.25)    [use PERCENTILE, not PERCENTILE.INC]
+- Row 47: =PERCENTILE(H35:H40,0.75)    [use PERCENTILE, not PERCENTILE.INC]
+
+## Step 3: Weighted Mean in H50:L50
+
+For each column (H through L):
+```
+=SUMPRODUCT(H35:H40,H26:H31)/SUM(H26:H31)
+```
+
+## Save
+
+1. Create /root/output/ directory if it doesn't exist.
+2. Save the workbook to /root/output/result.xlsx.
+3. Verify the saved file exists and is non-empty.
+4. Re-open the saved file and print the formula text of cells H35, H36, H37, H38, H39, H40 (column H) to confirm they have incrementing row references (12/13/14..., 19/20/21..., 26/27/28...).
+
+## Key Warnings
+- The previous failure was caused by using the SAME row references (row 12, 19, 26) for ALL six regions in H35:H40. This produced -7.0 for every region instead of distinct values. You MUST increment the row references for each region.
+- Use `PERCENTILE` not `PERCENTILE.INC` or `PERCENTILE.EXC`.
+- Do not add sheets, macros, VBA, external links, or helper tabs.
+- Do not alter existing formatting.
+- Write formulas as strings (openpyxl stores them without leading = by using cell.value = '=FORMULA').
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@meituan.com, author_name=CatPaw Task Engineer, category=spreadsheet-formula-reuse, difficulty=easy, tags=[excel, formulas, lookup, statistics, weighted-mean].
+Verifier config: timeout_sec=600.0.

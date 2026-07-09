@@ -1,0 +1,243 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+You will complete a HWPX document automation task. Follow these steps precisely:
+
+## 1. Inspect the inputs
+
+```bash
+cd /root
+ls -la
+cat project_proposal.json
+```
+
+Examine the JSON file to understand all key-value pairs.
+
+```bash
+# HWPX is a ZIP archive; list its contents
+python3 -c "import zipfile; z=zipfile.ZipFile('"'"'project_proposal_template.hwpx'"'"','"'"'r'"'"'); print('"'"'\n'"'"'.join(z.namelist()))"
+```
+
+Identify which XML files inside the archive contain `{{` placeholders:
+
+```bash
+python3 -c "
+import zipfile
+z = zipfile.ZipFile('"'"'project_proposal_template.hwpx'"'"', '"'"'r'"'"')
+for name in z.namelist():
+    data = z.read(name)
+    try:
+        text = data.decode('"'"'utf-8'"'"')
+    except:
+        continue
+    if '"'"'{{'"'"' in text or '"'"'}}'"'"' in text:
+        print(f'"'"'=== {name} ==='"'"')
+        print(text[:5000])
+        print('"'"'...'"'"')
+"
+```
+
+Read the full content of every XML file that contains placeholders so you understand the exact structure before editing.
+
+## 2. Write the transformation script
+
+Create a Python script `/root/transform.py` that does the following:
+
+### 2a. Load JSON values
+- Read `project_proposal.json`.
+- For the budget value, strip commas but keep the leading currency symbol (e.g., `₩1,500,000,000` → `₩1500000000`).
+
+### 2b. Extract and repack the HWPX ZIP
+- Extract the template HWPX to a temp directory.
+- Process all XML files that contain placeholders.
+- Repack into `/root/project_proposal_ready.hwpx` preserving the original ZIP structure, compression method, and all other files byte-for-byte.
+
+### 2c. Replace placeholders using regex on raw XML strings
+HWPX editors frequently split placeholder text like `{{project_name}}` across multiple `<hp:t>` tags within the same `<hp:run>` or even across adjacent runs in the same paragraph. You MUST handle this:
+
+1. **Consolidation approach**: For each `<hp:p>` paragraph element, extract all text content, check if it contains a `{{...}}` pattern when the tags are stripped, and if so, consolidate the split placeholder into a single `<hp:t>` tag with the replacement value.
+2. **Regex strategy**: Use regex to find patterns like `\{\{[^}]*\}\}` where the characters may be split across multiple `<hp:t>...</hp:t>` boundaries. One effective approach:
+   - Work paragraph by paragraph (split on `<hp:p ` or `<hp:p>`).
+   - Within each paragraph, collect all `<hp:t>` text content concatenated.
+   - If the concatenated text contains a `{{key}}` pattern, replace it with the JSON value.
+   - Then rebuild the paragraph'"'"'s run/text structure so there'"'"'s a single `<hp:t>` per logical text segment, or at minimum ensure no `{{...}}` fragments remain.
+3. **Alternative proven approach**: Use regex to strip XML tags from the paragraph'"'"'s inner content to get plain text, do replacements on that, then reconstruct the `<hp:run>`/`<hp:t>` structure.
+
+### 2d. Append month spans to phase lines
+For lines containing `단계1`, `단계2`, `단계3` (phase 1, 2, 3), calculate the month span from the date range present in that line. The date format is typically `YYYY.MM.DD ~ YYYY.MM.DD` or similar. Calculate the difference in months and append ` (N개월)` to the text of that line. Expected: 단계1 → (3개월), 단계2 → (3개월), 단계3 → (1개월).
+
+### 2e. Remove stale layout-cache elements
+For every `<hp:p>` paragraph whose text content was modified, remove the `<hp:lineSegArray>` element (and its children) from that paragraph. This prevents overlapping character rendering in Hancom Office. Use regex: remove `<hp:lineSegArray>.*?</hp:lineSegArray>` (with `re.DOTALL`) from modified paragraphs.
+
+### 2f. Validate
+After writing the output HWPX:
+- Open it as a ZIP and verify it'"'"'s valid.
+- Read back all XML files and confirm no `{{` or `}}` remains anywhere.
+- Print the text content of modified paragraphs for visual verification.
+
+## 3. Execute and verify
+
+```bash
+python3 /root/transform.py
+```
+
+Then verify:
+
+```bash
+python3 -c "
+import zipfile
+z = zipfile.ZipFile('"'"'/root/project_proposal_ready.hwpx'"'"', '"'"'r'"'"')
+for name in z.namelist():
+    data = z.read(name)
+    try:
+        text = data.decode('"'"'utf-8'"'"')
+    except:
+        continue
+    if '"'"'{{'"'"' in text or '"'"'}}'"'"' in text:
+        print(f'"'"'FAIL: placeholder remains in {name}'"'"')
+        # print surrounding context
+        idx = text.find('"'"'{{'"'"')
+        print(text[max(0,idx-100):idx+100])
+else:
+    print('"'"'All placeholders replaced successfully.'"'"')
+print('"'"'HWPX is a valid ZIP:'"'"', zipfile.is_zipfile('"'"'/root/project_proposal_ready.hwpx'"'"'))
+"
+```
+
+Also verify the phase month spans are present:
+
+```bash
+python3 -c "
+import zipfile, re
+z = zipfile.ZipFile('"'"'/root/project_proposal_ready.hwpx'"'"', '"'"'r'"'"')
+for name in z.namelist():
+    try:
+        text = z.read(name).decode('"'"'utf-8'"'"')
+    except:
+        continue
+    for m in re.finditer(r'"'"'단계[123].*?개월'"'"', text):
+        print(m.group())
+"
+```
+
+If any check fails, diagnose and fix before finishing.
+
+## Key constraints recap
+- No `{{...}}` may remain in the output.
+- Budget value: no commas, keep currency symbol.
+- Korean labels and static note lines must be unchanged.
+- Phase lines must have `(N개월)` appended.
+- Modified paragraphs must have `<hp:lineSegArray>` removed.
+- Output must be a valid HWPX (ZIP) package at `/root/project_proposal_ready.hwpx`.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/HL2/test_final/jobs/2026-07-09__22-35-33/run-f651d8e1__Rchhjis/agent/trajectory.json
