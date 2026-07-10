@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,7 @@ class TaskSelection:
     task_ids: list[str]
     families: tuple[str, ...]
     split: TaskSplitName | None = None
+    task_stream_seed: int | None = None
 
     @property
     def family(self) -> str:
@@ -77,11 +79,16 @@ def resolve_task_selection(
     selected = _select_split_pool(selected, seed=seed, split=split)
     if not selected:
         raise typer.BadParameter("selected task split is empty")
-    selected = random.Random(seed).choices(selected, k=BOOTSTRAP_FAMILY_TASK_COUNT)
+    resolved_stream_seed = secrets.randbits(63)
+    selected = random.Random(resolved_stream_seed).choices(
+        selected,
+        k=BOOTSTRAP_FAMILY_TASK_COUNT,
+    )
     return TaskSelection(
         task_ids=selected,
         families=tuple(families),
         split=_normalize_split(split),
+        task_stream_seed=resolved_stream_seed,
     )
 
 
@@ -90,7 +97,9 @@ def _normalize_families(family: str | Sequence[str] | None) -> list[str]:
         raise typer.BadParameter("provide --family")
     raw_families = [family] if isinstance(family, str) else list(family)
     families = list(
-        dict.fromkeys(family_name.strip() for family_name in raw_families if family_name.strip())
+        dict.fromkeys(
+            family_name.strip() for family_name in raw_families if family_name.strip()
+        )
     )
     if not families:
         raise typer.BadParameter("provide --family")
@@ -117,7 +126,9 @@ def _select_split_pool(
     if split_name is None:
         return task_ids
     if len(task_ids) < 3:
-        raise typer.BadParameter("train/validation/test split requires at least 3 tasks")
+        raise typer.BadParameter(
+            "train/validation/test split requires at least 3 tasks"
+        )
     shuffled = list(task_ids)
     random.Random(seed).shuffle(shuffled)
     validation_count = max(1, len(shuffled) // 5)

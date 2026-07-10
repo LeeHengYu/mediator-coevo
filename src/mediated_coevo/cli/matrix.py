@@ -63,7 +63,10 @@ def matrix(
     ),
     seed: int | None = typer.Option(
         None,
-        help="Random seed reused for every row. Overrides experiment.seed.",
+        help=(
+            "Experiment and deterministic task-split seed reused for every row. "
+            "Overrides experiment.seed."
+        ),
     ),
     coevo_interval: Annotated[
         int | None,
@@ -92,9 +95,7 @@ def matrix(
         str | None,
         typer.Option(
             "--diffusion-policy",
-            help=(
-                "Rejected for matrix runs; diffusion.policy is row-local."
-            ),
+            help=("Rejected for matrix runs; diffusion.policy is row-local."),
         ),
     ] = None,
     diffusion_graph: Annotated[
@@ -180,9 +181,7 @@ def matrix(
         console.print("[bold]Matrix rows:[/]")
         for index, preset in enumerate(BASELINE_PRESETS):
             skill_updates = preset.skill_updates.model_dump()
-            enabled_roles = [
-                role for role, enabled in skill_updates.items() if enabled
-            ]
+            enabled_roles = [role for role, enabled in skill_updates.items() if enabled]
             if not enabled_roles:
                 skill_update_label = "none"
             elif len(enabled_roles) == len(skill_updates):
@@ -257,6 +256,8 @@ def matrix(
     )
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
+    config.experiment.benchmark_selection.split = selection.split
+    config.experiment.benchmark_selection.task_stream_seed = selection.task_stream_seed
     seed = config.experiment.seed
     iterations = config.experiment.num_iterations
     matrix_dir = create_matrix_dir(
@@ -293,14 +294,15 @@ def matrix(
         imported_count = 0
         if artifact_store is not None:
             try:
-                imported_count = row.runtime.orchestrator._diffusion_store.import_artifact_store(
-                    artifact_store,
-                    frozen=freeze_artifacts,
+                imported_count = (
+                    row.runtime.orchestrator._diffusion_store.import_artifact_store(
+                        artifact_store,
+                        frozen=freeze_artifacts,
+                    )
                 )
             except (OSError, ValueError) as exc:
                 console.print(
-                    "[bold red]ERROR:[/] failed to preload artifact store: "
-                    f"{exc}"
+                    f"[bold red]ERROR:[/] failed to preload artifact store: {exc}"
                 )
                 raise typer.Exit(code=1) from exc
             row.runtime.orchestrator.preloaded_diffusion_artifact_store_path = str(
@@ -342,8 +344,7 @@ def matrix(
             )
         except (OSError, ValueError) as exc:
             console.print(
-                "[bold red]ERROR:[/] failed to create diffusion task graph: "
-                f"{exc}"
+                f"[bold red]ERROR:[/] failed to create diffusion task graph: {exc}"
             )
             raise typer.Exit(code=1) from exc
         console.print(
@@ -381,8 +382,7 @@ def matrix(
                 )
             except (OSError, ValueError) as exc:
                 console.print(
-                    "[bold red]ERROR:[/] failed to save artifact store: "
-                    f"{exc}"
+                    f"[bold red]ERROR:[/] failed to save artifact store: {exc}"
                 )
                 raise typer.Exit(code=1) from exc
             console.print(

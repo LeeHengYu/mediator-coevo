@@ -193,6 +193,7 @@ class BenchmarkSelectionConfig(BaseModel):
     tasks: list[str] = Field(default_factory=list)
     family: str | None = None
     split: TaskSplitName | None = None
+    task_stream_seed: int | None = None
 
 
 class ExperimentConfig(BaseModel):
