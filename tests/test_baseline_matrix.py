@@ -313,6 +313,8 @@ def _stub_matrix_runtime_build(monkeypatch, tmp_path):
     class Selection:
         task_ids = ["task-A"]
         family = "family-a"
+        split = None
+        task_stream_seed = 9001
 
     def capture_matrix_dir(*, project_root, seed, data_dir, run_id=None):
         captured["matrix_project_root"] = project_root
@@ -463,7 +465,12 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
     saved = tmp_path / "saved"
     source.save_artifact_store(saved, store_id="warmup")
     repository = object()
-    selection = SimpleNamespace(task_ids=["task-A"], family="family-a")
+    selection = SimpleNamespace(
+        task_ids=["task-A"],
+        family="family-a",
+        split=None,
+        task_stream_seed=9001,
+    )
     orch = SimpleNamespace(
         config=None,
         experiment_dir=tmp_path / "row-experiment",
@@ -548,7 +555,9 @@ def test_matrix_preloads_artifact_store_and_freezes_runtime(monkeypatch, tmp_pat
         ],
     )
     loaded = orch._diffusion_store.load_artifact("artifact-1")
-    invocation = json.loads((orch.experiment_dir / "matrix_invocation.json").read_text())
+    invocation = json.loads(
+        (orch.experiment_dir / "matrix_invocation.json").read_text()
+    )
 
     assert result.exit_code == 0, result.output
     assert loaded is not None
@@ -1211,12 +1220,17 @@ def test_run_skillflow_experiment_persists_selection_split(monkeypatch, tmp_path
         lambda **kwargs: runtime,
     )
     monkeypatch.setattr(run_module, "run_experiment_or_exit", lambda *args: [])
-    monkeypatch.setattr(run_module, "write_and_print_result_summary", lambda **kwargs: None)
-    monkeypatch.setattr(run_module, "annotate_judge_rewards_or_exit", lambda **kwargs: None)
+    monkeypatch.setattr(
+        run_module, "write_and_print_result_summary", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        run_module, "annotate_judge_rewards_or_exit", lambda **kwargs: None
+    )
     selection = run_module.TaskSelection(
         task_ids=["family-a/task-one"],
         families=("family-a",),
         split="validation",
+        task_stream_seed=9001,
     )
 
     run_module.run_skillflow_experiment(
@@ -1230,9 +1244,11 @@ def test_run_skillflow_experiment_persists_selection_split(monkeypatch, tmp_path
 
     config_paths = list((tmp_path / "data" / "experiments").glob("*/config.toml"))
     assert config.experiment.benchmark_selection.split == "validation"
+    assert config.experiment.benchmark_selection.task_stream_seed == 9001
     assert len(config_paths) == 1
     saved = tomllib.loads(config_paths[0].read_text())
     assert saved["experiment"]["benchmark_selection"]["split"] == "validation"
+    assert saved["experiment"]["benchmark_selection"]["task_stream_seed"] == 9001
 
 
 def test_factory_build_validates_design_before_creating_experiment_dir(tmp_path):

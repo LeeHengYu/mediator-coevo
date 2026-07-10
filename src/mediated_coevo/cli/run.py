@@ -46,6 +46,7 @@ from mediated_coevo.experiment.runtime_factory import (
     build_benchmark_repo,
     build_experiment_runtime,
 )
+
 _HARNESS_APPLIED_ENV = "MEDCOEVO_HARNESS_APPLIED"
 
 
@@ -65,6 +66,7 @@ def run_skillflow_experiment(
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
     config.experiment.benchmark_selection.split = selection.split
+    config.experiment.benchmark_selection.task_stream_seed = selection.task_stream_seed
 
     prepare_llm_credentials_or_exit(config)
     if remote_harbor_config is None:
@@ -77,8 +79,7 @@ def run_skillflow_experiment(
         raise typer.Exit(code=1)
 
     resolved_run_id = (
-        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-"
-        f"{run_id or f'{seed}-skillflow'}"
+        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{run_id or f'{seed}-skillflow'}"
     )
     experiment_dir = (
         PROJECT_ROOT / config.paths.data_dir / "experiments" / resolved_run_id
@@ -101,7 +102,9 @@ def run_skillflow_experiment(
             benchmark_repo=benchmark_repo,
         )
     except (OSError, ValueError) as exc:
-        console.print(f"[bold red]ERROR:[/] failed to create diffusion task graph: {exc}")
+        console.print(
+            f"[bold red]ERROR:[/] failed to create diffusion task graph: {exc}"
+        )
         raise typer.Exit(code=1) from exc
     runtime = build_experiment_runtime(
         config=config,
@@ -173,7 +176,9 @@ def _apply_harness_overlay(harness_dir: Path, project_root: Path) -> list[str]:
         shutil.copy2(source, target)
         applied.append(rel.as_posix())
     if not applied:
-        raise typer.BadParameter(f"harness overlay contains no source files: {harness_dir}")
+        raise typer.BadParameter(
+            f"harness overlay contains no source files: {harness_dir}"
+        )
     return applied
 
 
@@ -250,7 +255,9 @@ def _copy_harness_state(
     return metadata if len(metadata) > 1 else None
 
 
-def _copy_diffusion_state(experiment_dir: Path, diffusion_root: Path) -> dict[str, object]:
+def _copy_diffusion_state(
+    experiment_dir: Path, diffusion_root: Path
+) -> dict[str, object]:
     target_root = experiment_dir / "diffusion"
     metadata: dict[str, object] = {"diffusion_source": str(diffusion_root)}
 
@@ -262,7 +269,9 @@ def _copy_diffusion_state(experiment_dir: Path, diffusion_root: Path) -> dict[st
             metadata["artifact_store_reset"] = True
 
     graph_dir = diffusion_root / "graph_snapshots"
-    copied_graph_snapshots = _copy_tree_files(graph_dir, target_root / "graph_snapshots")
+    copied_graph_snapshots = _copy_tree_files(
+        graph_dir, target_root / "graph_snapshots"
+    )
     if copied_graph_snapshots:
         metadata["graph_snapshots"] = copied_graph_snapshots
 
@@ -318,7 +327,12 @@ def run(
     ] = None,
     seed: Annotated[
         int | None,
-        typer.Option(help="Random seed. Overrides experiment.seed."),
+        typer.Option(
+            help=(
+                "Experiment seed and deterministic task-split seed. "
+                "Overrides experiment.seed."
+            ),
+        ),
     ] = None,
     condition: Annotated[
         str | None,
@@ -438,7 +452,9 @@ def run(
     ] = False,
     cloud_env_file: Annotated[
         Path,
-        typer.Option("--cloud-env-file", help="Dotenv file containing GCP VM settings."),
+        typer.Option(
+            "--cloud-env-file", help="Dotenv file containing GCP VM settings."
+        ),
     ] = PROJECT_ROOT / ".env",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:

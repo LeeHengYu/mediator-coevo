@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 import mediated_coevo.benchmarks.skillflow as skillflow_benchmark
+import mediated_coevo.cli.experiment as experiment_cli
 from mediated_coevo.benchmarks import (
     HarborPrebuiltImageMissingError,
     HarborRunResult,
@@ -38,12 +39,14 @@ def test_repository_resolves_tasks_and_lists_family(tmp_path: Path) -> None:
 
 
 def test_family_selection_bootstraps_task_stream_with_replacement(
+    monkeypatch,
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "skillflow"
     _write_task(root / "tasks" / "family-a" / "task-one", family="family-a")
     _write_task(root / "tasks" / "family-a" / "task-two", family="family-a")
     repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    monkeypatch.setattr(experiment_cli.secrets, "randbits", lambda _bits: 7)
 
     selection = resolve_task_selection(
         repository=repo,
@@ -54,6 +57,49 @@ def test_family_selection_bootstraps_task_stream_with_replacement(
     assert len(selection.task_ids) == BOOTSTRAP_FAMILY_TASK_COUNT
     assert set(selection.task_ids) <= {"family-a/task-one", "family-a/task-two"}
     assert len(set(selection.task_ids)) < len(selection.task_ids)
+    assert selection.task_stream_seed == 7
+
+
+def test_family_selection_randomizes_stream_without_changing_split(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skillflow"
+    for index in range(1, 7):
+        _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
+        _write_task(root / "tasks" / "family-b" / f"task-{index}", family="family-b")
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    generated_seeds = iter((100, 101, 102))
+    monkeypatch.setattr(
+        experiment_cli.secrets,
+        "randbits",
+        lambda _bits: next(generated_seeds),
+    )
+
+    first = resolve_task_selection(
+        repository=repo,
+        family=["family-a", "family-b"],
+        seed=42,
+        split="train",
+    )
+    second = resolve_task_selection(
+        repository=repo,
+        family=["family-a", "family-b"],
+        seed=42,
+        split="train",
+    )
+    validation = resolve_task_selection(
+        repository=repo,
+        family=["family-a", "family-b"],
+        seed=42,
+        split="validation",
+    )
+
+    assert first.task_stream_seed == 100
+    assert second.task_stream_seed == 101
+    assert validation.task_stream_seed == 102
+    assert first.task_ids != second.task_ids
+    assert set(first.task_ids + second.task_ids).isdisjoint(validation.task_ids)
 
 
 def test_family_selection_accepts_multiple_families_and_split(tmp_path: Path) -> None:
@@ -565,8 +611,7 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
     assert trace.harbor_metadata["reward_source"] == "job_stats"
     assert trace.harbor_metadata["agent_result.cost_usd"] == "0.123"
     assert (
-        trace.harbor_metadata["executor_reported_cost_source"]
-        == "harbor_agent_result"
+        trace.harbor_metadata["executor_reported_cost_source"] == "harbor_agent_result"
     )
     assert trace.token_usage.input_tokens == 7
     assert trace.token_usage.output_tokens == 3

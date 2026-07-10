@@ -290,6 +290,11 @@ Pick the experiment family:
 - Repeat `--family` to sample from multiple cached families.
 - `--split train|validation|test`: optionally sample from a deterministic 60/20/20
   split of the selected family pool.
+- `--seed`: determine experiment randomness and the stable train/validation/test
+  pool assignment.
+- Every invocation draws a fresh random 8-task stream from the selected pool.
+  The generated stream seed is persisted in the run's `config.toml` for audit;
+  there is no CLI override that can pin the stream.
 
 Remote Harbor run on the configured GCP VM:
 
@@ -306,7 +311,7 @@ uv run medcoevo run \
 ## `matrix`
 
 `matrix` runs fixed `skill_updates x diffusion_policy` rows. Use `--list` to
-see row indexes.
+see row indexes. Every row shares one freshly sampled task stream.
 
 Run one row:
 
