@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import random
 import shutil
@@ -32,6 +31,17 @@ from mediated_coevo.cli.experiment import (
     write_and_print_result_summary,
 )
 from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
+from mediated_coevo.cli.harness_registry import (
+    RuntimeStateSource,
+    _apply_harness_overlay,
+    _copy_explicit_state,
+    _experiment_split,
+    _prepare_harness_workspace,
+    _publish_graph_state_ref,
+    _publish_promoted_harness,
+    _resolve_harness_options,
+    _resolve_state_options,
+)
 from mediated_coevo.cli.output import (
     console,
     print_experiment_controls,
@@ -59,6 +69,8 @@ def run_skillflow_experiment(
     condition_name: ConditionName,
     run_id: str | None,
     harness_dir: Path | None = None,
+    state_source: RuntimeStateSource | None = None,
+    publish_state_ref: str | None = None,
     remote_harbor_config: GCPVMConfig | None = None,
 ) -> None:
     """Run a SkillFlow selection in one evolution loop."""
@@ -90,7 +102,7 @@ def run_skillflow_experiment(
         experiment_dir / "skills",
     )
     _prepare_harness_workspace(experiment_dir, harness_dir)
-    _copy_harness_state(experiment_dir, harness_dir)
+    _copy_explicit_state(experiment_dir, state_source)
     with open(experiment_dir / "config.toml", "wb") as f:
         tomli_w.dump(config.model_dump(exclude_none=True), f)
 
@@ -149,6 +161,12 @@ def run_skillflow_experiment(
         config=config,
         history_store=runtime.orchestrator.history_store,
     )
+    if publish_state_ref is not None:
+        _publish_graph_state_ref(
+            publish_state_ref,
+            experiment_dir=runtime.experiment_dir,
+            split=selection.split,
+        )
 
 
 def _apply_harness_overlay_and_reexec(harness_dir: Path) -> None:
@@ -160,150 +178,6 @@ def _apply_harness_overlay_and_reexec(harness_dir: Path) -> None:
     env = os.environ.copy()
     env[_HARNESS_APPLIED_ENV] = str(resolved)
     os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
-
-
-def _apply_harness_overlay(harness_dir: Path, project_root: Path) -> list[str]:
-    overlay_root = _harness_overlay_root(harness_dir)
-    applied: list[str] = []
-    for source in sorted(path for path in overlay_root.rglob("*") if path.is_file()):
-        rel = source.relative_to(overlay_root)
-        if len(rel.parts) == 1 and rel.name.startswith("manifest."):
-            continue
-        target = project_root / rel
-        if source.resolve() == target.resolve():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        applied.append(rel.as_posix())
-    if not applied:
-        raise typer.BadParameter(
-            f"harness overlay contains no source files: {harness_dir}"
-        )
-    return applied
-
-
-def _harness_overlay_root(harness_dir: Path) -> Path:
-    if not harness_dir.is_dir():
-        raise typer.BadParameter(f"harness directory not found: {harness_dir}")
-    overlay = harness_dir / "overlay"
-    root = overlay if overlay.is_dir() else harness_dir
-    if not any((root / name).exists() for name in ("src", "config", "tests")):
-        raise typer.BadParameter(
-            "harness directory must be a repo-root overlay containing "
-            "src/, config/, tests/, or overlay/"
-        )
-    return root
-
-
-def _prepare_harness_workspace(
-    experiment_dir: Path,
-    harness_dir: Path | None,
-) -> None:
-    harnesses_dir = experiment_dir / "harnesses"
-    harnesses_dir.mkdir(parents=True, exist_ok=True)
-    (harnesses_dir / "README.md").write_text(
-        "# Harnesses\n\n"
-        "Use this folder for learned repo-root harness overlays. Put new "
-        "validated harness snapshots in subdirectories; manifest files are "
-        "metadata, and every other path is treated as repo-root overlay content.\n"
-    )
-    if harness_dir is None:
-        return
-
-    resolved = harness_dir.expanduser().resolve()
-    overlay_root = _harness_overlay_root(resolved)
-    seed_dir = harnesses_dir / "seed"
-    shutil.copytree(resolved, seed_dir)
-    metadata = {
-        "source": str(resolved),
-        "overlay_root": str(overlay_root),
-        "applied_files": _overlay_file_paths(overlay_root),
-    }
-    state_root = resolved / "state"
-    if state_root.is_dir():
-        metadata["state_files"] = _state_file_paths(state_root)
-    (harnesses_dir / "active_harness.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n"
-    )
-
-
-def _overlay_file_paths(overlay_root: Path) -> list[str]:
-    paths: list[str] = []
-    for path in sorted(item for item in overlay_root.rglob("*") if item.is_file()):
-        rel = path.relative_to(overlay_root)
-        if len(rel.parts) == 1 and rel.name.startswith("manifest."):
-            continue
-        paths.append(rel.as_posix())
-    return paths
-
-
-def _copy_harness_state(
-    experiment_dir: Path,
-    harness_dir: Path | None,
-) -> dict[str, object] | None:
-    """Copy runtime state from a learned harness into the new experiment."""
-    if harness_dir is None:
-        return None
-    state_root = harness_dir.expanduser().resolve() / "state"
-    if not state_root.is_dir():
-        return None
-
-    metadata: dict[str, object] = {"source": str(state_root)}
-    diffusion_root = state_root / "diffusion"
-    if diffusion_root.is_dir():
-        metadata.update(_copy_diffusion_state(experiment_dir, diffusion_root))
-    return metadata if len(metadata) > 1 else None
-
-
-def _copy_diffusion_state(
-    experiment_dir: Path, diffusion_root: Path
-) -> dict[str, object]:
-    target_root = experiment_dir / "diffusion"
-    metadata: dict[str, object] = {"diffusion_source": str(diffusion_root)}
-
-    artifacts_dir = diffusion_root / "artifacts"
-    if artifacts_dir.is_dir():
-        skipped_artifacts = sorted(path.name for path in artifacts_dir.glob("*.json"))
-        if skipped_artifacts:
-            metadata["skipped_artifacts"] = skipped_artifacts
-            metadata["artifact_store_reset"] = True
-
-    graph_dir = diffusion_root / "graph_snapshots"
-    copied_graph_snapshots = _copy_tree_files(
-        graph_dir, target_root / "graph_snapshots"
-    )
-    if copied_graph_snapshots:
-        metadata["graph_snapshots"] = copied_graph_snapshots
-
-    copied_files: list[str] = []
-    for source in sorted(item for item in diffusion_root.iterdir() if item.is_file()):
-        target = target_root / source.name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        copied_files.append(source.name)
-    if copied_files:
-        metadata["files"] = copied_files
-    return metadata
-
-
-def _copy_tree_files(source_root: Path, target_root: Path) -> list[str]:
-    if not source_root.is_dir():
-        return []
-    copied: list[str] = []
-    for source in sorted(path for path in source_root.rglob("*") if path.is_file()):
-        rel = source.relative_to(source_root)
-        target = target_root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        copied.append(rel.as_posix())
-    return copied
-
-
-def _state_file_paths(state_root: Path) -> list[str]:
-    return [
-        path.relative_to(state_root).as_posix()
-        for path in sorted(item for item in state_root.rglob("*") if item.is_file())
-    ]
 
 
 def run(
@@ -431,8 +305,48 @@ def run(
         typer.Option(
             "--harness-dir",
             help=(
-                "Repo-root harness overlay to apply before this run and copy into "
-                "the experiment harnesses/ folder."
+                "Repo-root harness overlay to apply before this run. Runtime graph "
+                "state is not loaded from this path; use --state-dir or --state-ref."
+            ),
+        ),
+    ] = None,
+    harness_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--harness-ref",
+            help=(
+                "Promotion-registry harness reference to apply, for example "
+                "promoted:HL3."
+            ),
+        ),
+    ] = None,
+    state_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--state-dir",
+            help=(
+                "Explicit runtime state source containing diffusion/ or "
+                "state/diffusion/. Does not carry diffusion/artifacts."
+            ),
+        ),
+    ] = None,
+    state_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--state-ref",
+            help=(
+                "Promotion-registry state reference, for example latest-graph:HL3 "
+                "or promoted:HL3."
+            ),
+        ),
+    ] = None,
+    publish_state_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--publish-state-ref",
+            help=(
+                "After a successful train split run, publish this run's graph state "
+                "to a registry reference such as latest-graph:HL3."
             ),
         ),
     ] = None,
@@ -459,8 +373,10 @@ def run(
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run a SkillFlow co-evolution experiment."""
-    if harness_dir is not None:
-        _apply_harness_overlay_and_reexec(harness_dir)
+    resolved_harness_dir = _resolve_harness_options(harness_dir, harness_ref)
+    state_source = _resolve_state_options(state_dir, state_ref)
+    if resolved_harness_dir is not None:
+        _apply_harness_overlay_and_reexec(resolved_harness_dir)
     setup_logging(verbose)
     config = _load_config_or_bad_parameter(
         config_dir,
@@ -496,6 +412,10 @@ def run(
         seed=config.experiment.seed,
         split=split,
     )
+    if publish_state_ref is not None and selection.split != "train":
+        raise typer.BadParameter(
+            "--publish-state-ref may only publish graph state from --split train runs"
+        )
     if cloud:
         try:
             remote_harbor_config = load_vm_config(cloud_env_file)
@@ -510,10 +430,83 @@ def run(
         seed=config.experiment.seed,
         condition_name=config.experiment.condition_name,
         run_id=run_id,
-        harness_dir=harness_dir,
+        harness_dir=resolved_harness_dir,
+        state_source=state_source,
+        publish_state_ref=publish_state_ref,
         remote_harbor_config=remote_harbor_config,
     )
 
 
+def publish_harness(
+    campaign: Annotated[
+        str,
+        typer.Option(
+            "--campaign",
+            help="HL campaign registry name, for example HL3.",
+        ),
+    ],
+    harness_dir: Annotated[
+        Path,
+        typer.Option(
+            "--harness-dir",
+            help="Validated harness snapshot to publish as promoted.",
+        ),
+    ],
+    validation_run: Annotated[
+        str | None,
+        typer.Option(
+            "--validation-run",
+            help="Validation run path or ID that justified the promotion.",
+        ),
+    ] = None,
+    state_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--state-dir",
+            help=(
+                "Optional explicit state source to record with the promoted "
+                "harness. Prefer the latest-graph channel for graph carry-forward."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Publish a validation-gated harness snapshot to a campaign registry."""
+    channel_path = _publish_promoted_harness(
+        campaign=campaign,
+        harness_dir=harness_dir,
+        validation_run=validation_run,
+        state_dir=state_dir,
+    )
+    console.print(f"[bold]Published promoted harness:[/] {channel_path}")
+
+
+def publish_graph_state(
+    campaign: Annotated[
+        str,
+        typer.Option(
+            "--campaign",
+            help="HL campaign registry name, for example HL3.",
+        ),
+    ],
+    experiment_dir: Annotated[
+        Path,
+        typer.Option(
+            "--experiment-dir",
+            help="Completed training experiment whose diffusion graph should move forward.",
+        ),
+    ],
+) -> None:
+    """Publish a completed training run's graph state to a campaign registry."""
+    resolved_experiment_dir = experiment_dir.expanduser().resolve()
+    channel_path = _publish_graph_state_ref(
+        f"latest-graph:{campaign}",
+        experiment_dir=resolved_experiment_dir,
+        split=_experiment_split(resolved_experiment_dir),
+    )
+    console.print(f"[bold]Published graph state:[/] {channel_path}")
+
+
 def register_run_command(app: typer.Typer) -> None:
     app.command()(run)
+    app.command("publish-harness")(publish_harness)
+    app.command("publish-graph-state")(publish_graph_state)

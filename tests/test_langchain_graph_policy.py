@@ -5,11 +5,13 @@ from typing import Any
 import pytest
 
 from mediated_coevo.diffusion import (
+    AVOID_RECHECK_CHANNEL,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
     LangChainGraphPolicy,
     REUSE_SUCCESS_CHANNEL,
+    TaskGraphEdgeRecord,
     TaskGraphSnapshot,
 )
 from mediated_coevo.diffusion import langchain_graph as langchain_graph_module
@@ -20,6 +22,7 @@ def _artifact(
     *,
     source_task_id: str,
     source_iteration: int = 0,
+    verifier_reward: float = 1.0,
 ) -> DiffusionArtifact:
     return DiffusionArtifact(
         artifact_id=artifact_id,
@@ -28,7 +31,7 @@ def _artifact(
         artifact_type=DiffusionArtifactType.DEBUG_HINT,
         risk_level=DiffusionRiskLevel.LOW,
         content=f"hint from {source_task_id}",
-        verifier_reward=1.0,
+        verifier_reward=verifier_reward,
     )
 
 
@@ -178,6 +181,98 @@ class _EmptySelectionSameTaskLangChainGraphPolicy(LangChainGraphPolicy):
         artifacts: list[DiffusionArtifact],
     ) -> dict[str, Any]:
         return {"selected_artifacts": []}
+
+
+class _CrossFamilyFailureArtifactLangChainGraphPolicy(LangChainGraphPolicy):
+    async def _run_graph_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "node_id": "Weighted-Risk-Assessment/task-A",
+            "node_action": "reused",
+            "edges": [],
+            "reason": "same family task belongs to existing node",
+        }
+
+    async def _run_diffusion_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "selected_artifacts": [
+                {
+                    "artifact_id": "artifact-success-cross",
+                    "relation": "cross_family_success",
+                    "reason": "keep successful template",
+                    "context_channel": REUSE_SUCCESS_CHANNEL,
+                },
+                {
+                    "artifact_id": "artifact-failure-cross",
+                    "relation": "cross_family_failure",
+                    "reason": "should be filtered",
+                    "context_channel": REUSE_SUCCESS_CHANNEL,
+                },
+                {
+                    "artifact_id": "artifact-failure-same",
+                    "relation": "same_family_failure",
+                    "reason": "keep local failure prior",
+                    "context_channel": REUSE_SUCCESS_CHANNEL,
+                },
+            ]
+        }
+
+
+class _CrossFamilyOffPriorSuccessLangChainGraphPolicy(LangChainGraphPolicy):
+    async def _run_graph_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        previous_snapshot: TaskGraphSnapshot | None,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "node_id": "Weighted-Risk-Assessment/task-A",
+            "node_action": "reused",
+            "edges": [
+                {
+                    "source_node_id": "Weighted-Risk-Assessment/task-C",
+                    "target_node_id": "Weighted-Risk-Assessment/task-A",
+                    "relation": "agent_transfer_prior",
+                    "weight": 0.9,
+                    "reason": "same-family weighted prior",
+                }
+            ],
+            "reason": "same weighted family node already exists",
+        }
+
+    async def _run_diffusion_agent(
+        self,
+        *,
+        task_profile: dict[str, Any],
+        current_iteration: int,
+        snapshot: TaskGraphSnapshot,
+        artifacts: list[DiffusionArtifact],
+    ) -> dict[str, Any]:
+        return {
+            "selected_artifacts": [
+                {
+                    "artifact_id": "artifact-success-cross",
+                    "relation": "cross_family_procedural_similarity",
+                    "reason": "generic spreadsheet success",
+                    "context_channel": REUSE_SUCCESS_CHANNEL,
+                }
+            ]
+        }
 
 
 class _MissingWeightLangChainGraphPolicy(LangChainGraphPolicy):
@@ -339,6 +434,174 @@ async def test_langchain_graph_falls_back_to_same_task_when_agent_selects_none()
     ]
     assert result.subscriptions[0].relation == "same_task_prior"
     assert result.subscriptions[0].metadata == {"fallback": "empty_agent_selection"}
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_filters_cross_family_failure_artifacts_from_agent_selection():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=["Weighted-Risk-Assessment/task-A"],
+        graph_policy="langchain_graph",
+        metadata={
+            "task_nodes": {
+                "Weighted-Risk-Assessment/task-A": {
+                    "task_ids": ["Weighted-Risk-Assessment/task-A"],
+                    "last_iteration": 0,
+                }
+            }
+        },
+    )
+    policy = _CrossFamilyFailureArtifactLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=3,
+    )
+
+    result = await policy.prepare(
+        task_profile={
+            "task_id": "Weighted-Risk-Assessment/task-A",
+            "instruction": "same weighted workbook family",
+        },
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[
+            _artifact(
+                "artifact-success-cross",
+                source_task_id="Inventory-&-Finance-Integration/task-C",
+            ),
+            _artifact(
+                "artifact-failure-cross",
+                source_task_id="Production-Capacity-Planning/task-B",
+                verifier_reward=0.0,
+            ),
+            _artifact(
+                "artifact-failure-same",
+                source_task_id="Weighted-Risk-Assessment/task-D",
+                verifier_reward=0.0,
+            ),
+        ],
+    )
+
+    assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
+        "artifact-success-cross",
+        "artifact-failure-same",
+    ]
+    assert result.subscriptions[0].context_channel == REUSE_SUCCESS_CHANNEL
+    assert result.subscriptions[1].context_channel == AVOID_RECHECK_CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_fallback_skips_cross_family_failure_graph_priors():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=["node-task-A", "node-task-C"],
+        graph_policy="langchain_graph",
+        edge_records=[
+            TaskGraphEdgeRecord(
+                source_task_id="node-task-C",
+                target_task_id="node-task-A",
+                relation="agent_transfer_prior",
+                weight=0.9,
+            )
+        ],
+        metadata={
+            "task_nodes": {
+                "node-task-A": {
+                    "task_ids": ["Weighted-Risk-Assessment/task-A"],
+                    "last_iteration": 0,
+                },
+                "node-task-C": {
+                    "task_ids": ["Production-Capacity-Planning/task-C"],
+                    "last_iteration": 0,
+                },
+            }
+        },
+    )
+    policy = _EmptySelectionSameTaskLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=1,
+    )
+
+    result = await policy.prepare(
+        task_profile={
+            "task_id": "Weighted-Risk-Assessment/task-A",
+            "instruction": "same weighted workbook family",
+        },
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[
+            _artifact(
+                "artifact-failure-cross",
+                source_task_id="Production-Capacity-Planning/task-C",
+                verifier_reward=0.0,
+            )
+        ],
+    )
+
+    assert result.subscriptions == []
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_filters_cross_family_success_outside_incoming_graph_support():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=[
+            "Weighted-Risk-Assessment/task-A",
+            "Weighted-Risk-Assessment/task-C",
+            "HWPX-Document-Automation/task-B",
+        ],
+        graph_policy="langchain_graph",
+        edge_records=[
+            TaskGraphEdgeRecord(
+                source_task_id="Weighted-Risk-Assessment/task-C",
+                target_task_id="Weighted-Risk-Assessment/task-A",
+                relation="agent_transfer_prior",
+                weight=0.9,
+            )
+        ],
+        metadata={
+            "task_nodes": {
+                "Weighted-Risk-Assessment/task-A": {
+                    "task_ids": ["Weighted-Risk-Assessment/task-A"],
+                    "last_iteration": 0,
+                },
+                "Weighted-Risk-Assessment/task-C": {
+                    "task_ids": ["Weighted-Risk-Assessment/task-C"],
+                    "last_iteration": 0,
+                },
+                "HWPX-Document-Automation/task-B": {
+                    "task_ids": ["HWPX-Document-Automation/task-B"],
+                    "last_iteration": 0,
+                },
+            }
+        },
+    )
+    policy = _CrossFamilyOffPriorSuccessLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=1,
+    )
+
+    result = await policy.prepare(
+        task_profile={
+            "task_id": "Weighted-Risk-Assessment/task-A",
+            "instruction": "weighted workbook with known graph priors",
+        },
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[
+            _artifact(
+                "artifact-success-cross",
+                source_task_id="HWPX-Document-Automation/task-B",
+            )
+        ],
+    )
+
+    assert result.subscriptions == []
 
 
 @pytest.mark.asyncio
