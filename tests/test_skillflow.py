@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 from pathlib import Path
 
@@ -38,7 +39,7 @@ def test_repository_resolves_tasks_and_lists_family(tmp_path: Path) -> None:
     assert repo.list_local_task_ids(family="family-a") == ["family-a/task-one"]
 
 
-def test_family_selection_bootstraps_task_stream_with_replacement(
+def test_family_selection_evenly_repeats_short_task_pool(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -55,9 +56,52 @@ def test_family_selection_bootstraps_task_stream_with_replacement(
     )
 
     assert len(selection.task_ids) == BOOTSTRAP_FAMILY_TASK_COUNT
-    assert set(selection.task_ids) <= {"family-a/task-one", "family-a/task-two"}
-    assert len(set(selection.task_ids)) < len(selection.task_ids)
+    assert Counter(selection.task_ids) == {
+        "family-a/task-one": 4,
+        "family-a/task-two": 4,
+    }
     assert selection.task_stream_seed == 7
+
+
+def test_family_selection_spreads_extra_slots_across_short_task_pool(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skillflow"
+    for index in range(1, 7):
+        _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    monkeypatch.setattr(experiment_cli.secrets, "randbits", lambda _bits: 7)
+
+    selection = resolve_task_selection(
+        repository=repo,
+        family="family-a",
+        seed=42,
+    )
+
+    counts = Counter(selection.task_ids)
+    assert set(counts) == set(repo.list_local_task_ids(family="family-a"))
+    assert sorted(counts.values()) == [1, 1, 1, 1, 2, 2]
+
+
+def test_family_selection_uses_no_replacement_when_pool_is_large_enough(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skillflow"
+    for index in range(1, 9):
+        _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    monkeypatch.setattr(experiment_cli.secrets, "randbits", lambda _bits: 7)
+
+    selection = resolve_task_selection(
+        repository=repo,
+        family="family-a",
+        seed=42,
+    )
+
+    assert len(selection.task_ids) == BOOTSTRAP_FAMILY_TASK_COUNT
+    assert len(set(selection.task_ids)) == BOOTSTRAP_FAMILY_TASK_COUNT
 
 
 def test_family_selection_randomizes_stream_without_changing_split(

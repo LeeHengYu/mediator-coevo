@@ -286,7 +286,7 @@ remote dataset.
 
 Pick the experiment family:
 
-- `--family <name>`: bootstrap an 8-task stream from the cached family, with replacement.
+- `--family <name>`: bootstrap a balanced 8-task stream from the cached family.
 - Repeat `--family` to sample from multiple cached families.
 - `--split train|validation|test`: optionally sample from a deterministic 60/20/20
   split of the selected family pool.
@@ -301,6 +301,8 @@ Pick the experiment family:
   run, publish that run's graph snapshots and diffusion audit ledger as the next
   graph-state channel. `diffusion/artifacts/` is intentionally not bundled.
 - Every invocation draws a fresh random 8-task stream from the selected pool.
+  Pools with at least eight tasks are sampled without replacement. Smaller pools
+  repeat tasks as evenly as possible, so task frequencies differ by at most one.
   The generated stream seed is persisted in the run's `config.toml` for audit;
   there is no CLI override that can pin the stream.
 
