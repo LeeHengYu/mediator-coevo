@@ -292,6 +292,14 @@ Pick the experiment family:
   split of the selected family pool.
 - `--seed`: determine experiment randomness and the stable train/validation/test
   pool assignment.
+- `--harness-dir` or `--harness-ref promoted:<campaign>`: apply a learned
+  repo-root overlay. Harness references resolve through
+  `data/experiments/<campaign>/channels/promoted_harness.json`.
+- `--state-dir` or `--state-ref latest-graph:<campaign>`: explicitly load
+  runtime graph state. State is not imported implicitly from `--harness-dir`.
+- `--publish-state-ref latest-graph:<campaign>`: after a successful train split
+  run, publish that run's graph snapshots and diffusion audit ledger as the next
+  graph-state channel. `diffusion/artifacts/` is intentionally not bundled.
 - Every invocation draws a fresh random 8-task stream from the selected pool.
   The generated stream seed is persisted in the run's `config.toml` for audit;
   there is no CLI override that can pin the stream.
@@ -580,7 +588,10 @@ Important files:
   reflection candidates.
 - `harnesses/`: learned repo-root harness overlays. When `--harness-dir` is
   used, the source harness is copied to `harnesses/seed/` and recorded in
-  `harnesses/active_harness.json`.
+  `harnesses/active_harness.json`. Bundled `state/` files are provenance until
+  loaded with `--state-dir` or `--state-ref`.
+- `state/active_state.json`: explicit runtime state selected by `--state-dir` or
+  `--state-ref`.
 - `skills/`: run-local skill copy.
 - `skills_snapshots/`: committed skill snapshots.
 - `task-graph/`: run-local precomputed graph artifacts when graph-aware
@@ -599,12 +610,14 @@ Diffusion output includes:
   rendered artifact routes. Softmax policies also write not-selected candidate
   rows with candidate probabilities and selected-target metadata.
 
-To start a new batch from a validated learned harness snapshot, pass the
-snapshot as a repo-root overlay:
+To validate a learned harness snapshot while using the forward-moving graph
+channel, pass the snapshot as a repo-root overlay and load graph state
+explicitly:
 
 ```bash
 uv run medcoevo run \
   --harness-dir data/experiments/<run>/harnesses/<update-id> \
+  --state-ref latest-graph:<campaign> \
   --family Weighted-Risk-Assessment \
   --family HWPX-Document-Automation \
   --split validation \
@@ -618,6 +631,21 @@ uv run medcoevo run \
 The overlay may either contain `src/`, `config/`, or `tests/` directly, or put
 those paths under an `overlay/` subdirectory. Root-level `manifest.*` files are
 kept as metadata and are not copied into the repo.
+
+For later training batches, use the promoted harness channel for code and the
+latest graph channel for graph carry-forward:
+
+```bash
+uv run medcoevo run \
+  --harness-ref promoted:<campaign> \
+  --state-ref latest-graph:<campaign> \
+  --publish-state-ref latest-graph:<campaign> \
+  --split train \
+  --condition learned_mediator \
+  --skill-updates none \
+  --diffusion-enabled \
+  --diffusion-policy langchain_graph
+```
 
 Executor policy observability fields in `metrics.jsonl`:
 
