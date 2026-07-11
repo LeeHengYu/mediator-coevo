@@ -1,0 +1,212 @@
+# Task Instruction
+
+You are an electronics manufacturing supervisor building a catch-up plan for PCB assembly capacity.
+
+## Step-by-step instructions
+
+### 1. Read the source data
+
+- Open `/root/assembly_schedule.xlsx`, sheet `Assembly`.
+- Inspect the columns to find the one labeled `PCB Assembly Demand (Std Hrs)` and the phase column.
+- Extract rows for Phases 6 through 54 inclusive. If there are duplicate phase entries, keep only the **first occurrence** of each phase. Store the demand values indexed by phase.
+- Print the extracted phase-demand pairs so we can verify them.
+
+### 2. Compute the plan row-by-row
+
+Use these variables, computed **in order** for each phase from 6 to 54:
+
+- **Initial condition for Phase 6:** `Calc Start = 469.59 - Scheduled_Demand_Phase6`… NO. Re-read: the instruction says "Start of Phase Past Due + Scheduled Demand = 469.59" at Phase 6. That means `Start of Phase Past Due` for Phase 6 is `469.59 - Demand[6]`. So:
+  - `Calc Start` for Phase 6 = `469.59 - Demand[6]` (this is the carry-in from before Phase 6).
+  - Actually, let me re-derive carefully. The initial condition says at Phase 6: `Start of Phase Past Due + Scheduled Demand = 469.59`. The "Start of Phase Past Due" is `max(0, prior_End_of_Phase_Backlog)`. For Phase 6, there is no prior phase in the table, so the initial condition defines the situation. We have:
+    - `Start of Phase Past Due (Phase 6) = 469.59 - Demand[6]`
+    - `Calc Start (Phase 6) = Start of Phase Past Due (Phase 6)` (since Past Due > 0 means the raw carryover equals the past due; if Past Due = max(0, carryover), and we expect carryover to be positive here, then Calc Start = Past Due = 469.59 - Demand[6]`).
+  - Wait, let me re-read more carefully. The policy says:
+    - `Start of Phase Past Due = max(0, prior phase End of Phase Backlog/Buffer)` — for reporting.
+    - `Calc Start = prior phase End of Phase Backlog/Buffer` — the signed value.
+    - For Phase 6, there's no prior phase. The initial condition `Start of Phase Past Due + Scheduled Demand = 469.59` tells us `Start of Phase Past Due (Phase 6) = 469.59 - Demand[6]`. Since Past Due = max(0, carryover), and assuming carryover is positive (which it will be since 469.59 is large), `Calc Start (Phase 6) = 469.59 - Demand[6]` as well.
+
+For each phase i (6..54):
+
+```
+if i == 6:
+    calc_start = 469.59 - demand[6]
+else:
+    calc_start = end_backlog[i-1]   # signed value from prior phase
+
+start_past_due = max(0, calc_start)
+
+# Choose Days Worked
+if start_past_due > 0.01:
+    # Try 5 first, then 6
+    if calc_start + demand[i] - (20 * 5) <= 0:
+        days_worked = 5
+    elif calc_start + demand[i] - (20 * 6) <= 0:
+        days_worked = 6
+    else:
+        days_worked = 6
+else:
+    # No meaningful past due
+    if demand[i] <= 80:
+        days_worked = 4
+    else:
+        days_worked = 5
+
+weekly_capacity = 20 * days_worked
+end_backlog = calc_start + demand[i] - weekly_capacity
+overtime = 10 * max(0, days_worked - 4)
+```
+
+Store all seven columns per phase.
+
+### 3. Write `/root/assembly_plan.xlsx`
+
+Create a workbook with a single sheet named exactly `Plan`. Row 1 must have exactly these headers (in this order, in columns A–G):
+
+1. `Phase`
+2. `Days Worked`
+3. `Scheduled Demand (Std Hrs)`
+4. `Weekly Capacity (Std Hrs)`
+5. `Start of Phase Past Due (Std Hrs)`
+6. `End of Phase Backlog/Buffer (Std Hrs)`
+7. `Overtime Hours`
+
+Then 49 data rows (Phases 6–54 inclusive), one per phase, ascending order, no gaps, no duplicates. Numeric values should be floats (not strings). Round to 2 decimal places for display.
+
+### 4. Write `/root/assembly_summary.txt`
+
+Scan the computed plan:
+- `First_Week_5_Days`: the first phase (lowest number) where `Days Worked == 5` AND the prior phase had `Days Worked == 6`. If that never happens, scan for the first phase where Days Worked drops to 5 from a higher value. Actually, re-read: the instruction just says "First_Week_5_Days" — this is the **first phase where Days Worked is exactly 5**. Print `N/A` if it never occurs.
+- `First_Week_4_Days`: the **first phase where Days Worked is exactly 4**. Print `N/A` if it never occurs.
+
+These are the "step-down" phases: stepping down from 6→5 and from 5→4.
+
+Write exactly 3 lines:
+```
+First_Week_5_Days: <phase_number_or_N/A>
+First_Week_4_Days: <phase_number_or_N/A>
+Summary: <manager-facing summary, ≤60 words, ≤3 sentences, mentioning both step-down phase numbers or N/A>
+```
+
+No trailing newline beyond the third line. No extra blank lines.
+
+### 5. Validate
+
+- Re-read `/root/assembly_plan.xlsx` and print the first 5 and last 5 rows to confirm correctness.
+- Verify the sheet name is exactly `Plan`.
+- Verify there are exactly 49 data rows.
+- Verify Phase 6 row: `Start of Phase Past Due = 469.59 - Demand[6]`, and `Calc Start + Demand[6] - Weekly Capacity = End of Phase Backlog/Buffer`.
+- Verify the last phase (54) row is present.
+- Re-read `/root/assembly_summary.txt` and print it.
+- Count words in the Summary line (must be ≤ 60) and sentences (must be ≤ 3).
+
+### Important notes
+- Use `openpyxl` for Excel I/O.
+- Be careful with the initial condition derivation for Phase 6.
+- The "Calc Start" for Phase 6 equals `469.59 - Demand[6]` because `Start of Phase Past Due + Scheduled Demand = 469.59` and `Start of Phase Past Due = max(0, Calc Start)`, and since the total 469.59 is large, the carryover is positive, so `Calc Start = Start of Phase Past Due = 469.59 - Demand[6]`.
+- Phases are consecutive integers 6, 7, 8, ..., 54 — that's 49 phases. If the source data has non-consecutive phase numbers, still use only phases 6–54 that appear in the source. But the problem says "Phases: 6 through 54 inclusive" so expect all 49 to be present.
+- Handle the edge case where `demand[i] > 120` (i.e., even 6 days isn't enough) — the policy says choose 6 in that case.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[xlsx, operations, capacity-planning, pcb, backlog].
+Verifier config: timeout_sec=900.0.

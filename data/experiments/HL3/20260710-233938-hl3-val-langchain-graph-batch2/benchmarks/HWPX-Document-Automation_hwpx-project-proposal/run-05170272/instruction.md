@@ -1,0 +1,453 @@
+# Task Instruction
+
+Execute the following Python script to complete the HWPX project proposal document.
+
+```python
+import json
+import zipfile
+import os
+import re
+import copy
+from lxml import etree
+from io import BytesIO
+from datetime import datetime
+
+# Paths
+template_path = '/root/project_proposal_template.hwpx'
+json_path = '/root/project_proposal.json'
+output_path = '/root/project_proposal_ready.hwpx'
+
+# 1. Load JSON data
+with open(json_path, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+# Print JSON keys and values for debugging
+print("JSON data:")
+for k, v in data.items():
+    print(f"  {k}: {v}")
+
+# 2. Build replacement dictionary from JSON
+# Flatten nested dicts if needed
+def flatten_dict(d, parent_key='', sep='.'):
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+flat_data = flatten_dict(data)
+print("\nFlattened data:")
+for k, v in flat_data.items():
+    print(f"  {k}: {v}")
+
+# 3. List contents of the HWPX zip
+with zipfile.ZipFile(template_path, 'r') as zin:
+    namelist = zin.namelist()
+    print("\nHWPX contents:")
+    for name in namelist:
+        print(f"  {name}")
+
+# 4. Read section XML files to understand structure
+with zipfile.ZipFile(template_path, 'r') as zin:
+    for name in namelist:
+        if 'section' in name.lower() and name.endswith('.xml'):
+            content = zin.read(name).decode('utf-8')
+            print(f"\n=== {name} ===")
+            print(content[:5000])
+            if len(content) > 5000:
+                print(f"... ({len(content)} total chars)")
+```
+
+After inspecting the output, run the following complete processing script:
+
+```python
+import json
+import zipfile
+import os
+import re
+import copy
+from lxml import etree
+from io import BytesIO
+
+# Paths
+template_path = '/root/project_proposal_template.hwpx'
+json_path = '/root/project_proposal.json'
+output_path = '/root/project_proposal_ready.hwpx'
+
+# 1. Load JSON data
+with open(json_path, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+# 2. Build replacement map: {{key}} -> value
+# Handle nested JSON by flattening
+def flatten_dict(d, parent_key='', sep='.'):
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, str(v)))
+    return dict(items)
+
+flat_data = flatten_dict(data)
+
+# Build replacements dict with {{key}} as keys
+replacements = {}
+for k, v in flat_data.items():
+    replacements[f"{{{{{k}}}}}"] = v
+
+# Also add non-dotted keys for direct matches
+for k, v in data.items():
+    if not isinstance(v, dict):
+        replacements[f"{{{{{k}}}}}"] = str(v)
+
+print("Replacement map:")
+for k, v in replacements.items():
+    print(f"  {k} -> {v}")
+
+# 3. Budget normalization: remove commas but keep currency symbol
+def normalize_budget(val):
+    """Remove commas from budget value while keeping currency symbol."""
+    # Match currency symbol(s) at start, then digits with commas
+    return re.sub(r'(?<=\d),(?=\d)', '', val)
+
+# Update replacements for budget-related keys
+for k in list(replacements.keys()):
+    if 'budget' in k.lower() or '예산' in k.lower() or '비용' in k.lower() or '금액' in k.lower():
+        replacements[k] = normalize_budget(replacements[k])
+        print(f"  Normalized budget: {k} -> {replacements[k]}")
+
+# Also normalize any value that looks like currency (symbol + digits with commas)
+for k in list(replacements.keys()):
+    v = replacements[k]
+    if re.match(r'^[₩$€¥£].*,.*\d$', v):
+        replacements[k] = normalize_budget(v)
+        print(f"  Auto-normalized: {k} -> {replacements[k]}")
+
+# 4. Month span calculation helper
+def calc_month_span(date_str):
+    """Calculate month span from a date range string like '2025.01 ~ 2025.03'."""
+    # Try various date range patterns
+    patterns = [
+        r'(\d{4})\.(\d{1,2})\s*~\s*(\d{4})\.(\d{1,2})',
+        r'(\d{4})-(\d{1,2})\s*~\s*(\d{4})-(\d{1,2})',
+        r'(\d{4})/(\d{1,2})\s*~\s*(\d{4})/(\d{1,2})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, date_str)
+        if m:
+            y1, m1, y2, m2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            months = (y2 - y1) * 12 + (m2 - m1) + 1
+            return months
+    return None
+
+# 5. Process the HWPX
+with zipfile.ZipFile(template_path, 'r') as zin:
+    namelist = zin.namelist()
+    file_data = {}
+    for name in namelist:
+        file_data[name] = zin.read(name)
+
+# Find and process section XML files
+for name in list(file_data.keys()):
+    if 'section' in name.lower() and name.endswith('.xml'):
+        print(f"\nProcessing: {name}")
+        xml_bytes = file_data[name]
+        tree = etree.fromstring(xml_bytes)
+        
+        # Collect all namespaces
+        nsmap = {}
+        for elem in tree.iter():
+            for prefix, uri in elem.nsmap.items():
+                if prefix:
+                    nsmap[prefix] = uri
+        print(f"  Namespaces: {nsmap}")
+        
+        hp_ns = nsmap.get('hp', '')
+        
+        # Find all text elements
+        modified_paragraphs = set()
+        
+        # Process all hp:t elements
+        for t_elem in tree.iter(f'{{{hp_ns}}}t' if hp_ns else 't'):
+            for attr in ['text', 'tail']:
+                val = getattr(t_elem, attr)
+                if val is None:
+                    continue
+                
+                original = val
+                # Replace all placeholders
+                for placeholder, replacement in replacements.items():
+                    if placeholder in val:
+                        val = val.replace(placeholder, replacement)
+                        print(f"  Replaced {placeholder} -> {replacement}")
+                
+                if val != original:
+                    setattr(t_elem, attr, val)
+                    # Track the parent paragraph for layout cache removal
+                    parent = t_elem.getparent()
+                    while parent is not None:
+                        tag = etree.QName(parent.tag).localname if '}' in parent.tag else parent.tag
+                        if tag == 'p':
+                            modified_paragraphs.add(parent)
+                            break
+                        parent = parent.getparent()
+        
+        # Handle phase lines: append month span
+        # Look for lines containing 단계 and a date range
+        phase_pattern = re.compile(r'단계\s*\d')
+        for t_elem in tree.iter(f'{{{hp_ns}}}t' if hp_ns else 't'):
+            for attr in ['text', 'tail']:
+                val = getattr(t_elem, attr)
+                if val is None:
+                    continue
+                
+                # Check if this text contains a phase reference with dates
+                if phase_pattern.search(val):
+                    months = calc_month_span(val)
+                    if months is not None:
+                        # Check if month span is already appended
+                        if not re.search(r'\(\d+개월\)', val):
+                            val = val.rstrip() + f" ({months}개월)"
+                            setattr(t_elem, attr, val)
+                            print(f"  Added month span: ({months}개월) to phase line")
+                            # Track paragraph
+                            parent = t_elem.getparent()
+                            while parent is not None:
+                                tag = etree.QName(parent.tag).localname if '}' in parent.tag else parent.tag
+                                if tag == 'p':
+                                    modified_paragraphs.add(parent)
+                                    break
+                                parent = parent.getparent()
+        
+        # Also check: the date range might be in a different t_elem within the same paragraph
+        # We need to gather full paragraph text for phase detection
+        for p_elem in tree.iter(f'{{{hp_ns}}}p' if hp_ns else 'p'):
+            # Gather all text in this paragraph
+            texts = []
+            t_elems_in_p = list(p_elem.iter(f'{{{hp_ns}}}t' if hp_ns else 't'))
+            for t in t_elems_in_p:
+                if t.text:
+                    texts.append(t.text)
+                if t.tail:
+                    texts.append(t.tail)
+            full_text = ''.join(texts)
+            
+            if phase_pattern.search(full_text):
+                months = calc_month_span(full_text)
+                if months is not None:
+                    # Check if already has month span
+                    if not re.search(r'\(\d+개월\)', full_text):
+                        # Append to the last t element's text
+                        if t_elems_in_p:
+                            last_t = t_elems_in_p[-1]
+                            if last_t.text:
+                                last_t.text = last_t.text.rstrip() + f" ({months}개월)"
+                            else:
+                                last_t.text = f" ({months}개월)"
+                            print(f"  Added month span (paragraph-level): ({months}개월)")
+                            modified_paragraphs.add(p_elem)
+        
+        # Remove layout cache (lineSegArray, lineSeg) from modified paragraphs
+        for p_elem in modified_paragraphs:
+            for child in list(p_elem):
+                tag = etree.QName(child.tag).localname if '}' in child.tag else child.tag
+                if tag in ('lineSegArray', 'lineSeg'):
+                    p_elem.remove(child)
+                    print(f"  Removed {tag} from modified paragraph")
+        
+        # Verify no remaining placeholders
+        remaining = []
+        for t_elem in tree.iter(f'{{{hp_ns}}}t' if hp_ns else 't'):
+            for attr in ['text', 'tail']:
+                val = getattr(t_elem, attr)
+                if val and '{{' in val and '}}' in val:
+                    remaining.append(val)
+        
+        if remaining:
+            print(f"  WARNING: Remaining placeholders found:")
+            for r in remaining:
+                print(f"    {r}")
+            # Try to match with alternative key formats
+            for t_elem in tree.iter(f'{{{hp_ns}}}t' if hp_ns else 't'):
+                for attr in ['text', 'tail']:
+                    val = getattr(t_elem, attr)
+                    if val is None:
+                        continue
+                    # Find all {{...}} patterns
+                    for match in re.finditer(r'\{\{([^}]+)\}\}', val):
+                        key = match.group(1)
+                        # Try to find in flat_data with various key formats
+                        found = False
+                        for dk, dv in flat_data.items():
+                            if dk == key or dk.endswith('.' + key) or key.endswith('.' + dk):
+                                placeholder = match.group(0)
+                                # Check if budget-like
+                                if any(bw in dk.lower() for bw in ['budget', '예산', '비용', '금액']):
+                                    dv = normalize_budget(dv)
+                                val = val.replace(placeholder, dv)
+                                print(f"  Late-replaced {placeholder} -> {dv}")
+                                found = True
+                                break
+                        if not found:
+                            # Try direct lookup in original data
+                            for dk, dv in data.items():
+                                if dk == key and not isinstance(dv, dict):
+                                    placeholder = match.group(0)
+                                    val = val.replace(placeholder, str(dv))
+                                    print(f"  Late-replaced (direct) {placeholder} -> {dv}")
+                                    found = True
+                                    break
+                    setattr(t_elem, attr, val)
+        else:
+            print(f"  No remaining placeholders - good!")
+        
+        # Serialize back
+        file_data[name] = etree.tostring(tree, xml_declaration=True, encoding='UTF-8', standalone=True)
+
+# 6. Write output HWPX
+with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for name in namelist:
+        zout.writestr(name, file_data[name])
+
+print(f"\nOutput written to {output_path}")
+
+# 7. Verify output
+with zipfile.ZipFile(output_path, 'r') as zcheck:
+    for name in zcheck.namelist():
+        if 'section' in name.lower() and name.endswith('.xml'):
+            content = zcheck.read(name).decode('utf-8')
+            # Check for remaining placeholders
+            placeholders = re.findall(r'\{\{[^}]+\}\}', content)
+            if placeholders:
+                print(f"ERROR: Remaining placeholders in {name}: {placeholders}")
+            else:
+                print(f"VERIFIED: No placeholders remain in {name}")
+            # Check for month spans
+            spans = re.findall(r'\(\d+개월\)', content)
+            print(f"  Month spans found: {spans}")
+
+print("\nDone!")
+```
+
+IMPORTANT execution notes:
+1. Run the first inspection script FIRST to understand the JSON structure and XML layout.
+2. Based on the inspection output, if the JSON has nested structure or different key naming than expected, adapt the replacement map in the second script accordingly before running it.
+3. The month span logic: for each line containing '단계' (phase) AND a date range (e.g., '2025.01 ~ 2025.03'), calculate the inclusive month count and append ` (N개월)` at the end.
+4. Budget normalization: remove commas from numeric portions while preserving the currency symbol (e.g., '₩1,000,000' -> '₩1000000').
+5. After running, verify:
+   - No `{{...}}` placeholders remain in the output
+   - Month spans are correctly appended to phase lines
+   - The output is a valid ZIP/HWPX file
+   - `lineSegArray` elements are removed from all modified paragraphs
+6. If the first script reveals that placeholders use a different format or the JSON keys don't match, adjust the replacement logic before running the main script.
+7. The date range might span across multiple `<hp:t>` elements within the same paragraph - the script handles both single-element and paragraph-level detection.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

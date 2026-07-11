@@ -1,0 +1,272 @@
+# Task Instruction
+
+Execute the following steps in order:
+
+## Step 1: Inspect the source data
+
+Open `/root/glass_demand_sheet.xlsx`, sheet `Glass`. Identify the row labeled `Glass Furnace Demand (Std Hrs)`. Read the demand values for Weeks 2 through 50 (columns corresponding to those weeks). Print them so we can verify.
+
+## Step 2: Implement the planning logic in Python
+
+Write and run a Python script that:
+
+### 2a: Read demand data
+```python
+import openpyxl
+from openpyxl import Workbook
+
+wb_src = openpyxl.load_workbook('/root/glass_demand_sheet.xlsx', data_only=True)
+ws = wb_src['Glass']
+
+# Find the row containing 'Glass Furnace Demand (Std Hrs)' in column A (or wherever labels are)
+# Find the header row that contains week numbers (2..50)
+# Extract demand values for weeks 2-50
+# Print the row/column structure first to understand layout
+```
+
+Inspect the sheet structure carefully: print all values in column A (or the first few columns) to find the demand row label, and print the header row to find week column positions.
+
+### 2b: Compute the plan
+
+For each week 2..50 in order, apply the deterministic policy:
+
+- **Initial condition for Week 2**: `Calc Start + Scheduled Demand = 910.80`, meaning `Calc Start = 910.80 - Scheduled Demand[Week 2]`. Wait — re-read: "Initial condition at Week 2: Start of Week Past Due + Scheduled Demand = 910.80". This means the total requirement at Week 2 is 910.80. So for Week 2:
+  - `Start of Week Past Due = 910.80 - Scheduled Demand[Week 2]`
+  - `Calc Start = Start of Week Past Due` (same value, since this is the first week)
+  
+  Actually, let me re-read more carefully. The policy says:
+  - `Start of Week Past Due = max(0, prior week End of Week Backlog/Buffer)` — for reporting
+  - `Calc Start = prior week End of Week Backlog/Buffer` — for calculations
+  - Week 2 starts from the initial condition.
+  
+  The initial condition says `Start of Week Past Due + Scheduled Demand = 910.80`. Since `Start of Week Past Due = max(0, prior_backlog)`, and for Week 2 there's no prior week, the initial condition defines: `Start of Week Past Due[Week 2] = 910.80 - Scheduled Demand[Week 2]`.
+  
+  Since `Start of Week Past Due = max(0, Calc Start)` and for Week 2 we need `Start of Week Past Due + Demand = 910.80`, we get `Start of Week Past Due = 910.80 - Demand[2]`. And `Calc Start` for Week 2 equals the same value (since there's no negative carryover initially, or rather, the initial condition defines it).
+  
+  So: `Calc Start[Week 2] = 910.80 - Scheduled Demand[Week 2]`.
+  
+  Verify: `Start of Week Past Due[Week 2] = max(0, Calc Start[Week 2])`. If `Calc Start[Week 2] >= 0`, then `Start of Week Past Due = Calc Start = 910.80 - Demand[2]`, and `Start of Week Past Due + Demand = 910.80`. ✓
+
+For each week w (2..50):
+
+```python
+results = []
+prev_end_backlog = None
+
+for i, week in enumerate(range(2, 51)):
+    demand = demand_values[i]  # Scheduled Demand for this week
+    
+    if week == 2:
+        calc_start = 910.80 - demand
+    else:
+        calc_start = prev_end_backlog
+    
+    start_past_due = max(0, calc_start)
+    
+    # Choose Days Worked
+    if start_past_due > 0.01:
+        # Try 5 first, then 6
+        if calc_start + demand - (22 * 5) <= 0:
+            days_worked = 5
+        elif calc_start + demand - (22 * 6) <= 0:
+            days_worked = 6
+        else:
+            days_worked = 6
+    else:
+        # No past due
+        if demand <= 110:
+            days_worked = 4
+        else:
+            days_worked = 5
+    
+    weekly_capacity = 22 * days_worked
+    end_backlog = calc_start + demand - weekly_capacity
+    overtime = 10 * max(0, days_worked - 4)
+    
+    results.append({
+        'Week': week,
+        'Days Worked': days_worked,
+        'Scheduled Demand (Std Hrs)': demand,
+        'Weekly Capacity (Std Hrs)': weekly_capacity,
+        'Start of Week Past Due (Std Hrs)': start_past_due,
+        'End of Week Backlog/Buffer (Std Hrs)': end_backlog,
+        'Overtime Hours': overtime
+    })
+    
+    prev_end_backlog = end_backlog
+```
+
+### 2c: Find transition weeks
+
+- `First_Week_5_Days`: The first week where `Days Worked` drops to exactly 5 after having been 6. Specifically, the first week where Days Worked == 5 (scanning in order).
+- `First_Week_4_Days`: The first week where `Days Worked` drops to exactly 4.
+
+Wait — the summary asks for "step-down week numbers". `First_Week_5_Days` = first week with exactly 5 days worked. `First_Week_4_Days` = first week with exactly 4 days worked. If none found, use `N/A`.
+
+```python
+first_5 = 'N/A'
+first_4 = 'N/A'
+for r in results:
+    if first_5 == 'N/A' and r['Days Worked'] == 5:
+        first_5 = r['Week']
+    if first_4 == 'N/A' and r['Days Worked'] == 4:
+        first_4 = r['Week']
+```
+
+### 2d: Write the Excel output
+
+Create `/root/glass_furnace_plan.xlsx` with a single sheet named `Plan`. Row 1 has exactly these 7 headers (in this exact order and spelling):
+1. `Week`
+2. `Days Worked`
+3. `Scheduled Demand (Std Hrs)`
+4. `Weekly Capacity (Std Hrs)`
+5. `Start of Week Past Due (Std Hrs)`
+6. `End of Week Backlog/Buffer (Std Hrs)`
+7. `Overtime Hours`
+
+Rows 2-50 contain the data for Weeks 2..50 (49 data rows). Numeric values should be stored as numbers (floats/ints), not strings.
+
+### 2e: Write the summary file
+
+Create `/root/glass_furnace_summary.txt` with exactly 3 lines:
+```
+First_Week_5_Days: <week>
+First_Week_4_Days: <week>
+Summary: <text>
+```
+
+The summary must be ≤60 words, ≤3 sentences, and must mention both step-down week numbers (or N/A).
+
+Example summary (adapt based on actual values):
+```
+Summary: The furnace crew begins at 6-day weeks to clear the initial backlog, stepping down to 5-day weeks in Week X and to 4-day weeks in Week Y. Total overtime decreases as past-due hours are eliminated, enabling a sustainable schedule by mid-year.
+```
+
+## Step 3: Validate outputs
+
+After generating both files:
+
+1. Re-open `/root/glass_furnace_plan.xlsx` and print all rows to verify:
+   - Exactly 49 data rows (Weeks 2-50)
+   - Sheet name is exactly `Plan`
+   - Headers match exactly
+   - Week 2 row: verify `Start of Week Past Due + Scheduled Demand = 910.80`
+   - Days Worked values are all in {4, 5, 6}
+   - All numeric values look reasonable
+   - End of Week Backlog/Buffer transitions from positive to negative over time
+
+2. Print contents of `/root/glass_furnace_summary.txt` and verify:
+   - Exactly 3 lines
+   - Correct format for each line
+   - Summary ≤60 words, ≤3 sentences
+   - Both step-down weeks mentioned
+
+3. Spot-check a few weeks manually:
+   - For Week 2: `Calc Start = 910.80 - demand[2]`, then apply policy
+   - For the first week where past due clears, verify days drop correctly
+   - Verify overtime = 10 * max(0, days_worked - 4) for a few rows
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[xlsx, operations, capacity-planning, glass, backlog].
+Verifier config: timeout_sec=900.0.

@@ -1,0 +1,230 @@
+# Task Instruction
+
+You must complete the following steps in order.
+
+## 1. Inspect the input workbook
+
+```bash
+cd /root
+python3 - <<'PY'
+import openpyxl
+wb = openpyxl.load_workbook('dye_demand_sheet.xlsx', data_only=True)
+for name in wb.sheetnames:
+    ws = wb[name]
+    print(f'\n=== Sheet: {name} (rows={ws.max_row}, cols={ws.max_column}) ===')
+    for r in range(1, min(ws.max_row+1, 8)):
+        print([ws.cell(r, c).value for c in range(1, min(ws.max_column+1, 60))])
+PY
+```
+
+Read the output carefully. Identify:
+- Which row in the `Dye` sheet contains `Dye Demand (Std Hrs)` and where week numbers appear.
+- Which row in the `Adjust` sheet contains `Demand Adjustment (Std Hrs)` and where week numbers appear.
+- The column layout: are weeks in columns starting from column B? Which column corresponds to Week 3, Week 4, … Week 51?
+
+## 2. Build the plan and write both deliverables
+
+Write a single Python script that:
+
+### 2a. Reads input data
+- Opens `dye_demand_sheet.xlsx` with openpyxl (data_only=True).
+- From the `Dye` sheet, reads the row whose first cell matches (case-insensitive, stripped) `Dye Demand (Std Hrs)`. Extracts values for Weeks 3–51 by matching the header row's week numbers.
+- From the `Adjust` sheet, reads the row whose first cell matches `Demand Adjustment (Std Hrs)`. Extracts values for Weeks 3–51 similarly.
+- Computes `effective_demand[week] = dye_demand[week] + demand_adjustment[week]` for each week 3..51. Treat any None/missing value as 0.
+
+### 2b. Simulates the deterministic policy (weeks 3–51)
+
+Initialize:
+- `calc_start` for Week 3: from the initial condition, `calc_start = 598.24 - effective_demand[3]`… NO. Re-read the problem: "Initial condition at Week 3: Start of Week Past Due + Scheduled Demand = 598.24". This means at Week 3 the sum of Start of Week Past Due and the Scheduled Demand equals 598.24. So `start_of_week_past_due_week3 = 598.24 - effective_demand[3]`, and `calc_start_week3 = start_of_week_past_due_week3` (since there is no prior week, the calc start equals the start of week past due). Actually, let me re-derive more carefully.
+
+The initial condition says: at Week 3, `Start of Week Past Due + Scheduled Demand = 598.24`. The Scheduled Demand for Week 3 IS `effective_demand[3]`. So `Start of Week Past Due (Week 3) = 598.24 - effective_demand[3]`. And since `Calc Start = prior week End of Week Backlog/Buffer` and for Week 3 there is no prior week, `Calc Start (Week 3) = Start of Week Past Due (Week 3)` = `598.24 - effective_demand[3]`.
+
+Wait—re-read more carefully. The policy says:
+- Step 1: `Start of Week Past Due = max(0, prior week End of Week Backlog/Buffer)` — for reporting.
+- Step 2: `Calc Start = prior week End of Week Backlog/Buffer`.
+- For Week 3, there's no prior week. The initial condition gives us the starting state.
+
+The simplest consistent interpretation: The initial condition means `Calc Start (Week 3) + Scheduled Demand (Week 3) = 598.24`, so `Calc Start (Week 3) = 598.24 - effective_demand[3]`. And `Start of Week Past Due (Week 3) = max(0, Calc Start (Week 3))`.
+
+Implement this interpretation. Then for each week w from 3 to 51:
+
+```
+scheduled_demand = effective_demand[w]
+start_past_due = max(0, calc_start)   # for reporting
+
+# Choose days_worked
+if start_past_due > 0.01:
+    # Try 5 first, then 6
+    if calc_start + scheduled_demand - 18*5 <= 0:
+        days_worked = 5
+    elif calc_start + scheduled_demand - 18*6 <= 0:
+        days_worked = 6
+    else:
+        days_worked = 6
+else:
+    if scheduled_demand <= 72:
+        days_worked = 4
+    else:
+        days_worked = 5
+
+weekly_capacity = 18 * days_worked
+end_backlog = calc_start + scheduled_demand - weekly_capacity
+overtime = 10 * max(0, days_worked - 4)
+
+# Store row: [w, days_worked, scheduled_demand, weekly_capacity, start_past_due, end_backlog, overtime]
+
+# Next week's calc_start
+calc_start = end_backlog
+```
+
+### 2c. Write `/root/dye_catch_up_plan.xlsx`
+
+Using openpyxl, create a workbook with a single sheet named `Plan`. Row 1 has exactly these headers:
+```
+Week | Days Worked | Scheduled Demand (Std Hrs) | Weekly Capacity (Std Hrs) | Start of Week Past Due (Std Hrs) | End of Week Backlog/Buffer (Std Hrs) | Overtime Hours
+```
+Then 49 data rows (Weeks 3–51), one per row, in ascending order. Use numeric types (int or float) for all data cells, not strings. Round floats to 2 decimal places.
+
+### 2d. Write `/root/dye_catch_up_summary.txt`
+
+Scan the results to find:
+- `first_week_5`: the first week where `Days Worked == 5`. If none, `N/A`.
+- `first_week_4`: the first week where `Days Worked == 4`. If none, `N/A`.
+
+Write exactly 3 lines:
+```
+First_Week_5_Days: <value>
+First_Week_4_Days: <value>
+Summary: <manager-facing summary, ≤60 words, ≤3 sentences, mentioning both step-down week numbers or N/A>
+```
+
+No trailing newline after the third line is fine, but ensure exactly 3 lines.
+
+### 2e. Validate
+
+After writing, re-read both files and print:
+- The first 5 and last 3 rows of the Plan sheet.
+- The full contents of the summary file.
+- Total row count in Plan sheet (should be 49 data rows).
+- Verify Week column goes 3,4,5,...,51 with no gaps.
+- Print the set of unique Days Worked values (should be subset of {4,5,6}).
+
+Run the complete script:
+```bash
+python3 /root/solve.py
+```
+
+If any validation fails, diagnose and fix before finishing.
+
+## 3. Final check
+
+Confirm both files exist:
+```bash
+ls -la /root/dye_catch_up_plan.xlsx /root/dye_catch_up_summary.txt
+cat /root/dye_catch_up_summary.txt
+```
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[xlsx, operations, capacity-planning, textile, backlog].
+Verifier config: timeout_sec=900.0.

@@ -1,0 +1,256 @@
+# Task Instruction
+
+Complete the following task to update a renewal playbook HWPX document.
+
+## Goal
+Revise `renewal_playbook.hwpx` using `renewal_update.json` and `followups.csv`, saving the result to `/root/renewal_playbook_updated.hwpx`.
+
+## Steps
+
+### Step 1: Inspect input files
+1. List files in the working directory to locate `renewal_playbook.hwpx`, `renewal_update.json`, and `followups.csv`.
+2. Read and print `renewal_update.json` to see all field mappings (old values and new values, or just new values).
+3. Read and print `followups.csv` to see the follow-up items and their `sequence` column.
+
+### Step 2: Inspect the HWPX structure
+1. The .hwpx file is a ZIP archive. List its contents using Python's `zipfile` module.
+2. Identify the XML content files (typically under `Contents/` directory, e.g., `Contents/section0.xml` or similar).
+3. Read and print the XML content of each section file to understand:
+   - Where the customer name, current owner, renewal window, pricing band, escalation contact, and pricing note appear.
+   - Where the three follow-up lines are located.
+   - Where the appendix sentence `이 부록 문단은 그대로 유지해야 합니다.` appears.
+   - Note the exact old text values that need to be replaced.
+
+### Step 3: Determine replacement strategy
+1. From `renewal_update.json`, identify the mapping of fields to new values. The JSON may contain key-value pairs where keys are field names and values are the new text.
+2. From the original XML, identify the exact old text for each field that needs replacement.
+3. From `followups.csv`, read the items sorted by `sequence` column. These will replace the existing three follow-up lines.
+
+### Step 4: Write a Python script to perform the update
+Create and run a Python script that:
+
+```python
+import zipfile
+import os
+import shutil
+import json
+import csv
+from lxml import etree
+import re
+import copy
+
+# 1. Read input data
+with open('renewal_update.json', 'r', encoding='utf-8') as f:
+    updates = json.load(f)
+
+with open('followups.csv', 'r', encoding='utf-8') as f:
+    reader = csv.DictReader(f)
+    followups = sorted(list(reader), key=lambda x: int(x['sequence']))
+
+# 2. Extract HWPX
+src = 'renewal_playbook.hwpx'
+dst = '/root/renewal_playbook_updated.hwpx'
+tmp_dir = '/tmp/hwpx_work'
+if os.path.exists(tmp_dir):
+    shutil.rmtree(tmp_dir)
+os.makedirs(tmp_dir)
+
+with zipfile.ZipFile(src, 'r') as z:
+    z.extractall(tmp_dir)
+
+# 3. Process each XML section file
+# Find all XML files in Contents/
+contents_dir = os.path.join(tmp_dir, 'Contents')
+xml_files = []
+for root_d, dirs, files in os.walk(contents_dir):
+    for fname in files:
+        if fname.endswith('.xml'):
+            xml_files.append(os.path.join(root_d, fname))
+
+# Also check for section files directly
+# Process each XML file
+for xml_path in xml_files:
+    # Parse with lxml, preserving namespaces
+    parser = etree.XMLParser(remove_blank_text=False)
+    tree = etree.parse(xml_path, parser)
+    root = tree.getroot()
+    nsmap = root.nsmap
+    
+    # Build namespace map for xpath
+    ns = {}
+    for prefix, uri in nsmap.items():
+        if prefix is not None:
+            ns[prefix] = uri
+    
+    # Find all paragraph elements and all text nodes
+    # HWPX uses hp namespace typically
+    # We need to find all text-bearing elements and do replacements
+    
+    modified_paragraphs = set()  # track modified <hp:p> elements
+    
+    # Strategy: iterate all elements, find text content, perform replacements
+    # For field replacements from JSON, replace old values with new values
+    # For follow-up lines, identify and replace them
+    
+    # [The actual replacement logic will depend on what we find in Step 2-3]
+    # This is a template - adapt based on actual file inspection
+    
+    # After modifications, remove hp:lineSegArray from modified hp:p elements
+    hp_ns = ns.get('hp', '')
+    if hp_ns:
+        for p_elem in modified_paragraphs:
+            for lsa in p_elem.findall(f'{{{hp_ns}}}lineSegArray'):
+                p_elem.remove(lsa)
+    
+    tree.write(xml_path, xml_declaration=True, encoding='UTF-8')
+
+# 4. Repackage as HWPX
+# Must preserve the ZIP structure exactly
+with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for root_d, dirs, files in os.walk(tmp_dir):
+        for fname in files:
+            full_path = os.path.join(root_d, fname)
+            arcname = os.path.relpath(full_path, tmp_dir)
+            zout.write(full_path, arcname)
+```
+
+**IMPORTANT**: The script above is a template. You MUST first complete Steps 1-3 to inspect the actual file contents, then write the actual script with the correct replacement logic. Do NOT run the template as-is.
+
+### Step 5: Key implementation details
+
+1. **Field replacements**: For each field (customer name, current owner, renewal window, pricing band, escalation contact, pricing note), find every occurrence of the OLD value in the XML text nodes and replace with the NEW value. The JSON file may provide old/new pairs, or you may need to extract old values from the document.
+
+2. **Follow-up line replacement**: 
+   - Identify the three existing follow-up lines in the document (they likely share a common pattern or are in a specific section).
+   - Replace them with the CSV items in `sequence` order.
+   - If there are 3 old lines and N new lines, handle accordingly (add/remove paragraph elements as needed).
+   - The replacement should remove old lines, not leave duplicates.
+
+3. **Appendix preservation**: Verify that the sentence `이 부록 문단은 그대로 유지해야 합니다.` is NOT modified. After processing, grep for it to confirm it's still present and unchanged.
+
+4. **Layout cache cleanup**: For EVERY `<hp:p>` element (or equivalent paragraph element) whose text content was modified, remove all `<hp:lineSegArray>` child elements. This is CRITICAL for the document to open correctly.
+
+5. **ZIP repackaging**: When creating the output ZIP, preserve the original file ordering and compression settings if possible. Use `mimetype` file uncompressed if it exists (check original ZIP for stored vs deflated entries).
+
+### Step 6: Validate the output
+1. Verify `/root/renewal_playbook_updated.hwpx` exists and is a valid ZIP.
+2. Extract and inspect the XML to confirm:
+   - All old field values are replaced with new values.
+   - Follow-up lines match CSV data in sequence order.
+   - The appendix sentence is preserved exactly.
+   - No `<hp:lineSegArray>` remains in modified paragraphs.
+   - No duplicate/stale content remains.
+3. Compare the structure of old and new HWPX to ensure no files were lost.
+
+### Critical Notes from Prior Experience
+- **HWPX is a ZIP-based format** - treat it as such.
+- **Use `lxml.etree`** for XML manipulation - it handles namespaces properly.
+- **ALWAYS remove `<hp:lineSegArray>`** from any `<hp:p>` element whose text you modify. This is the #1 cause of validation failures in HWPX tasks.
+- **Inspect before editing** - read the actual XML content before writing replacement code.
+- **Korean text handling** - ensure UTF-8 encoding throughout.
+- **Do not modify non-editable sections** - only change editable content areas, preserving structure.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

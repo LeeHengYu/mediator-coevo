@@ -1,0 +1,236 @@
+# Task Instruction
+
+Complete the following task step by step.
+
+## Goal
+Fill in the clinic intake summary template `clinic_intake_template.hwpx` with values from `patient_intake.json` and save the result to `/root/clinic_intake_ready.hwpx`.
+
+## Steps
+
+### Step 1: Inspect the patient data
+```bash
+cat patient_intake.json
+```
+Read and understand all fields available in the JSON file.
+
+### Step 2: Explore the HWPX template structure
+HWPX files are ZIP archives. List the contents:
+```bash
+python3 -c "import zipfile; z=zipfile.ZipFile('clinic_intake_template.hwpx','r'); [print(n) for n in z.namelist()]"
+```
+
+### Step 3: Find all files containing placeholders
+Search every file in the ZIP for `{{` patterns:
+```bash
+python3 -c "
+import zipfile
+z = zipfile.ZipFile('clinic_intake_template.hwpx', 'r')
+for name in z.namelist():
+    try:
+        data = z.read(name).decode('utf-8', errors='ignore')
+        if '{{' in data:
+            print(f'=== {name} ===')
+            # Print lines containing placeholders
+            for i, line in enumerate(data.split('\n')):
+                if '{{' in line:
+                    print(f'  Line {i}: ...{line[max(0,line.index(\"{{\")-40):line.index(\"{{\")+80]}...')
+    except:
+        pass
+"
+```
+
+### Step 4: Examine the XML structure of files with placeholders
+For each file found in Step 3, print its full content to understand:
+- The XML namespace and tag structure
+- How text runs are organized (placeholders may be split across multiple XML text runs)
+- What layout-cache elements exist (look for tags like `linesegarray`, `lineSegArray`, `LineSeg`, `layoutcache`, or similar)
+- How paragraphs are structured
+
+```bash
+python3 -c "
+import zipfile
+z = zipfile.ZipFile('clinic_intake_template.hwpx', 'r')
+for name in z.namelist():
+    data = z.read(name).decode('utf-8', errors='ignore')
+    if '{{' in data:
+        print(f'\n===== {name} =====')
+        print(data[:5000])
+        print('...(truncated)' if len(data)>5000 else '')
+"
+```
+
+### Step 5: Write and run the transformation script
+After understanding the structure from Steps 1-4, write a Python script that:
+
+1. **Reads `patient_intake.json`** and extracts all values.
+2. **Computes Korean full-year age**: Calculate the age as `visit_year - birth_year`, then subtract 1 if the visit date is before the birthday in that year. Format as `(<N>세)`.
+3. **Normalizes the phone number**: Strip all non-digit characters, then format as `XXX-XXXX-XXXX` (for 11-digit Korean mobile numbers).
+4. **Builds a placeholder-to-value mapping** from the JSON keys to their formatted values. The birth date value should have the age note appended: e.g., `1990-05-15 (34세)`.
+5. **Opens the HWPX ZIP**, iterates through all files.
+6. **For XML files containing placeholders**:
+   a. Parse with lxml or xml.etree.ElementTree (preserving namespaces).
+   b. IMPORTANT: Placeholders like `{{patient_name}}` may be split across multiple adjacent text run elements. Concatenate the text of sibling runs within a paragraph, perform replacements on the concatenated text, then redistribute or consolidate the text back. Alternatively, work on the raw XML string if the structure is simple enough — but be very careful with entity encoding.
+   c. Replace ALL `{{...}}` placeholders with corresponding values.
+   d. For any paragraph whose text content was modified, remove layout-cache child elements (these are elements that cache glyph/line layout and become stale after text changes — look for elements with names containing `lineseg`, `LineSeg`, `linesegarray`, `lineSegArray`, `layoutcache`, or similar). Inspect the actual tag names in Step 4 to identify the correct elements.
+   e. Handle the patient name confirmation line (the name may appear multiple times).
+7. **Copies all files** (modified or not) into a new ZIP at `/root/clinic_intake_ready.hwpx`, preserving the original compression method.
+8. **Validates** that no `{{` remains anywhere in the output ZIP.
+
+### Step 6: Validate the output
+```bash
+# Check it's a valid ZIP
+python3 -c "import zipfile; z=zipfile.ZipFile('/root/clinic_intake_ready.hwpx','r'); print('Valid ZIP, entries:', len(z.namelist()))"
+
+# Check no placeholders remain
+python3 -c "
+import zipfile
+z = zipfile.ZipFile('/root/clinic_intake_ready.hwpx', 'r')
+found = False
+for name in z.namelist():
+    try:
+        data = z.read(name).decode('utf-8', errors='ignore')
+        if '{{' in data:
+            print(f'PLACEHOLDER FOUND in {name}')
+            for line in data.split('\n'):
+                if '{{' in line:
+                    print(f'  {line.strip()[:200]}')
+            found = True
+    except:
+        pass
+if not found:
+    print('OK: No placeholders remaining')
+"
+
+# Verify age note is present
+python3 -c "
+import zipfile
+z = zipfile.ZipFile('/root/clinic_intake_ready.hwpx', 'r')
+for name in z.namelist():
+    data = z.read(name).decode('utf-8', errors='ignore')
+    if '세)' in data:
+        print(f'Age note found in {name}')
+"
+
+# Verify phone format
+python3 -c "
+import zipfile, re
+z = zipfile.ZipFile('/root/clinic_intake_ready.hwpx', 'r')
+for name in z.namelist():
+    data = z.read(name).decode('utf-8', errors='ignore')
+    phones = re.findall(r'\d{3}-\d{4}-\d{4}', data)
+    if phones:
+        print(f'Phone in {name}: {phones}')
+"
+```
+
+### Important Notes
+- **Split placeholders**: HWPX XML often splits text across multiple `<hp:t>` or similar text elements within a run or paragraph. If you find that `{{patient_name}}` is split like `{{pat` in one element and `ient_name}}` in another, you MUST handle this by joining text across elements before replacing.
+- **Layout cache removal**: This is critical. After modifying paragraph text, any cached layout data will cause overlapping characters when opened. Identify the exact element names from Step 4 and remove them from modified paragraphs only.
+- **Preserve everything else**: Keep Korean labels, signature notes, and all non-placeholder content intact.
+- **Namespace handling**: HWPX uses XML namespaces. When parsing, handle them properly (use namespace maps or work with full qualified names).
+- If the XML structure is complex and parsing is risky, consider doing string-level replacements on the raw XML — but only if placeholders are NOT split across elements. Check this in Step 4.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

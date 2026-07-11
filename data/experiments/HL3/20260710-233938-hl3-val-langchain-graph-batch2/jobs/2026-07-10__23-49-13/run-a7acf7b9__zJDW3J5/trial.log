@@ -1,0 +1,237 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Complete the inventory status report by replacing all `{{...}}` placeholders in the HWPX template with values from the JSON data file. Follow these steps precisely:
+
+## Step 1: Inspect the input files
+1. List the files in the working directory to find `inventory_report_template.hwpx` and `inventory_data.json`.
+2. Read `inventory_data.json` fully to understand the key-value structure.
+3. Unzip `inventory_report_template.hwpx` to a temporary directory (e.g., `/tmp/hwpx_template/`) and list its contents.
+4. Read `Contents/section0.xml` from the extracted archive. Identify all `{{...}}` placeholders and note which XML elements (`<hp:t>`) contain them.
+
+## Step 2: Write a Python script to perform the substitution
+Create and run a Python script that does the following:
+
+```python
+import json
+import re
+import os
+import shutil
+import zipfile
+from lxml import etree
+
+# 1. Load JSON data
+with open('"'"'inventory_data.json'"'"', '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+    data = json.load(f)
+
+# 2. Build a flat lookup dict from the JSON.
+#    The JSON might be nested or flat. Inspect it and flatten if needed.
+#    Map placeholder names (without braces) to their string values.
+
+# 3. Extract the HWPX zip
+template_path = '"'"'inventory_report_template.hwpx'"'"'
+extract_dir = '"'"'/tmp/hwpx_work'"'"'
+if os.path.exists(extract_dir):
+    shutil.rmtree(extract_dir)
+os.makedirs(extract_dir)
+
+with zipfile.ZipFile(template_path, '"'"'r'"'"') as zf:
+    zf.extractall(extract_dir)
+
+# 4. Parse section0.xml (and check for other sectionN.xml files too)
+section_path = os.path.join(extract_dir, '"'"'Contents'"'"', '"'"'section0.xml'"'"')
+tree = etree.parse(section_path)
+root = tree.getroot()
+nsmap = root.nsmap
+
+# 5. Find all text elements and replace placeholders
+#    Look for hp:t elements. The namespace for '"'"'hp'"'"' should be extracted from nsmap.
+hp_ns = nsmap.get('"'"'hp'"'"', nsmap.get(None, '"'"''"'"'))
+
+modified_paragraphs = set()
+
+for t_elem in root.iter('"'"'{%s}t'"'"' % hp_ns):
+    if t_elem.text and '"'"'{{'"'"' in t_elem.text:
+        original = t_elem.text
+        def replacer(match):
+            key = match.group(1).strip()
+            val = data.get(key, match.group(0))  # Keep original if key not found
+            return str(val)
+        t_elem.text = re.sub(r'"'"'\{\{\s*(.+?)\s*\}\}'"'"', replacer, t_elem.text)
+        if t_elem.text != original:
+            # Track the parent paragraph for layout-cache cleanup
+            parent = t_elem.getparent()
+            while parent is not None:
+                tag = etree.QName(parent.tag).localname if '"'"'}'"'"' in parent.tag else parent.tag
+                if tag == '"'"'p'"'"':
+                    modified_paragraphs.add(parent)
+                    break
+                parent = parent.getparent()
+
+# 6. Remove layout-cache elements from modified paragraphs
+#    Remove hp:lineSegArray and hp:lineSeg elements
+for p in modified_paragraphs:
+    for child in list(p):
+        local = etree.QName(child.tag).localname if '"'"'}'"'"' in child.tag else child.tag
+        if local in ('"'"'lineSegArray'"'"', '"'"'lineSeg'"'"'):
+            p.remove(child)
+
+# 7. Verify no {{...}} remain
+remaining = []
+for t_elem in root.iter('"'"'{%s}t'"'"' % hp_ns):
+    if t_elem.text and '"'"'{{'"'"' in t_elem.text:
+        remaining.append(t_elem.text)
+if remaining:
+    print('"'"'WARNING: Remaining placeholders:'"'"', remaining)
+else:
+    print('"'"'All placeholders replaced successfully.'"'"')
+
+# 8. Write back the modified XML
+tree.write(section_path, xml_declaration=True, encoding='"'"'UTF-8'"'"')
+
+# 9. Repackage as HWPX zip
+output_path = '"'"'/root/inventory_report_ready.hwpx'"'"'
+with zipfile.ZipFile(output_path, '"'"'w'"'"', zipfile.ZIP_DEFLATED) as zf:
+    for dirpath, dirnames, filenames in os.walk(extract_dir):
+        for filename in filenames:
+            filepath = os.path.join(dirpath, filename)
+            arcname = os.path.relpath(filepath, extract_dir)
+            zf.write(filepath, arcname)
+
+print(f'"'"'Output written to {output_path}'"'"')
+```
+
+## Step 3: Handle JSON structure variations
+- Before running the script, inspect the JSON structure. If it'"'"'s nested (e.g., items in arrays, or grouped by category), you need to flatten the lookup appropriately. The placeholder names in the template will guide you on what keys to expect.
+- If placeholders reference nested data like `{{items[0].name}}` or `{{report_date}}`, adjust the lookup logic accordingly.
+- **Important**: Convert all values to strings. For numeric values, preserve the original formatting from the JSON (don'"'"'t add unnecessary decimal places).
+
+## Step 4: Validate the output
+1. After creating the output file, unzip it to a new temp directory and read `Contents/section0.xml`.
+2. Search for any remaining `{{` patterns — there must be none.
+3. Verify Korean text labels are preserved (spot-check a few known Korean strings from the original).
+4. Verify empty paragraphs are preserved (compare paragraph count between original and output).
+5. Verify no `lineSegArray` elements remain in modified paragraphs.
+6. Print the full text content of the output for visual inspection.
+
+## Critical Details
+- **Namespace handling**: HWPX uses XML namespaces extensively. Use `lxml` and work with the full namespace URIs.
+- **Layout cache removal**: For EVERY paragraph where text was modified, remove `lineSegArray` (and any `lineSeg`) child elements. This is critical for the document to render correctly.
+- **Preserve structure**: Do NOT remove or modify any paragraphs, runs, or elements that don'"'"'t contain placeholders. Empty paragraphs must remain.
+- **ZIP structure**: The output ZIP must have the same directory structure as the input. Paths in the ZIP should be relative (e.g., `Contents/section0.xml`, not `/tmp/hwpx_work/Contents/section0.xml`).
+- **Encoding**: Use UTF-8 for all XML operations to preserve Korean characters.
+- **Check for placeholders across multiple `<hp:t>` elements**: A single `{{placeholder}}` might be split across multiple `<hp:t>` elements within the same `<hp:run>`. If you find partial `{{` in one element and `}}` in another, you'"'"'ll need to concatenate them, do the replacement, and put the result back. Inspect the XML carefully for this case.
+
+The final output must be at `/root/inventory_report_ready.hwpx`.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260710-233938-hl3-val-langchain-graph-batch2/jobs/2026-07-10__23-49-13/run-a7acf7b9__zJDW3J5/agent/trajectory.json

@@ -1,0 +1,460 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following steps in order:
+
+## 1. Inspect the input files
+
+```python
+import openpyxl
+
+# Read demand data
+wb = openpyxl.load_workbook('"'"'/root/hvac_demand_sheet.xlsx'"'"')
+ws = wb['"'"'Install'"'"']
+print('"'"'=== Install sheet ==='"'"')
+for row in ws.iter_rows(min_row=1, max_row=ws.max_row, values_only=False):
+    vals = [c.value for c in row]
+    print(vals)
+wb.close()
+
+# Read existing plan
+wb2 = openpyxl.load_workbook('"'"'/root/hvac_existing_plan.xlsx'"'"')
+ws2 = wb2['"'"'Plan'"'"']
+print('"'"'\n=== Existing Plan sheet ==='"'"')
+for row in ws2.iter_rows(min_row=1, max_row=ws2.max_row, values_only=False):
+    vals = [c.value for c in row]
+    print(vals)
+wb2.close()
+```
+
+Examine the output carefully. Identify:
+- Which row contains `HVAC Ductwork Demand (Std Hrs)` and which columns correspond to phases 8–56.
+- The header row of the existing plan.
+
+## 2. Extract demand values and build the schedule
+
+Write and run a single Python script that does everything:
+
+```python
+import openpyxl
+from openpyxl import Workbook
+
+# --- Step A: Read demand from Install sheet ---
+wb = openpyxl.load_workbook('"'"'/root/hvac_demand_sheet.xlsx'"'"')
+ws = wb['"'"'Install'"'"']
+
+# Find the row labeled '"'"'HVAC Ductwork Demand (Std Hrs)'"'"'
+demand_row_idx = None
+for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=1):
+    cell = row[0]
+    if cell.value and '"'"'ductwork demand'"'"' in str(cell.value).lower():
+        demand_row_idx = cell.row
+        break
+
+assert demand_row_idx is not None, '"'"'Could not find demand row'"'"'
+
+# Find header row (row with phase numbers) - typically the row above or a header row
+# Scan row 1 or the row that contains phase numbers
+header_row_idx = None
+for r in range(1, demand_row_idx):
+    vals = [c.value for c in ws[r]]
+    # Check if any cell contains an integer that could be a phase number
+    if any(isinstance(v, (int, float)) and v == 8 for v in vals):
+        header_row_idx = r
+        break
+
+# If no header row found, check if the demand row itself has phase info in a different layout
+# Also try: phases might be column headers in row 1
+if header_row_idx is None:
+    # Try row 1
+    vals = [c.value for c in ws[1]]
+    if any(isinstance(v, (int, float)) and int(v) == 8 for v in vals if v is not None):
+        header_row_idx = 1
+
+assert header_row_idx is not None, f'"'"'Could not find header row with phase numbers. Demand row: {demand_row_idx}'"'"'
+
+# Build phase->column mapping
+phase_col = {}
+for cell in ws[header_row_idx]:
+    v = cell.value
+    if isinstance(v, (int, float)):
+        p = int(v)
+        if 8 <= p <= 56:
+            phase_col[p] = cell.column
+
+# Read demand values
+demand = {}
+for phase in range(8, 57):
+    col = phase_col.get(phase)
+    assert col is not None, f'"'"'Missing column for phase {phase}'"'"'
+    val = ws.cell(row=demand_row_idx, column=col).value
+    if val is None:
+        val = 0.0
+    demand[phase] = round(float(val), 2)
+
+wb.close()
+
+print('"'"'Demand values read:'"'"')
+for p in range(8, 57):
+    print(f'"'"'  Phase {p}: {demand[p]}'"'"')
+
+# --- Step B: Compute schedule per the deterministic policy ---
+
+# Initial condition: at Phase 8, Calc Start + Scheduled Demand = 1138.66
+# So Calc Start for Phase 8 = 1138.66 - demand[8]
+# But actually: "Start of Phase Past Due + Scheduled Demand = 1138.66" for Phase 8
+# And Calc Start = prior phase End of Phase Backlog/Buffer
+# For Phase 8, Calc Start IS the initial condition value.
+# Re-reading: "Initial condition at Phase 8: Start of Phase Past Due + Scheduled Demand = 1138.66"
+# Start of Phase Past Due = max(0, prior End of Phase Backlog/Buffer)
+# For Phase 8 there is no prior phase, so:
+#   Start of Phase Past Due (Phase 8) = some value X
+#   X + demand[8] = 1138.66
+#   X = 1138.66 - demand[8]
+# And Calc Start for Phase 8 = X (since past due >= 0, Calc Start = X too)
+
+initial_past_due = round(1138.66 - demand[8], 2)
+print(f'"'"'\nPhase 8 initial past due (Calc Start): {initial_past_due}'"'"')
+
+rows = []  # list of dicts
+prev_end_backlog = initial_past_due  # This is Calc Start for phase 8
+# Wait - let me re-read the instructions more carefully.
+# 
+# For Phase 8:
+#   Start of Phase Past Due = max(0, prior End of Phase Backlog/Buffer)
+#   Since there'"'"'s no prior phase, we derive from initial condition.
+#   Initial condition: Start of Phase Past Due + Scheduled Demand = 1138.66
+#   So Start of Phase Past Due = 1138.66 - demand[8]
+#   Calc Start = prior End of Phase Backlog/Buffer = Start of Phase Past Due 
+#     (since past due >= 0 means the prior end was positive, so Calc Start = past due)
+#   Actually for Phase 8, since past due = max(0, prior_end), and past_due > 0,
+#   Calc Start = prior_end = past_due (they'"'"'re the same when past_due > 0)
+#
+# So for Phase 8: Calc Start = 1138.66 - demand[8]
+
+# For subsequent phases:
+#   past_due = max(0, prev_end_backlog)
+#   calc_start = prev_end_backlog  (the signed value)
+#   days_worked = policy based on past_due
+#   capacity = 35 * days_worked
+#   end_backlog = calc_start + demand[phase] - capacity
+#   overtime = 10 * max(0, days_worked - 4)
+
+calc_start_phase8 = round(1138.66 - demand[8], 2)
+
+for phase in range(8, 57):
+    d = demand[phase]
+    
+    if phase == 8:
+        calc_start = calc_start_phase8
+        past_due = max(0, calc_start)  # should be positive
+    else:
+        past_due = round(max(0, prev_end_backlog), 2)
+        calc_start = round(prev_end_backlog, 2)
+    
+    # Choose Days Worked
+    if past_due > 0.01:
+        # Try smallest in {5, 6}
+        chosen = None
+        for dw in [5, 6]:
+            if calc_start + d - (35 * dw) <= 0:
+                chosen = dw
+                break
+        if chosen is None:
+            chosen = 6
+        days_worked = chosen
+    else:
+        # past_due <= 0.01
+        if d <= 140:
+            days_worked = 4
+        else:
+            days_worked = 5
+    
+    capacity = round(35 * days_worked, 2)
+    end_backlog = round(calc_start + d - capacity, 2)
+    overtime = round(10 * max(0, days_worked - 4), 2)
+    
+    row = {
+        '"'"'Phase'"'"': phase,
+        '"'"'Days Worked'"'"': days_worked,
+        '"'"'Scheduled Demand (Std Hrs)'"'"': d,
+        '"'"'Weekly Capacity (Std Hrs)'"'"': capacity,
+        '"'"'Start of Phase Past Due (Std Hrs)'"'"': past_due,
+        '"'"'End of Phase Backlog/Buffer (Std Hrs)'"'"': end_backlog,
+        '"'"'Overtime Hours'"'"': overtime,
+    }
+    rows.append(row)
+    prev_end_backlog = end_backlog
+    
+    print(f'"'"'Phase {phase}: PD={past_due}, CS={calc_start}, D={d}, DW={days_worked}, Cap={capacity}, End={end_backlog}, OT={overtime}'"'"')
+
+assert len(rows) == 49, f'"'"'Expected 49 rows, got {len(rows)}'"'"'
+
+# --- Step C: Write Excel files ---
+
+headers = [
+    '"'"'Phase'"'"',
+    '"'"'Days Worked'"'"',
+    '"'"'Scheduled Demand (Std Hrs)'"'"',
+    '"'"'Weekly Capacity (Std Hrs)'"'"',
+    '"'"'Start of Phase Past Due (Std Hrs)'"'"',
+    '"'"'End of Phase Backlog/Buffer (Std Hrs)'"'"',
+    '"'"'Overtime Hours'"'"',
+]
+
+def write_plan(filepath):
+    wb_out = Workbook()
+    ws_out = wb_out.active
+    ws_out.title = '"'"'Plan'"'"'
+    # Write header
+    for col_idx, h in enumerate(headers, 1):
+        ws_out.cell(row=1, column=col_idx, value=h)
+    # Write data
+    for row_idx, row_data in enumerate(rows, 2):
+        for col_idx, h in enumerate(headers, 1):
+            ws_out.cell(row=row_idx, column=col_idx, value=row_data[h])
+    wb_out.save(filepath)
+    print(f'"'"'Saved {filepath}'"'"')
+
+write_plan('"'"'/root/hvac_existing_plan.xlsx'"'"')
+write_plan('"'"'/root/hvac_schedule_plan.xlsx'"'"')
+
+# --- Step D: Write summary ---
+
+first_5 = '"'"'N/A'"'"'
+first_4 = '"'"'N/A'"'"'
+for row_data in rows:
+    if first_5 == '"'"'N/A'"'"' and row_data['"'"'Days Worked'"'"'] == 5:
+        first_5 = str(row_data['"'"'Phase'"'"'])
+    if first_4 == '"'"'N/A'"'"' and row_data['"'"'Days Worked'"'"'] == 4:
+        first_4 = str(row_data['"'"'Phase'"'"'])
+
+# Build summary sentence referencing step-down phases
+# Step-down from 6->5 is first_5 (if crew starts at 6), step-down from 5->4 is first_4
+# Actually "step-down" means going to fewer days. Let'"'"'s find when days decrease.
+# But the instructions say "mention both step-down phase numbers (or N/A if not reached)"
+# The First_Week_5_Days and First_Week_4_Days ARE the step-down indicators.
+
+# Construct a concise summary (<=60 words, <=3 sentences)
+summary_text = (
+    f'"'"'The crew begins at 6-day weeks to clear the initial backlog. '"'"'
+    f'"'"'The first 5-day week occurs at Phase {first_5}{" " if first_5 != "N/A" else ""}and the first 4-day week at Phase {first_4}. '"'"'
+    f'"'"'Overtime decreases as backlog is eliminated, enabling a sustainable schedule.'"'"'
+)
+
+# Fix spacing if N/A
+summary_text = summary_text.replace('"'"'  '"'"', '"'"' '"'"')
+
+# Verify word count
+word_count = len(summary_text.split())
+print(f'"'"'Summary word count: {word_count}'"'"')
+assert word_count <= 60, f'"'"'Summary too long: {word_count} words'"'"'
+
+with open('"'"'/root/hvac_schedule_summary.txt'"'"', '"'"'w'"'"') as f:
+    f.write(f'"'"'First_Week_5_Days: {first_5}\n'"'"')
+    f.write(f'"'"'First_Week_4_Days: {first_4}\n'"'"')
+    f.write(f'"'"'Summary: {summary_text}\n'"'"')
+
+print('"'"'\nSummary file written.'"'"')
+print(f'"'"'First_Week_5_Days: {first_5}'"'"')
+print(f'"'"'First_Week_4_Days: {first_4}'"'"')
+print(f'"'"'Summary: {summary_text}'"'"')
+```
+
+## 3. Validate the outputs
+
+After the script completes, verify:
+
+```python
+import openpyxl
+
+# Check hvac_schedule_plan.xlsx
+wb = openpyxl.load_workbook('"'"'/root/hvac_schedule_plan.xlsx'"'"')
+ws = wb['"'"'Plan'"'"']
+headers = [c.value for c in ws[1]]
+print('"'"'Headers:'"'"', headers)
+assert headers == [
+    '"'"'Phase'"'"', '"'"'Days Worked'"'"', '"'"'Scheduled Demand (Std Hrs)'"'"',
+    '"'"'Weekly Capacity (Std Hrs)'"'"', '"'"'Start of Phase Past Due (Std Hrs)'"'"',
+    '"'"'End of Phase Backlog/Buffer (Std Hrs)'"'"', '"'"'Overtime Hours'"'"'
+]
+data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+print(f'"'"'Row count: {len(data_rows)}'"'"')
+assert len(data_rows) == 49
+print('"'"'First row:'"'"', data_rows[0])
+print('"'"'Last row:'"'"', data_rows[-1])
+assert data_rows[0][0] == 8
+assert data_rows[-1][0] == 56
+
+# Verify Phase 8 initial condition
+phase8 = data_rows[0]
+past_due_8 = phase8[4]
+demand_8 = phase8[2]
+print(f'"'"'Phase 8: past_due={past_due_8}, demand={demand_8}, sum={round(past_due_8 + demand_8, 2)}'"'"')
+assert abs(past_due_8 + demand_8 - 1138.66) < 0.01, f'"'"'Initial condition mismatch: {past_due_8 + demand_8}'"'"'
+
+# Spot-check formula for a few rows
+for i, row in enumerate(data_rows):
+    phase, dw, sd, cap, pd_val, end_val, ot = row
+    assert dw in (4, 5, 6), f'"'"'Phase {phase}: invalid days worked {dw}'"'"'
+    assert cap == 35 * dw, f'"'"'Phase {phase}: capacity mismatch'"'"'
+    assert ot == 10 * max(0, dw - 4), f'"'"'Phase {phase}: overtime mismatch'"'"'
+    if i > 0:
+        prev_end = data_rows[i-1][5]
+        expected_pd = round(max(0, prev_end), 2)
+        assert abs(pd_val - expected_pd) <= 0.01, f'"'"'Phase {phase}: past due mismatch {pd_val} vs {expected_pd}'"'"'
+        calc_start = round(prev_end, 2)
+        expected_end = round(calc_start + sd - cap, 2)
+        assert abs(end_val - expected_end) <= 0.01, f'"'"'Phase {phase}: end backlog mismatch {end_val} vs {expected_end}'"'"'
+
+print('"'"'\nAll validation checks passed!'"'"')
+wb.close()
+
+# Check summary file
+with open('"'"'/root/hvac_schedule_summary.txt'"'"') as f:
+    lines = f.read().strip().split('"'"'\n'"'"')
+print('"'"'\nSummary file contents:'"'"')
+for line in lines:
+    print(line)
+assert len(lines) == 3
+assert lines[0].startswith('"'"'First_Week_5_Days:'"'"')
+assert lines[1].startswith('"'"'First_Week_4_Days:'"'"')
+assert lines[2].startswith('"'"'Summary:'"'"')
+print('"'"'\nSummary validation passed!'"'"')
+```
+
+## 4. Also verify hvac_existing_plan.xlsx is identical
+
+```python
+import openpyxl
+wb1 = openpyxl.load_workbook('"'"'/root/hvac_existing_plan.xlsx'"'"')
+wb2 = openpyxl.load_workbook('"'"'/root/hvac_schedule_plan.xlsx'"'"')
+ws1 = wb1['"'"'Plan'"'"']
+ws2 = wb2['"'"'Plan'"'"']
+for row in range(1, 51):
+    for col in range(1, 8):
+        v1 = ws1.cell(row=row, column=col).value
+        v2 = ws2.cell(row=row, column=col).value
+        assert v1 == v2, f'"'"'Mismatch at row {row}, col {col}: {v1} vs {v2}'"'"'
+print('"'"'Both Excel files are identical. All done!'"'"')
+```
+
+## Critical Notes
+
+- **Round all calculated values to 2 decimal places** before storing them in the rows dict and writing to Excel. This avoids floating-point precision drift that caused failures in prior iterations.
+- The `Calc Start` for Phase 8 is derived from the initial condition: `1138.66 - demand[8]`.
+- `Calc Start` uses the **signed** prior end-of-phase backlog/buffer (can be negative), while `Start of Phase Past Due` uses `max(0, ...)` for reporting.
+- Days Worked must be chosen from `{4, 5, 6}` per the policy rules.
+- If the demand sheet layout is different from expected (e.g., phases in rows instead of columns), adapt the reading logic accordingly after inspecting the output from Step 1.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[xlsx, operations, capacity-planning, hvac, backlog].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260710-202409-hl3-train-langchain-graph-batch1/jobs/2026-07-10__20-56-03/run-e04bc4c1__3hwMs9N/agent/trajectory.json

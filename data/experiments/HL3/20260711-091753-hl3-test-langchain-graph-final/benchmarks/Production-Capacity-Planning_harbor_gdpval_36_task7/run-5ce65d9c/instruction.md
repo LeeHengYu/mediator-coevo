@@ -1,0 +1,203 @@
+# Task Instruction
+
+You are a shipbuilding operations manager building a catch-up plan for block assembly crew capacity.
+
+## Step 1: Read and transpose the demand data
+
+Read `/root/ship_demand.csv`. The CSV has two rows:
+- Row 1: `Week, 5, 6, 7, ..., 53` (column headers are week numbers)
+- Row 2: `Demand, <value>, <value>, ...`
+
+Transpose this so you have a mapping: week_number → demand_value for weeks 5 through 53 inclusive (49 weeks).
+
+Print the first few and last few entries to verify correct parsing. Confirm you have exactly 49 weeks (5..53).
+
+## Step 2: Compute the plan using the deterministic policy
+
+Initialize:
+- `calc_start` for Week 5 = 1014.51 (this is the initial condition: Start of Week Past Due + Scheduled Demand at week 5, but note: this value IS the `Calc Start` for week 5, meaning `prior week End of Week Backlog/Buffer` is effectively `1014.51 - demand[5]`... NO, re-read carefully).
+
+ACTUALLY, re-read the instructions carefully:
+- "Initial condition at Week 5: Start of Week Past Due + Scheduled Demand = 1014.51"
+- The policy says: `Calc Start = prior week End of Week Backlog/Buffer` (Week 5 starts from the initial condition).
+- `Start of Week Past Due = max(0, prior week End of Week Backlog/Buffer)`
+
+So for Week 5:
+- We need `Calc Start` such that `Start of Week Past Due + Scheduled Demand = 1014.51`
+- `Start of Week Past Due = max(0, Calc Start)`
+- Since this is the first week and there's past due, `Calc Start` is positive.
+- Therefore: `Calc Start + demand[5] = 1014.51`, so `Calc Start = 1014.51 - demand[5]`.
+- And `Start of Week Past Due = max(0, Calc Start) = Calc Start` (assuming positive).
+
+For each week w (5..53) in order:
+
+1. If w == 5:
+   - `calc_start = 1014.51 - demand[5]`
+   - `start_past_due = max(0, calc_start)`
+2. Else:
+   - `calc_start = prior_week_end_backlog`  (the signed value)
+   - `start_past_due = max(0, calc_start)`
+
+3. Choose `days_worked`:
+   - If `start_past_due > 0.01`:
+     - Try days=5: if `calc_start + demand[w] - 28*5 <= 0`, use 5
+     - Else try days=6: if `calc_start + demand[w] - 28*6 <= 0`, use 6
+     - Else use 6
+   - Else (start_past_due <= 0.01):
+     - If `demand[w] <= 112`, use 4; else use 5
+
+4. `weekly_capacity = 28 * days_worked`
+5. `end_backlog = calc_start + demand[w] - weekly_capacity`
+6. `overtime = 10 * max(0, days_worked - 4)`
+
+Store all columns. Print the first 5 rows and last 5 rows to verify.
+
+## Step 3: Write `/root/ship_block_plan.xlsx`
+
+Use `openpyxl` to create the workbook. Create a single worksheet named `Plan` (rename the default sheet). Headers in row 1 must be EXACTLY:
+1. `Week`
+2. `Days Worked`
+3. `Scheduled Demand (Std Hrs)`
+4. `Weekly Capacity (Std Hrs)`
+5. `Start of Week Past Due (Std Hrs)`
+6. `End of Week Backlog/Buffer (Std Hrs)`
+7. `Overtime Hours`
+
+Write 49 data rows (weeks 5..53) starting from row 2. Write numeric values (not strings). Save the file.
+
+After saving, re-open and verify: sheet name is `Plan`, row 1 has exact headers, there are 49 data rows, Week column goes 5..53.
+
+## Step 4: Determine summary values
+
+- `First_Week_5_Days`: Scan weeks 5..53 in order. Find the first week where `days_worked == 5`. If none, use `N/A`.
+- `First_Week_4_Days`: Scan weeks 5..53 in order. Find the first week where `days_worked == 4`. If none, use `N/A`.
+
+## Step 5: Write `/root/ship_block_summary.txt`
+
+Write exactly 3 lines (no trailing blank lines):
+```
+First_Week_5_Days: <week-number-or-N/A>
+First_Week_4_Days: <week-number-or-N/A>
+Summary: <manager-facing summary>
+```
+
+The summary must be ≤60 words, ≤3 sentences, and must mention both step-down week numbers (or N/A).
+
+After writing, read the file back and print its contents to verify format.
+
+## Step 6: Final validation
+
+- Confirm `/root/ship_block_plan.xlsx` exists and can be opened.
+- Confirm `/root/ship_block_summary.txt` exists and has exactly 3 lines.
+- Print the full plan table for manual inspection.
+
+## Important notes
+- Use Python with `openpyxl` for Excel writing and `csv` module for CSV reading.
+- All numeric values should be floats or ints as appropriate (Week and Days Worked as int, others as float).
+- Do NOT use pandas if it causes issues; `csv` + `openpyxl` are sufficient.
+- Double-check the initial condition interpretation by verifying: for Week 5, `Start of Week Past Due + Scheduled Demand` should equal 1014.51.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[csv, xlsx, operations, capacity-planning, shipbuilding, backlog].
+Verifier config: timeout_sec=900.0.
