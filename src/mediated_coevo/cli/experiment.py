@@ -80,9 +80,9 @@ def resolve_task_selection(
     if not selected:
         raise typer.BadParameter("selected task split is empty")
     resolved_stream_seed = secrets.randbits(63)
-    selected = random.Random(resolved_stream_seed).choices(
+    selected = _sample_task_stream(
         selected,
-        k=BOOTSTRAP_FAMILY_TASK_COUNT,
+        stream_seed=resolved_stream_seed,
     )
     return TaskSelection(
         task_ids=selected,
@@ -90,6 +90,23 @@ def resolve_task_selection(
         split=_normalize_split(split),
         task_stream_seed=resolved_stream_seed,
     )
+
+
+def _sample_task_stream(
+    task_ids: list[str],
+    *,
+    stream_seed: int,
+) -> list[str]:
+    """Build a fresh stream without needlessly concentrating a short pool."""
+    rng = random.Random(stream_seed)
+    if len(task_ids) >= BOOTSTRAP_FAMILY_TASK_COUNT:
+        return rng.sample(task_ids, k=BOOTSTRAP_FAMILY_TASK_COUNT)
+
+    full_cycles, extra_slots = divmod(BOOTSTRAP_FAMILY_TASK_COUNT, len(task_ids))
+    stream = task_ids * full_cycles
+    stream.extend(rng.sample(task_ids, k=extra_slots))
+    rng.shuffle(stream)
+    return stream
 
 
 def _normalize_families(family: str | Sequence[str] | None) -> list[str]:
