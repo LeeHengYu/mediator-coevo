@@ -1,0 +1,391 @@
+# Task Instruction
+
+Execute the following Python script to produce both deliverables. Before running, inspect the three input files to understand their schemas.
+
+```bash
+cd /root
+python3 << 'PYEOF'
+import openpyxl
+from openpyxl import load_workbook, Workbook
+from collections import defaultdict
+import re
+
+# ── 1. Load input files ──────────────────────────────────────────────────────
+plan_wb = load_workbook('/root/Return_Plan.xlsx')
+plan_ws = plan_wb.active
+
+event_wb = load_workbook('/root/Disposition_Event_Log.xlsx')
+event_ws = event_wb.active
+
+alias_wb = load_workbook('/root/Disposition_Alias.xlsx')
+alias_ws = alias_wb.active
+
+# ── 2. Parse headers helper ──────────────────────────────────────────────────
+def parse_sheet(ws):
+    rows = list(ws.iter_rows(values_only=True))
+    headers = [str(h).strip() if h is not None else '' for h in rows[0]]
+    data = []
+    for r in rows[1:]:
+        data.append(dict(zip(headers, [c for c in r])))
+    return headers, data
+
+plan_headers, plan_data = parse_sheet(plan_ws)
+event_headers, event_data = parse_sheet(event_ws)
+alias_headers, alias_data = parse_sheet(alias_ws)
+
+print('Plan headers:', plan_headers)
+print('Event headers:', event_headers)
+print('Alias headers:', alias_headers)
+print(f'Plan rows: {len(plan_data)}, Event rows: {len(event_data)}, Alias rows: {len(alias_data)}')
+if plan_data:
+    print('Sample plan row:', plan_data[0])
+if event_data:
+    print('Sample event row:', event_data[0])
+if alias_data:
+    print('Sample alias row:', alias_data[0])
+
+# ── 3. Build alias map (alias -> standard, case-insensitive) ────────────────
+# Try to find the right columns by keyword
+def find_col(headers, keywords, exclude=None):
+    for kw in keywords:
+        for h in headers:
+            if exclude and any(ex.lower() in h.lower() for ex in exclude):
+                continue
+            if kw.lower() in h.lower():
+                return h
+    return None
+
+alias_col = find_col(alias_headers, ['alias', 'alternate', 'variant'])
+standard_col = find_col(alias_headers, ['standard', 'canonical', 'mapped', 'disposition'], exclude=['alias', 'alternate', 'variant'])
+if alias_col is None or standard_col is None:
+    # fallback: first two columns
+    print('WARNING: Could not auto-detect alias columns, using positional fallback')
+    alias_col = alias_headers[0]
+    standard_col = alias_headers[1]
+print(f'Alias mapping: "{alias_col}" -> "{standard_col}"')
+
+alias_map = {}
+for row in alias_data:
+    a = str(row.get(alias_col, '')).strip()
+    s = str(row.get(standard_col, '')).strip()
+    if a:
+        alias_map[a.lower()] = s
+print(f'Alias map ({len(alias_map)} entries):', dict(list(alias_map.items())[:10]))
+
+def normalize_disposition(raw):
+    if raw is None:
+        return ''
+    raw_s = str(raw).strip()
+    mapped = alias_map.get(raw_s.lower(), raw_s)
+    return mapped
+
+# ── 4. Build event lookup: (Return ID, Line ID) -> latest COMPLETED row ─────
+return_id_col_e = find_col(event_headers, ['return id', 'return_id', 'returnid'])
+line_id_col_e = find_col(event_headers, ['line id', 'line_id', 'lineid'])
+status_col_e = find_col(event_headers, ['event status', 'status'])
+final_disp_col_e = find_col(event_headers, ['final disposition', 'disposition', 'final_disposition'])
+# Try to find a timestamp/sequence column for "latest"
+time_col_e = find_col(event_headers, ['timestamp', 'event time', 'event_time', 'date', 'sequence', 'event_id', 'event id'])
+
+print(f'Event cols: return_id={return_id_col_e}, line_id={line_id_col_e}, status={status_col_e}, final_disp={final_disp_col_e}, time={time_col_e}')
+
+# Keep only COMPLETED events, group by (Return ID, Line ID), keep latest
+completed_events = defaultdict(list)
+for idx, row in enumerate(event_data):
+    status = str(row.get(status_col_e, '')).strip().upper()
+    if status == 'COMPLETED':
+        rid = row.get(return_id_col_e)
+        lid = row.get(line_id_col_e)
+        key = (str(rid).strip() if rid is not None else '', str(lid).strip() if lid is not None else '')
+        completed_events[key].append((idx, row))
+
+# For each key, pick the latest row (by time column if available, else last occurrence)
+latest_completed = {}
+for key, rows in completed_events.items():
+    if time_col_e and rows[0][1].get(time_col_e) is not None:
+        # Sort by time column value
+        rows_sorted = sorted(rows, key=lambda x: x[1].get(time_col_e, ''))
+        latest_completed[key] = rows_sorted[-1][1]
+    else:
+        # Last occurrence by row index
+        latest_completed[key] = max(rows, key=lambda x: x[0])[1]
+
+print(f'Unique (Return ID, Line ID) with COMPLETED events: {len(latest_completed)}')
+
+# ── 5. Identify plan columns ────────────────────────────────────────────────
+return_id_col_p = find_col(plan_headers, ['return id', 'return_id', 'returnid'])
+line_id_col_p = find_col(plan_headers, ['line id', 'line_id', 'lineid'])
+planned_disp_col = find_col(plan_headers, ['planned disposition', 'planned_disposition', 'disposition'])
+reason_col = find_col(plan_headers, ['reason code', 'reason_code', 'reason'])
+qty_col = find_col(plan_headers, ['requested qty', 'requested_qty', 'qty', 'quantity'])
+wh_col = find_col(plan_headers, ['warehouse'])
+carrier_col = find_col(plan_headers, ['carrier'])
+lane_col = find_col(plan_headers, ['lane'])
+
+print(f'Plan cols: return_id={return_id_col_p}, line_id={line_id_col_p}, planned_disp={planned_disp_col}')
+print(f'  reason={reason_col}, qty={qty_col}, wh={wh_col}, carrier={carrier_col}, lane={lane_col}')
+
+# Build the 8 source column names in order
+src_cols = [return_id_col_p, line_id_col_p, planned_disp_col, reason_col, qty_col, wh_col, carrier_col, lane_col]
+out_headers_8 = ['Return ID', 'Line ID', 'Planned Disposition', 'Reason Code', 'Requested Qty', 'Warehouse', 'Carrier', 'Lane']
+
+# ── 6. Build Formatted Data rows ────────────────────────────────────────────
+formatted_rows = []
+error_counts_by_wh_carrier = defaultdict(lambda: [0, 0, 0])  # missing, mismatch, total
+return_id_error_counts = defaultdict(int)
+
+for prow in plan_data:
+    rid = str(prow.get(return_id_col_p, '')).strip()
+    lid = str(prow.get(line_id_col_p, '')).strip()
+    planned = str(prow.get(planned_disp_col, '')).strip()
+    
+    key = (rid, lid)
+    event_row = latest_completed.get(key)
+    
+    if event_row is None:
+        missing = 1
+    else:
+        missing = 0
+    
+    if event_row is not None:
+        final_raw = event_row.get(final_disp_col_e)
+        final_norm = normalize_disposition(final_raw)
+        if final_norm.lower() != planned.lower():
+            mismatch = 1
+        else:
+            mismatch = 0
+    else:
+        mismatch = 0
+    
+    total_err = missing + mismatch
+    
+    # Error Summary
+    parts = []
+    if missing == 1:
+        parts.append('Missing Final Event')
+    if mismatch == 1:
+        parts.append('Disposition Mismatch')
+    summary = ', '.join(parts) if parts else 'None'
+    
+    base = [prow.get(c) for c in src_cols]
+    formatted_rows.append(base + [missing, mismatch, total_err, summary])
+    
+    # Aggregation
+    wh = str(prow.get(wh_col, '')).strip()
+    car = str(prow.get(carrier_col, '')).strip()
+    if total_err > 0:
+        error_counts_by_wh_carrier[(wh, car)][0] += missing
+        error_counts_by_wh_carrier[(wh, car)][1] += mismatch
+        error_counts_by_wh_carrier[(wh, car)][2] += total_err
+    
+    if total_err > 0:
+        return_id_error_counts[rid] += total_err
+
+# ── 7. Create output workbook ────────────────────────────────────────────────
+out_wb = Workbook()
+
+# --- RawData sheet ---
+raw_ws = out_wb.active
+raw_ws.title = 'RawData'
+# Copy plan table exactly
+for row in plan_ws.iter_rows(values_only=True):
+    raw_ws.append(list(row))
+
+# --- Formatted Data sheet ---
+fmt_ws = out_wb.create_sheet('Formatted Data')
+fmt_headers = out_headers_8 + ['Missing Final Event', 'Disposition Mismatch', 'Total Errors', 'Error Summary']
+fmt_ws.append(fmt_headers)
+for fr in formatted_rows:
+    fmt_ws.append(fr)
+
+# --- Summary sheet ---
+sum_ws = out_wb.create_sheet('Summary')
+sum_headers = ['Warehouse', 'Carrier', 'Missing Final Events', 'Disposition Mismatches', 'Total Errors']
+sum_ws.append(sum_headers)
+
+# Sort by warehouse asc, carrier asc; only groups with Total Errors > 0
+sorted_keys = sorted(error_counts_by_wh_carrier.keys(), key=lambda x: (x[0], x[1]))
+grand_missing = 0
+grand_mismatch = 0
+grand_total = 0
+for wh, car in sorted_keys:
+    m, mm, t = error_counts_by_wh_carrier[(wh, car)]
+    if t > 0:
+        sum_ws.append([wh, car, m, mm, t])
+        grand_missing += m
+        grand_mismatch += mm
+        grand_total += t
+
+sum_ws.append(['Grand Total', '-', grand_missing, grand_mismatch, grand_total])
+
+out_wb.save('/root/Returns_Disposition_Audit.xlsx')
+print('Saved Returns_Disposition_Audit.xlsx')
+print(f'Grand totals: Missing={grand_missing}, Mismatch={grand_mismatch}, Total={grand_total}')
+
+# ── 8. Find top return IDs with most errors ──────────────────────────────────
+top_returns = sorted(return_id_error_counts.items(), key=lambda x: -x[1])
+print(f'Top return IDs by errors: {top_returns[:5]}')
+
+# ── 9. Create Word document ──────────────────────────────────────────────────
+try:
+    from docx import Document
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'python-docx'])
+    from docx import Document
+
+doc = Document()
+doc.add_heading('Returns Disposition Audit – Executive Summary', level=1)
+
+# Pick at least 2 high-priority return IDs
+high_priority = [rid for rid, cnt in top_returns[:2]] if len(top_returns) >= 2 else [rid for rid, cnt in top_returns]
+hp_str = ', '.join(high_priority)
+
+paragraph_text = (
+    f'This audit examined the disposition accuracy of returned inventory by applying two checks: '
+    f'"Missing Final Event" flags lines where no completed disposition event was recorded in the event log, '
+    f'and "Disposition Mismatch" flags lines where the final recorded disposition does not match the planned disposition after alias normalization. '
+    f'Across all audited lines, the analysis identified {grand_missing} Missing Final Event(s), '
+    f'{grand_mismatch} Disposition Mismatch(es), and {grand_total} Total Error(s). '
+    f'High-priority return IDs with frequent exceptions include {hp_str}, which should be investigated first. '
+    f'We recommend implementing automated disposition confirmation at the point of processing and '
+    f'conducting a root-cause review for the identified mismatches to reduce recurrence.'
+)
+
+doc.add_paragraph(paragraph_text)
+doc.save('/root/Returns_Disposition_Brief.docx')
+print('Saved Returns_Disposition_Brief.docx')
+print('DONE')
+PYEOF
+```
+
+After running, verify:
+1. Both files exist: `ls -la /root/Returns_Disposition_Audit.xlsx /root/Returns_Disposition_Brief.docx`
+2. Open the Excel file and print sheet names and row counts:
+```bash
+python3 << 'VERIFY'
+from openpyxl import load_workbook
+wb = load_workbook('/root/Returns_Disposition_Audit.xlsx')
+print('Sheet names:', wb.sheetnames)
+for name in wb.sheetnames:
+    ws = wb[name]
+    print(f'  {name}: {ws.max_row} rows x {ws.max_column} cols')
+    # Print first 2 data rows
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        print(f'    Row {i}: {row}')
+        if i >= 2:
+            break
+    # Print last row
+    last = list(ws.iter_rows(values_only=True))[-1]
+    print(f'    Last row: {last}')
+VERIFY
+```
+3. Verify the Word doc has content:
+```bash
+python3 -c "from docx import Document; d=Document('/root/Returns_Disposition_Brief.docx'); print([p.text for p in d.paragraphs])"
+```
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@meituan.com, author_name=CatPaw Benchmark Builder, category=spreadsheet-audit, difficulty=hard, tags=[excel, openpyxl, docx, audit, returns].
+Verifier config: timeout_sec=900.0.
