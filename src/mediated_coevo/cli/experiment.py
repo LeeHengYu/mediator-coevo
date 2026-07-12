@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import secrets
@@ -48,6 +49,65 @@ class TaskSelection:
     def family(self) -> str:
         """Compact label for persisted metadata and old call sites."""
         return ",".join(self.families)
+
+
+def load_task_manifest_selection(
+    *,
+    repository: SkillFlowRepository,
+    manifest_path: Path,
+) -> TaskSelection:
+    """Load a frozen ordered task stream without resampling it."""
+    try:
+        with manifest_path.open("rb") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise typer.BadParameter(
+            f"invalid task manifest {manifest_path}: {exc}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise typer.BadParameter("task manifest must contain a JSON object")
+    if payload.get("schema_version") != 1:
+        raise typer.BadParameter("task manifest must declare schema_version = 1")
+
+    raw_task_ids = payload.get("task_ids")
+    if not isinstance(raw_task_ids, list) or not raw_task_ids:
+        raise typer.BadParameter("task manifest must contain a non-empty task_ids list")
+    if any(not isinstance(task_id, str) or not task_id for task_id in raw_task_ids):
+        raise typer.BadParameter("task manifest task_ids must be non-empty strings")
+    task_ids = list(raw_task_ids)
+
+    raw_split = payload.get("split")
+    if not isinstance(raw_split, str):
+        raise typer.BadParameter("task manifest must contain a split")
+    split = _normalize_split(raw_split)
+
+    raw_families = payload.get("families")
+    if not isinstance(raw_families, list) or not raw_families:
+        raise typer.BadParameter("task manifest must contain a non-empty families list")
+    if any(not isinstance(family, str) or not family for family in raw_families):
+        raise typer.BadParameter("task manifest families must be non-empty strings")
+    families = tuple(raw_families)
+
+    task_stream_seed = payload.get("task_stream_seed")
+    if type(task_stream_seed) is not int:
+        raise typer.BadParameter("task manifest task_stream_seed must be an integer")
+
+    manifest_families = set(families)
+    for task_id in task_ids:
+        task = repository.resolve(task_id)
+        if task.family not in manifest_families:
+            raise typer.BadParameter(
+                f"task manifest family mismatch for {task_id!r}: {task.family!r} "
+                "is not listed in families"
+            )
+
+    return TaskSelection(
+        task_ids=task_ids,
+        families=families,
+        split=split,
+        task_stream_seed=task_stream_seed,
+    )
 
 
 def setup_logging(verbose: bool = False) -> None:

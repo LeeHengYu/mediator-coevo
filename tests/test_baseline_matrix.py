@@ -1140,6 +1140,41 @@ def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
     assert captured["condition_name"] == "learned_mediator"
 
 
+def test_run_command_uses_task_manifest_without_resampling(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    _write_minimal_config(config_dir)
+    manifest = tmp_path / "stream.json"
+    manifest.write_text("{}\n")
+    captured: dict[str, object] = {}
+    selection = run_module.TaskSelection(
+        task_ids=["family-a/task-one", "family-a/task-one"],
+        families=("family-a",),
+        split="test",
+        task_stream_seed=123,
+    )
+
+    monkeypatch.setattr(run_module, "build_benchmark_repo", lambda *args: object())
+    monkeypatch.setattr(
+        run_module,
+        "load_task_manifest_selection",
+        lambda **kwargs: selection,
+    )
+    monkeypatch.setattr(
+        run_module,
+        "resolve_task_selection",
+        lambda **kwargs: pytest.fail("manifest runs must not resample tasks"),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "run_skillflow_experiment",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    run_module.run(task_manifest=manifest, config_dir=config_dir)
+
+    assert captured["selection"] is selection
+
+
 def test_run_command_forwards_repeated_families_and_split(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     _write_minimal_config(config_dir)

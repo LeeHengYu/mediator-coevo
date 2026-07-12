@@ -20,6 +20,7 @@ from mediated_coevo.benchmarks import (
 )
 from mediated_coevo.cli.experiment import (
     BOOTSTRAP_FAMILY_TASK_COUNT,
+    load_task_manifest_selection,
     resolve_task_selection,
 )
 from mediated_coevo.cli import skillflow as skillflow_cli
@@ -61,6 +62,43 @@ def test_family_selection_evenly_repeats_short_task_pool(
         "family-a/task-two": 4,
     }
     assert selection.task_stream_seed == 7
+
+
+def test_task_manifest_preserves_order_and_duplicates(tmp_path: Path) -> None:
+    root = tmp_path / "skillflow"
+    _write_task(root / "tasks" / "family-a" / "task-one", family="family-a")
+    _write_task(root / "tasks" / "family-b" / "task-two", family="family-b")
+    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    manifest = tmp_path / "stream.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "split": "test",
+                "families": ["family-a", "family-b"],
+                "task_stream_seed": 123,
+                "task_ids": [
+                    "family-b/task-two",
+                    "family-a/task-one",
+                    "family-b/task-two",
+                ],
+            }
+        )
+    )
+
+    selection = load_task_manifest_selection(
+        repository=repo,
+        manifest_path=manifest,
+    )
+
+    assert selection.task_ids == [
+        "family-b/task-two",
+        "family-a/task-one",
+        "family-b/task-two",
+    ]
+    assert selection.families == ("family-a", "family-b")
+    assert selection.split == "test"
+    assert selection.task_stream_seed == 123
 
 
 def test_family_selection_spreads_extra_slots_across_short_task_pool(
