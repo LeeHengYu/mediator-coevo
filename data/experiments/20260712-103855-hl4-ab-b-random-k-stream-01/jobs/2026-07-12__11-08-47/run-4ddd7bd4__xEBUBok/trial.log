@@ -1,0 +1,320 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following steps in order to produce `/root/ship_block_plan.xlsx` and `/root/ship_block_summary.txt`.
+
+## Step 1 – Inspect the input data
+
+```bash
+cat /root/ship_demand.csv
+```
+
+Confirm the CSV has two rows: the first row starts with `Week` followed by week numbers (5–53), and the second row starts with `Demand` followed by numeric values. Note the exact delimiter (comma) and any quoting.
+
+## Step 2 – Write and run the Python script
+
+Create `/root/solve.py` with the content below, then run it with `python3 /root/solve.py`.
+
+```python
+import csv
+import openpyxl
+
+# ── 1. Read demand ──────────────────────────────────────────────
+with open('"'"'/root/ship_demand.csv'"'"', newline='"'"''"'"') as f:
+    reader = csv.reader(f)
+    header_row = next(reader)   # ['"'"'Week'"'"', '"'"'5'"'"', '"'"'6'"'"', ...]
+    demand_row = next(reader)   # ['"'"'Demand'"'"', val5, val6, ...]
+
+weeks = [int(w) for w in header_row[1:]]
+demands = [float(d) for d in demand_row[1:]]
+demand_map = dict(zip(weeks, demands))
+
+# Verify we have weeks 5..53
+for w in range(5, 54):
+    assert w in demand_map, f"Missing week {w} in CSV"
+
+# ── 2. Simulate ─────────────────────────────────────────────────
+initial_condition = 1014.51  # Start of Week 5: Past Due + Scheduled Demand
+
+rows = []  # list of dicts per week
+first_5day = None
+first_4day = None
+
+for i, w in enumerate(range(5, 54)):
+    sched_demand = demand_map[w]
+
+    if i == 0:
+        # Week 5: initial condition = past_due + sched_demand = 1014.51
+        # So calc_start (prior week end-of-week backlog) = 1014.51 - sched_demand
+        calc_start = initial_condition - sched_demand
+        past_due_reported = max(0.0, calc_start)
+    else:
+        prev_eow = rows[-1]['"'"'eow_backlog'"'"']
+        calc_start = prev_eow
+        past_due_reported = max(0.0, prev_eow)
+
+    # Choose days worked
+    if past_due_reported > 0.01:
+        # Try 5, then 6; pick smallest that makes calc_start + demand - 28*d <= 0
+        chosen = None
+        for d in [5, 6]:
+            if calc_start + sched_demand - 28 * d <= 0:
+                chosen = d
+                break
+        if chosen is None:
+            chosen = 6
+        days_worked = chosen
+    else:
+        # No significant past due
+        if sched_demand <= 112:
+            days_worked = 4
+        else:
+            days_worked = 5
+
+    weekly_cap = 28 * days_worked
+    eow_backlog = calc_start + sched_demand - weekly_cap
+    overtime = 10 * max(0, days_worked - 4)
+
+    # Track first occurrences
+    if days_worked == 5 and first_5day is None:
+        first_5day = w
+    if days_worked == 4 and first_4day is None:
+        first_4day = w
+
+    rows.append({
+        '"'"'week'"'"': w,
+        '"'"'days_worked'"'"': days_worked,
+        '"'"'sched_demand'"'"': sched_demand,
+        '"'"'weekly_cap'"'"': weekly_cap,
+        '"'"'past_due'"'"': past_due_reported,
+        '"'"'eow_backlog'"'"': eow_backlog,
+        '"'"'overtime'"'"': overtime,
+    })
+
+# ── 3. Write Excel ──────────────────────────────────────────────
+wb = openpyxl.Workbook()
+ws = wb.active
+ws.title = '"'"'Plan'"'"'
+
+headers = [
+    '"'"'Week'"'"',
+    '"'"'Days Worked'"'"',
+    '"'"'Scheduled Demand (Std Hrs)'"'"',
+    '"'"'Weekly Capacity (Std Hrs)'"'"',
+    '"'"'Start of Week Past Due (Std Hrs)'"'"',
+    '"'"'End of Week Backlog/Buffer (Std Hrs)'"'"',
+    '"'"'Overtime Hours'"'"',
+]
+ws.append(headers)
+
+for r in rows:
+    ws.append([
+        r['"'"'week'"'"'],
+        r['"'"'days_worked'"'"'],
+        r['"'"'sched_demand'"'"'],
+        r['"'"'weekly_cap'"'"'],
+        r['"'"'past_due'"'"'],
+        r['"'"'eow_backlog'"'"'],
+        r['"'"'overtime'"'"'],
+    ])
+
+wb.save('"'"'/root/ship_block_plan.xlsx'"'"')
+print('"'"'Excel written with'"'"', len(rows), '"'"'data rows'"'"')
+
+# ── 4. Write summary ───────────────────────────────────────────
+first_5_str = str(first_5day) if first_5day is not None else '"'"'N/A'"'"'
+first_4_str = str(first_4day) if first_4day is not None else '"'"'N/A'"'"'
+
+# Build manager summary (<=60 words, <=3 sentences, mentions both step-down weeks)
+summary_parts = []
+if first_5day is not None and first_4day is not None:
+    summary_parts.append(
+        f"The crew begins at elevated capacity to clear the backlog, stepping down to 5-day weeks at Week {first_5day} "
+        f"and further to 4-day weeks at Week {first_4day} once demand normalizes."
+    )
+    summary_parts.append(
+        "This phased reduction balances overtime costs with on-time delivery targets."
+    )
+elif first_5day is not None:
+    summary_parts.append(
+        f"The crew works 6-day weeks initially, stepping down to 5-day weeks at Week {first_5day}; "
+        f"a 4-day step-down is N/A as demand stays above the threshold throughout."
+    )
+    summary_parts.append(
+        "Overtime tapers but does not fully eliminate within the planning horizon."
+    )
+else:
+    summary_parts.append(
+        f"The crew maintains maximum 6-day capacity for the entire horizon; "
+        f"first 5-day step-down is N/A and first 4-day step-down is N/A."
+    )
+    summary_parts.append(
+        "Persistent backlog prevents any reduction in work days."
+    )
+
+summary_text = '"'"' '"'"'.join(summary_parts)
+
+with open('"'"'/root/ship_block_summary.txt'"'"', '"'"'w'"'"') as f:
+    f.write(f'"'"'First_Week_5_Days: {first_5_str}\n'"'"')
+    f.write(f'"'"'First_Week_4_Days: {first_4_str}\n'"'"')
+    f.write(f'"'"'Summary: {summary_text}\n'"'"')
+
+print('"'"'Summary written'"'"')
+print(f'"'"'  First 5-day week: {first_5_str}'"'"')
+print(f'"'"'  First 4-day week: {first_4_str}'"'"')
+
+# Quick sanity checks
+assert len(rows) == 49, f"Expected 49 rows, got {len(rows)}"
+assert rows[0]['"'"'week'"'"'] == 5
+assert rows[-1]['"'"'week'"'"'] == 53
+print('"'"'All assertions passed'"'"')
+```
+
+## Step 3 – Validate outputs
+
+After running the script:
+
+1. Verify the Excel file exists and has the correct sheet name:
+```bash
+python3 -c "
+import openpyxl
+wb = openpyxl.load_workbook('"'"'/root/ship_block_plan.xlsx'"'"')
+ws = wb['"'"'Plan'"'"']
+print('"'"'Sheet name:'"'"', ws.title)
+print('"'"'Headers:'"'"', [c.value for c in ws[1]])
+print('"'"'Row count (excl header):'"'"', ws.max_row - 1)
+print('"'"'First data row:'"'"', [c.value for c in ws[2]])
+print('"'"'Last data row:'"'"', [c.value for c in ws[ws.max_row]])
+"
+```
+
+2. Verify the summary file:
+```bash
+cat /root/ship_block_summary.txt
+```
+
+Confirm:
+- Exactly 3 lines.
+- Line 1 starts with `First_Week_5_Days:`
+- Line 2 starts with `First_Week_4_Days:`
+- Line 3 starts with `Summary:` and is ≤60 words, ≤3 sentences, mentions both step-down week numbers (or N/A).
+
+3. Spot-check Week 5 arithmetic:
+   - `calc_start = 1014.51 - demand[5]`
+   - `past_due = max(0, calc_start)`
+   - Days chosen per policy
+   - `eow_backlog = calc_start + demand[5] - 28*days`
+
+If any validation fails, inspect the error, fix the script, and re-run.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[csv, xlsx, operations, capacity-planning, shipbuilding, backlog].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260712-103855-hl4-ab-b-random-k-stream-01/jobs/2026-07-12__11-08-47/run-4ddd7bd4__xEBUBok/agent/trajectory.json
