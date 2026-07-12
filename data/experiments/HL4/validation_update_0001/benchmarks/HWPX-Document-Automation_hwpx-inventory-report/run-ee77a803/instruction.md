@@ -1,0 +1,149 @@
+# Task Instruction
+
+Complete the inventory status report by replacing placeholders in a .hwpx template with values from a JSON file.
+
+## Steps
+
+### 1. Inspect the input files
+- Read `/root/inventory_data.json` to understand the available data keys and values.
+- The `.hwpx` format is a ZIP archive. List the contents of `/root/inventory_report_template.hwpx` using `unzip -l` or `python3 -c "import zipfile; z=zipfile.ZipFile('/root/inventory_report_template.hwpx'); print(z.namelist())"`.
+- Extract the archive to a temporary working directory, e.g., `/tmp/hwpx_work/`.
+- Identify the main content XML file(s) — typically `Contents/section0.xml` or similar. Read and print each XML file that could contain text content. Also check for any other XML files that might contain placeholder text.
+
+### 2. Understand the placeholder and layout-cache structure
+- Search all extracted XML files for `{{` to find every placeholder occurrence. Note: placeholders might be split across multiple XML text runs/spans within the same paragraph element. For example, `{{item}}` might appear as `{{` in one `<hp:t>` and `item}}` in another.
+- Also identify layout-cache elements. In HWPX XML, these are typically `<hp:linesegarray>` elements (or similar names like `<lineseg>`, `<lineSegArray>`) inside paragraph elements. These cache glyph positions and must be removed from any paragraph whose text content changes.
+
+### 3. Load JSON data and perform replacements
+- Write a Python script that:
+  a. Loads `inventory_data.json`.
+  b. For each XML file in the extracted hwpx package, reads the raw XML text.
+  c. First, normalizes split placeholders: Some `{{...}}` patterns may be split across adjacent XML text nodes within the same paragraph. The script must handle this. A robust approach: for each XML file, parse it, and for each paragraph element, concatenate all text node contents to check for `{{...}}` patterns. If a placeholder spans multiple text runs, merge those runs or reconstruct them so the placeholder is in a single text node, then replace.
+  d. Alternatively, if placeholders are NOT split (check first!), a simpler regex replacement on the raw XML string may work. Check by searching the raw XML for complete `{{key}}` patterns matching JSON keys. If all placeholders appear intact in the raw XML, use simple string replacement.
+  e. Replaces each `{{key}}` with the corresponding value from the JSON (convert numbers to strings as needed).
+  f. For any paragraph element (`<hp:p>` or similar) whose text was modified, removes all `<hp:linesegarray>...</hp:linesegarray>` child elements (or equivalent layout-cache elements). Use an XML parser (lxml or ElementTree) for this step to be safe, or use careful regex if the structure is simple.
+  g. Preserves all other content exactly: Korean labels, empty paragraphs, XML structure.
+  h. Writes the modified XML back.
+
+### 4. Repackage the .hwpx file
+- Rebuild the ZIP archive from the modified extracted directory. Use Python's `zipfile` module to create `/root/inventory_report_ready.hwpx`. Ensure all original files are included with their original directory structure and paths. Use `ZIP_DEFLATED` compression.
+- Important: if the original archive contains a `mimetype` file, it should typically be stored first and uncompressed (like in ODF). Check the original and replicate.
+
+### 5. Validate the output
+- Verify the output is a valid ZIP: `python3 -c "import zipfile; z=zipfile.ZipFile('/root/inventory_report_ready.hwpx'); print(z.namelist())"`
+- Extract the output and search all XML files for any remaining `{{` — there must be NONE.
+- Confirm Korean text labels are still present in the content XML.
+- Confirm empty paragraphs are preserved (compare paragraph count or structure).
+- Confirm no `<hp:linesegarray>` (or equivalent) elements remain in paragraphs that had text replacements.
+- Print a summary of all replacements made (key -> value) for verification.
+
+### Critical Notes
+- Do NOT use `shutil.make_archive` — use `zipfile.ZipFile` directly to preserve internal paths.
+- Handle nested JSON values if present (e.g., if JSON has nested objects, flatten with dot notation or handle per the placeholder naming convention observed).
+- If any placeholder key in the template does not have a matching JSON key, report it as an error.
+- The final file must be at exactly `/root/inventory_report_ready.hwpx`.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

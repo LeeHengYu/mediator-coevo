@@ -1,0 +1,202 @@
+# Task Instruction
+
+Complete the following task to update a HWPX renewal playbook document.
+
+## Objective
+Revise `renewal_playbook.hwpx` using `renewal_update.json` and `followups.csv`, saving the result to `/root/renewal_playbook_updated.hwpx`.
+
+## Step-by-step Plan
+
+### Step 1: Inspect the workspace
+```bash
+ls -la /root/
+cat /root/renewal_update.json
+cat /root/followups.csv
+```
+Understand the JSON fields and CSV structure before touching the HWPX.
+
+### Step 2: Unpack the HWPX archive
+```bash
+mkdir -p /root/hwpx_work
+cd /root/hwpx_work
+unzip /root/renewal_playbook.hwpx -d unpacked
+find unpacked -type f | head -50
+```
+HWPX is a ZIP-based format. Identify all XML content files (typically under `Contents/` with names like `section0.xml`).
+
+### Step 3: Inspect the XML content files
+Read each XML file under the `Contents/` directory to understand:
+- Where customer name, current owner, renewal window, pricing band, escalation contact, and pricing note appear.
+- Where the three follow-up lines are.
+- Where the appendix sentence `이 부록 문단은 그대로 유지해야 합니다.` is (must be preserved exactly).
+
+### Step 4: Write and run a Python script to perform all edits
+Create `/root/hwpx_work/update_hwpx.py` that does the following:
+
+#### 4a. Load data sources
+- Parse `renewal_update.json` to get the new field values.
+- Parse `followups.csv` to get follow-up items sorted by `sequence` column.
+
+#### 4b. Process each content XML file
+For each XML file in the Contents directory:
+
+1. **Parse the XML** using `lxml.etree` (or `xml.etree.ElementTree` if lxml unavailable). Use the raw bytes and preserve namespaces.
+
+2. **Handle XML text fragmentation**: HWPX stores paragraph text across multiple `<hp:t>` (or similar) child elements within a run. Before doing replacements, for each paragraph element, concatenate all text spans to get the full paragraph text. This is critical — a field value like a customer name may be split across multiple `<hp:t>` tags.
+
+3. **Field replacements**: For each paragraph, check if the concatenated text contains any OLD value from the JSON update (the JSON should have old→new mappings, or you'll need to find old values by inspecting the XML). Replace old values with new values. When a replacement is made in a fragmented paragraph, collapse the text into a single `<hp:t>` element (remove extra `<hp:t>` siblings) to avoid stale fragment boundaries.
+
+4. **Follow-up line replacement**: Identify the three existing follow-up lines. These likely follow a pattern (e.g., numbered items like `1차:`, `2차:`, `3차:` or similar sequential markers, or they may be identified by proximity to a heading about follow-ups). Replace them with the CSV items in `sequence` order. If there are 3 old lines and N new lines, replace line-for-line for the first min(3,N), remove extras if old>new, add new paragraphs if new>old. The safest approach: identify the follow-up paragraphs, replace their text content with the CSV items sorted by sequence.
+
+5. **Appendix preservation**: Verify that paragraphs containing `이 부록 문단은 그대로 유지해야 합니다.` are NOT modified.
+
+6. **Clean layout cache**: For every paragraph whose text was modified, remove `<hp:lineSegArray>` (or `<lineSegArray>`) child elements entirely. This prevents overlapping character rendering when the document is opened. Only remove from modified paragraphs.
+
+7. **Write back the XML** preserving the XML declaration and encoding.
+
+#### 4c. Repack the HWPX
+Use Python's `zipfile` module to repack the unpacked directory into `/root/renewal_playbook_updated.hwpx`. Important:
+- Use `ZIP_DEFLATED` compression.
+- Preserve the original directory structure and all files (mimetype, META-INF, Contents, etc.).
+- If there's a `mimetype` file, it should be the first entry and stored uncompressed (like ODF convention), though HWPX may not require this — check the original archive structure.
+
+```bash
+cd /root/hwpx_work
+python3 update_hwpx.py
+```
+
+### Step 5: Validate the output
+```bash
+# Verify it's a valid ZIP
+unzip -t /root/renewal_playbook_updated.hwpx
+
+# Spot-check content
+mkdir -p /root/hwpx_verify
+unzip /root/renewal_playbook_updated.hwpx -d /root/hwpx_verify
+# Check that new values appear and old values don't
+grep -r 'OLD_CUSTOMER_NAME' /root/hwpx_verify/Contents/ || echo 'Old customer name correctly removed'
+# Check appendix preserved
+grep -r '이 부록 문단은 그대로 유지해야 합니다' /root/hwpx_verify/Contents/ && echo 'Appendix preserved'
+# Check follow-up lines from CSV are present
+# Check no lineSegArray in modified paragraphs
+```
+Replace `OLD_CUSTOMER_NAME` with the actual old value found during inspection.
+
+### Step 6: Run the verifier
+```bash
+cd /root && python -m pytest test_output.py -v
+```
+If tests fail, read the error output carefully, identify which assertion failed, fix the issue, and re-run.
+
+## Key Pitfalls to Avoid
+- **XML text fragmentation**: HWPX splits text across multiple inline elements. Always concatenate before matching, then consolidate after replacement.
+- **Namespace handling**: HWPX XML uses namespaces (e.g., `hp:`, `hc:`). Use namespace-aware parsing or handle the namespace prefixes in XPath/find operations.
+- **Stale layout cache**: Remove `lineSegArray` from ANY paragraph you modify. Missing this causes the verifier to fail.
+- **Duplicate values**: Remove old values entirely; don't leave them alongside new values.
+- **Follow-up ordering**: Sort CSV by `sequence` column before inserting.
+- **Encoding**: Preserve UTF-8 encoding throughout, especially for Korean text.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

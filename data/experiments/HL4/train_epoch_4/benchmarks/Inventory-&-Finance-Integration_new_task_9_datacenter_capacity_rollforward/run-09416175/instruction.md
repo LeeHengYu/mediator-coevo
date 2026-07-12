@@ -1,0 +1,204 @@
+# Task Instruction
+
+## Task: Build Nimbus Capacity Reconciliation Workbook
+
+You are building an Excel workbook at `/root/Nimbus_Capacity_Reconciliation_4-25.xlsx`.
+
+### Step 0: Inspect all input files
+
+Before writing any code, read and understand every input file:
+
+```
+cat /root/compute_capacity_schedule_input.csv
+cat /root/storage_capacity_schedule_input.csv
+cat /root/capacity_ledger_balances.json
+cat /root/Nimbus_Compute_Reservation_Register_Q1Q2_2025.txt
+cat /root/Nimbus_Storage_Commitment_Register_Q1Q2_2025.txt
+cat /root/nimbus_platform_ledger_notes_apr25.txt
+```
+
+Study the CSV column structure carefully — identify what columns exist, what the rows represent (line items), and what column O (the 15th column, index 14) likely represents (probably a total or ending balance).
+
+### Step 1: Understand the required workbook structure
+
+The workbook must have exactly 3 sheets in this order:
+1. `Capacity Summary`
+2. `Compute Pool #8100`
+3. `Storage Pool #8200`
+
+**Detail sheets (`Compute Pool #8100` and `Storage Pool #8200`):**
+- Line items start at row 6 (row 5 and above are headers).
+- After line items, there are control rows in this order:
+  - `Month Totals` — sums of the line-item rows above for each month column
+  - `Ending Balance` — computed from beginning balance + month totals (or as indicated by the data)
+  - `Variance` — difference between Ending Balance and GL Balance
+  - `GL Balance` — from the ledger balances JSON
+- Column A contains labels; columns B through O (or similar) contain monthly data and a total/ending column.
+
+**Summary sheet (`Capacity Summary`):**
+- This sheet summarizes the two detail sheets.
+- Cell references (using the pattern from the reference task):
+  - B7 = `'Compute Pool #8100'!O__` (the Ending Balance cell in column O of the compute detail sheet)
+  - B8 = `'Compute Pool #8100'!O__` (the Variance cell in column O)
+  - B9 = `'Compute Pool #8100'!O__` (the GL Balance cell in column O)
+  - B12 = `'Storage Pool #8200'!O__` (Ending Balance)
+  - B13 = `'Storage Pool #8200'!O__` (Variance)
+  - B14 = `'Storage Pool #8200'!O__` (GL Balance)
+  - B16 = `=B9+B14` (combined GL Balance)
+- Determine the exact row numbers for Ending Balance, Variance, and GL Balance on each detail sheet, then reference column O of those rows.
+
+### Step 2: Write a Python script using openpyxl
+
+Use `openpyxl` to create the workbook. Key requirements:
+
+1. **Numeric values must be numeric** — use `int` or `float` (rounded to 2 decimal places to avoid floating point noise). Do NOT store numbers as strings.
+2. **Do not modify source files.**
+3. **Round all computed values** to 2 decimal places before writing to cells, to avoid floating-point precision issues.
+4. **Column O** is the 15th column (column index 15 in openpyxl, which is 1-indexed). Verify this by checking the CSV structure.
+5. **Use Excel formulas** for:
+   - `Month Totals` rows (SUM of line item cells above in each column)
+   - `Ending Balance` (Beginning Balance + Month Totals, or as appropriate)
+   - `Variance` (Ending Balance - GL Balance)
+   - Summary sheet cross-references (B7, B8, B9, B12, B13, B14 referencing column O of detail sheets)
+   - B16 = `=B9+B14`
+6. **Row layout on detail sheets:**
+   - Rows 1-5: headers (title, column headers, etc.)
+   - Row 6+: line items from CSV
+   - After last line item: Month Totals, Ending Balance, Variance, GL Balance (as control rows)
+
+### Step 3: Parse the CSV files carefully
+
+- Read each CSV and identify the header row and data rows.
+- Map columns to the spreadsheet columns starting from column A.
+- The first column is likely a description/label; remaining columns are monthly values.
+- Ensure column O alignment — count columns in the CSV to confirm which is the 15th.
+
+### Step 4: Parse the JSON ledger balances
+
+- Read `/root/capacity_ledger_balances.json` to get GL Balance values for each pool.
+- These go into the `GL Balance` control row on each detail sheet.
+
+### Step 5: Build and validate
+
+After creating the workbook:
+1. Re-open it with openpyxl and verify:
+   - Exactly 3 sheets in the correct order
+   - Sheet names are exact: `Capacity Summary`, `Compute Pool #8100`, `Storage Pool #8200`
+   - Line items start at row 6
+   - Control rows exist with correct labels
+   - B16 on summary sheet contains formula `=B9+B14`
+   - B7, B8, B9, B12, B13, B14 contain cross-sheet references to column O
+   - All numeric cells contain numbers, not strings
+2. Print a summary of what was written for verification.
+
+### Important Notes
+- Study the input files thoroughly before coding. The CSV structure dictates the column layout.
+- The reference task mentions a "Harbor reconciliation" pattern — follow the structural rules described above even if you haven't seen that specific task.
+- If the JSON contains beginning balances, use them appropriately (likely in a Beginning Balance row or in the Ending Balance calculation).
+- Use `round(value, 2)` on all computed floats before writing to cells.
+- The file must be saved as `/root/Nimbus_Capacity_Reconciliation_4-25.xlsx` exactly.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Task-local resources are available under `environment/skills`: monthly-close.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=noreply@example.com, author_name=Codex Task Generator, category=cloud-finops, difficulty=medium, tags=[excel, capacity, reconciliation, rollforward, cloud-ops].
+Verifier config: timeout_sec=900.0.

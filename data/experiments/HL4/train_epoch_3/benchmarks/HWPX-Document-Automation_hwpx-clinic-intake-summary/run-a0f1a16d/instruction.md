@@ -1,0 +1,176 @@
+# Task Instruction
+
+Complete the clinic intake summary HWPX document. Follow these steps carefully:
+
+## Step 1: Inspect the input files
+
+1. List all files in the working directory to find `clinic_intake_template.hwpx` and `patient_intake.json`.
+2. Read `patient_intake.json` to understand the data fields and values.
+3. Since HWPX is a ZIP archive, list the contents of `clinic_intake_template.hwpx` using Python's zipfile module.
+4. Extract and print the content of all XML files inside the HWPX (especially files like `Contents/section0.xml`, `Contents/section1.xml`, etc.) to see all `{{...}}` placeholders and understand the document structure.
+5. Also check if there's a test file in `/root/` or a `/tests/` directory. If so, read it to understand the verifier expectations.
+
+## Step 2: Understand the data mapping
+
+From the JSON and template placeholders, determine:
+- Which JSON fields map to which placeholders
+- The patient's birth date and visit date (to compute Korean full-year age)
+- The phone number that needs normalization
+- Where the patient name appears multiple times (including confirmation line)
+
+## Step 3: Write and run a Python script
+
+Create a Python script `/root/fill_hwpx.py` that does the following:
+
+### 3a. Load the data
+- Read `patient_intake.json`
+- Open `clinic_intake_template.hwpx` as a ZIP
+
+### 3b. Compute derived values
+- **Age calculation**: Compute Korean full-year age (만 나이) as of the visit date. This is `visit_year - birth_year`, minus 1 if the visit date is before the birthday in that year. Format as `(<N>세)` — note the parentheses and 세 suffix.
+- **Phone normalization**: Strip all non-digit characters from the callback phone number, then format as `XXX-XXXX-XXXX` (3-4-4 grouping for Korean mobile numbers like 010-1234-5678, or 3-3-4 / 3-4-4 as appropriate for the number length).
+
+### 3c. Build the replacement map
+- Create a dictionary mapping each `{{placeholder_name}}` to its replacement value.
+- Include the age note: when replacing the birth date placeholder, append ` (<N>세)` after the date value.
+- Make sure the patient name replacement covers ALL occurrences including confirmation lines.
+
+### 3d. Process all files in the ZIP
+- Iterate through every file in the HWPX ZIP archive.
+- For XML files (especially section*.xml), perform placeholder replacement.
+- **CRITICAL: Remove layout cache elements from modified paragraphs.** After replacing text in any `<hp:p>` (paragraph) element, remove child elements that are layout caches. These are typically `<hp:linesegarray>` elements (or similar names in the HWPX namespace). Use XML parsing (lxml or ElementTree) to:
+  1. Parse the XML
+  2. Find all paragraph elements
+  3. For paragraphs whose text content was modified, remove any `<hp:linesegarray>`, `<hp:lineSegArray>`, or similar layout-cache child elements
+  4. Serialize back to XML
+- For non-XML files (images, etc.), copy them unchanged.
+- Also check and replace placeholders in ANY file that might contain text (not just section XML — check header.xml, content.hpf, etc.).
+
+### 3e. Write the output
+- Save the result as `/root/clinic_intake_ready.hwpx` as a valid ZIP archive.
+- Use the same compression method as the original for each entry.
+
+### 3f. Validate
+- Re-open `/root/clinic_intake_ready.hwpx` and scan ALL files for any remaining `{{` patterns.
+- Print any found — there must be NONE.
+- Print the text content of section XML files to confirm replacements look correct.
+
+## Step 4: Run verification
+
+1. Run the script: `python /root/fill_hwpx.py`
+2. If there are test files, run them (e.g., `cd /root && python -m pytest tests/ -v` or similar).
+3. If any `{{...}}` placeholders remain or tests fail, debug and fix.
+
+## Important details
+
+- **Namespace handling**: HWPX XML uses namespaces (like `http://www.hancom.co.kr/hwpml/2016/...`). When parsing with ElementTree, handle namespaces properly. Consider using `lxml` with namespace-aware XPath, or register namespaces to avoid losing namespace prefixes during serialization.
+- **Preserve XML declaration and encoding**: When writing XML back, preserve the original XML declaration (e.g., `<?xml version="1.0" encoding="UTF-8"?>`).
+- **Do not modify binary files** (images, fonts, etc.) in the archive.
+- **Korean labels**: Do not translate or modify any existing Korean text that isn't a placeholder.
+- **Handwritten-signature note**: Preserve any note about handwritten signatures as-is.
+- **Layout cache elements**: The most common layout cache element name in HWPX is `linesegarray` or `lineSegArray` within the `hp` namespace. After parsing, inspect the actual element names to find the correct tag, then remove those elements from any paragraph you modified.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

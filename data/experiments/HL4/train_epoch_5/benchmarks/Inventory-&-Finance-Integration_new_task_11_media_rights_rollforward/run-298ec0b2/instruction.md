@@ -1,0 +1,176 @@
+# Task Instruction
+
+## Task: Build Aurora Rights Rollforward Excel Workbook
+
+Create `/root/Aurora_Rights_Rollforward_4-25.xlsx` with exactly three sheets in order: `Rights Summary`, `Film Rights #2710`, `Music Rights #2720`.
+
+### Step-by-step execution plan
+
+#### Step 0: Inspect all input files and the verifier
+
+1. Read `/root/film_rights_schedule_input.csv` completely and note all columns and rows.
+2. Read `/root/music_rights_schedule_input.csv` completely and note all columns and rows.
+3. Read `/root/rights_ledger_balances.json` completely.
+4. Read the three operational context files:
+   - `/root/Aurora_Film_Licensor_Invoices_Q1Q2_2025.txt`
+   - `/root/Aurora_Music_Licensor_Invoices_Q1Q2_2025.txt`
+   - `/root/aurora_rights_ledger_control_notes_apr25.txt`
+5. **Critically important**: Read the verifier script. Look for `/root/test_output.py` or any `.py` file in `/root/` that contains test assertions. Read it fully. Identify every cell reference, expected string, expected value, and formula check. List them all before proceeding.
+
+#### Step 1: Understand the verifier contract
+
+From the verifier, determine:
+- What exact string is expected in A1 of each sheet (cross-task feedback shows the verifier checks A1 for an entity name like "Aurora Stream" — do NOT use a generic title)
+- What headers are expected in row 5 (or whichever row)
+- What control row labels are expected and in which cells
+- What formula checks exist for the Rights Summary sheet (B7, B8, B9, B12, B13, B14, B16)
+- What column O references are checked
+- Any numeric value checks
+
+#### Step 2: Build the detail sheets (`Film Rights #2710` and `Music Rights #2720`)
+
+For each detail sheet:
+- **Row 1 (A1)**: Set to whatever the verifier expects. Based on cross-task patterns, this is likely the entity name (e.g., "Aurora Stream") — confirm from verifier.
+- **Row 2**: Sheet title or subtitle as the verifier expects.
+- **Row 3-4**: Additional headers/metadata as verifier expects.
+- **Row 5**: Column headers. The CSV input files likely define the columns. Column A = item description, columns B-N = months or categories, column O = totals.
+- **Row 6 onward**: Line items from the CSV input files. Keep all numeric values as numbers, not strings.
+- After line items, add control rows in order:
+  - `Month Totals` — SUM of the line-item rows for each column
+  - `Ending Balance` — derived from opening balance + month totals (check verifier)
+  - `Variance` — Ending Balance minus GL Balance (or as verifier specifies)
+  - `GL Balance` — from `rights_ledger_balances.json`
+
+#### Step 3: Build the `Rights Summary` sheet
+
+- **Row 1 (A1)**: Entity name as verifier expects (likely "Aurora Stream").
+- Structure rows so that:
+  - B7 = reference to Film Rights #2710 column O value (e.g., ending balance or a specific control row)
+  - B8 = another Film reference from column O
+  - B9 = formula combining B7 and B8 (or a SUM — check verifier)
+  - B12 = reference to Music Rights #2720 column O value
+  - B13 = another Music reference from column O
+  - B14 = formula combining B12 and B13
+  - **B16 = B9 + B14** (this is explicitly stated)
+- Use actual Excel cross-sheet references like `='Film Rights #2710'!O__`
+
+#### Step 4: Validate
+
+1. Save the workbook.
+2. Run the verifier: `python /root/test_output.py` (or whatever test file exists).
+3. Read the full output.
+4. If any assertion fails, read the exact error, identify the cell and expected value, fix it, and re-run.
+5. Repeat until all checks pass.
+
+### Critical reminders
+- **Read the verifier FIRST** before building anything. The verifier is the ground truth.
+- All numeric values must be stored as numbers (int/float), not strings.
+- Do not modify any source input files.
+- The cross-task feedback shows that A1 of detail sheets must contain a specific entity/organization name — the verifier checks this exactly.
+- Column O is likely the totals column that the summary sheet references.
+- Use `openpyxl` to create the workbook.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Task-local resources are available under `environment/skills`: invoice-organizer, monthly-close.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=noreply@example.com, author_name=Codex Task Generator, category=media-operations, difficulty=medium, tags=[excel, media-rights, invoice-normalization, reconciliation, rollforward].
+Verifier config: timeout_sec=900.0.

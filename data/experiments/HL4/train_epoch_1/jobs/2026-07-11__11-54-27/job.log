@@ -1,0 +1,222 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+You must update the HWPX supplier contact sheet template using values from a JSON file and save the result. Follow these steps precisely:
+
+## Step 1 – Understand the HWPX format
+A `.hwpx` file is a ZIP archive (ODF-like Korean word-processor format). Inside it, the main document content is typically in `Contents/section0.xml` (or similar XML files under `Contents/`). Placeholders like `{{COMPANY_NAME}}` will appear in the XML text nodes.
+
+## Step 2 – Inspect the workspace
+```bash
+ls -la /root/
+cat /root/supplier_contact.json
+```
+Examine the JSON to understand all key-value pairs that will replace placeholders.
+
+## Step 3 – Inspect the HWPX package structure
+```bash
+cd /root
+mkdir -p /tmp/hwpx_work
+cp supplier_contact_template.hwpx /tmp/hwpx_work/template.zip
+cd /tmp/hwpx_work
+unzip -l template.zip
+```
+List all files in the archive to understand the structure.
+
+## Step 4 – Extract the archive
+```bash
+mkdir -p extracted
+cd extracted
+unzip ../template.zip
+find . -type f -name '"'"'*.xml'"'"' | sort
+```
+
+## Step 5 – Search for all placeholders
+Search every XML file for `{{` to find all placeholders:
+```bash
+grep -rn '"'"'{{'"'"' .
+```
+Also check if placeholders might be split across multiple XML elements (e.g., `{{` in one text run and `}}` in another). If so, you must handle cross-element placeholders.
+```bash
+# Show full context around placeholder patterns
+grep -rn '"'"'{{\|}}'"'"' . --include='"'"'*.xml'"'"'
+```
+
+## Step 6 – Write a Python script to do the replacement
+Create `/tmp/hwpx_work/fix_hwpx.py` that:
+1. Reads `/root/supplier_contact.json` to get all key-value pairs.
+2. For each XML file in the extracted directory, reads the raw XML text.
+3. **Critical**: Before simple text replacement, check if any `{{...}}` placeholder is split across multiple XML elements/tags. If a placeholder like `{{FIELD}}` is broken into separate text runs (e.g., `<hp:t>{{FIE</hp:t><hp:t>LD}}</hp:t>`), you must:
+   - Parse the XML properly
+   - For each paragraph element, concatenate all child text-run contents
+   - Check if the concatenated text contains a `{{...}}` pattern
+   - If yes, consolidate those text runs into a single run with the replaced value
+4. For each `{{KEY}}` found, replace it with the corresponding value from the JSON.
+5. **Layout cache cleanup**: After modifying any paragraph'"'"'s text content, remove any child elements that represent layout caches. Look for elements with local names like `linesegarray`, `lineSegArray`, `LineSeg`, `lineseg`, or any element in namespaces related to layout/cache. These stale layout-cache elements cause overlapping characters when opening the document. Specifically look for elements whose tag contains `linesegarray` or `LineSeg` (case-insensitive) and remove them from their parent.
+6. Verify that NO `{{...}}` patterns remain anywhere in any XML file.
+7. Write the modified XML files back.
+
+## Step 7 – Repackage as HWPX
+After all replacements are done:
+```bash
+cd /tmp/hwpx_work/extracted
+zip -r /root/supplier_contact_ready.hwpx . -x '"'"'*.DS_Store'"'"'
+```
+Use stored compression for `mimetype` if it exists (as first entry, uncompressed), and deflate for everything else – follow the original archive'"'"'s compression pattern.
+
+Actually, to be safe, write a Python script that repackages properly:
+```python
+import zipfile, os
+
+src = '"'"'/tmp/hwpx_work/extracted'"'"'
+dst = '"'"'/root/supplier_contact_ready.hwpx'"'"'
+
+with zipfile.ZipFile(dst, '"'"'w'"'"', zipfile.ZIP_DEFLATED) as zf:
+    # If mimetype exists, add it first with ZIP_STORED
+    mt = os.path.join(src, '"'"'mimetype'"'"')
+    if os.path.isfile(mt):
+        zf.write(mt, '"'"'mimetype'"'"', compress_type=zipfile.ZIP_STORED)
+    for root, dirs, files in os.walk(src):
+        for f in files:
+            full = os.path.join(root, f)
+            arcname = os.path.relpath(full, src)
+            if arcname == '"'"'mimetype'"'"':
+                continue
+            zf.write(full, arcname, compress_type=zipfile.ZIP_DEFLATED)
+```
+
+## Step 8 – Final verification
+```bash
+# Verify it'"'"'s a valid zip
+unzip -t /root/supplier_contact_ready.hwpx
+
+# Verify no placeholders remain
+mkdir -p /tmp/verify
+cd /tmp/verify
+unzip -o /root/supplier_contact_ready.hwpx
+grep -rn '"'"'{{'"'"' . --include='"'"'*.xml'"'"'
+# This should produce NO output
+
+# Verify Korean labels are preserved (spot check)
+grep -c '"'"'회사'"'"' . -r --include='"'"'*.xml'"'"' || true
+```
+
+## Key Warnings
+- **Do NOT strip or modify Korean label text** – only replace `{{...}}` placeholders with JSON values.
+- **Do NOT modify the static note line** (any line that doesn'"'"'t contain placeholders should remain untouched).
+- **Handle split placeholders**: This is the most common failure mode. A placeholder `{{FIELD}}` may be split across multiple XML text runs due to the word processor'"'"'s internal formatting. You MUST detect and handle this.
+- **Remove layout cache elements** from any modified paragraph to prevent overlapping characters.
+- **Ensure the output file exists at exactly `/root/supplier_contact_ready.hwpx`**.
+- After all edits, re-read the XML files to confirm zero remaining `{{` patterns before repackaging.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260711-113826-hl4-train-langchain-graph-batch1/jobs/2026-07-11__11-54-27/run-587c50a1__42CnGjX/agent/trajectory.json

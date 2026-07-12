@@ -1,0 +1,262 @@
+# Task Instruction
+
+Execute the following steps in order to fill in the training feedback HWPX template and produce `/root/training_feedback_ready.hwpx`.
+
+## Background
+A `.hwpx` file is a ZIP-based package (like OOXML). Inside it, the document content lives in XML files (typically under `Contents/` with names like `section0.xml`). Placeholders like `{{교육명}}` appear as text runs inside those XML files. You need to unzip, find all XML files containing `{{...}}`, replace them with values from the JSON, rezip, and save.
+
+## Steps
+
+### 1. Inspect the workspace
+```bash
+ls /root/
+ls /root/HWPX-Document-Automation/hwpx-training-feedback/
+```
+Identify the template file (`training_feedback_template.hwpx`) and the data file (`training_feedback.json`).
+
+### 2. Read the JSON data
+```bash
+cat /root/HWPX-Document-Automation/hwpx-training-feedback/training_feedback.json
+```
+Note every key-value pair. You will need these for substitution.
+
+### 3. Explore the HWPX structure
+```bash
+cd /root/HWPX-Document-Automation/hwpx-training-feedback/
+python3 -c "
+import zipfile, sys
+with zipfile.ZipFile('training_feedback_template.hwpx', 'r') as z:
+    for info in z.infolist():
+        print(info.filename, info.file_size)
+"
+```
+
+### 4. Find all files containing placeholders
+```bash
+python3 -c "
+import zipfile, re
+with zipfile.ZipFile('training_feedback_template.hwpx', 'r') as z:
+    for name in z.namelist():
+        try:
+            data = z.read(name).decode('utf-8')
+        except:
+            continue
+        matches = re.findall(r'\{\{.*?\}\}', data)
+        if matches:
+            print(f'{name}: {matches}')
+"
+```
+This tells you exactly which XML files need editing and what placeholders exist.
+
+### 5. Dump the XML content of each file with placeholders
+For every file identified in step 4, print its full content so you can see the XML structure, including any layout-cache or character-position elements near the placeholder text runs.
+
+### 6. Write the Python transformation script
+Write a single Python script `/root/fill_template.py` that does the following:
+
+```python
+import zipfile, json, re, os, shutil, copy
+from lxml import etree  # prefer lxml; fall back to xml.etree if needed
+
+# Paths
+TEMPLATE = '/root/HWPX-Document-Automation/hwpx-training-feedback/training_feedback_template.hwpx'
+JSON_FILE = '/root/HWPX-Document-Automation/hwpx-training-feedback/training_feedback.json'
+OUTPUT = '/root/training_feedback_ready.hwpx'
+
+# Load JSON
+with open(JSON_FILE, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+# Build substitution map from JSON keys to final display values
+# Apply the required transformations:
+# - 참석자수: convert to digits only (e.g., "25명" -> "25", or if already int, str(val))
+# - 만족도: rewrite as "X.X점 (5.0점 만점)" using the numeric score from JSON
+# - 종합의견 (or whatever key maps to the overall opinion): append ' 후속 심화반 검토 요망.' after the value
+# All other values: use as-is from JSON
+
+# Then for each file in the zip:
+# 1. Read the file bytes
+# 2. If it's an XML file containing {{...}} placeholders:
+#    a. Parse as XML with lxml (preserve namespaces)
+#    b. Walk all text elements; for each text node, replace {{key}} with the mapped value
+#    c. IMPORTANT: After modifying a paragraph's text, remove any layout-cache / 
+#       char-position-list / char-shape-list child elements from that paragraph
+#       to prevent stale layout overlaps. Look for elements with local names like
+#       'linesegarray', 'lineSegArray', 'CharPrIDArray', or similar layout hints.
+#       Print what you find and remove conservatively.
+#    d. Serialize back to bytes
+# 3. Write all files to the new zip, preserving compression type
+```
+
+CRITICAL DETAILS:
+- Placeholders may be split across multiple XML text runs (e.g., `{{`, `교육명`, `}}`). Before doing simple text replacement, first concatenate all text runs within each paragraph-level element, do the replacement on the concatenated string, then redistribute. OR, do a simpler approach: work on the raw XML string (decoded UTF-8) with regex replacement, which avoids the split-run problem. If you use raw string replacement, still parse the result afterward to strip layout caches.
+- For layout-cache removal: after replacement, parse the XML tree. For any paragraph element that contains modified text, look for child elements whose tag local name includes keywords like `lineseg`, `LineSeg`, `charPr`, `CharPr`, or similar caching hints. Remove those elements. Print what you removed for verification.
+- Preserve the exact ZIP structure. Use `zipfile.ZipFile` to read and write. Copy non-modified entries byte-for-byte.
+
+### 7. Run the script
+```bash
+python3 /root/fill_template.py
+```
+
+### 8. Validate the output
+```bash
+# Check it's a valid zip
+python3 -c "
+import zipfile
+with zipfile.ZipFile('/root/training_feedback_ready.hwpx', 'r') as z:
+    print('Valid ZIP, entries:', len(z.namelist()))
+    # Check no remaining placeholders
+    import re
+    for name in z.namelist():
+        try:
+            data = z.read(name).decode('utf-8')
+        except:
+            continue
+        matches = re.findall(r'\{\{.*?\}\}', data)
+        if matches:
+            print(f'ERROR: remaining placeholders in {name}: {matches}')
+    print('Placeholder check complete')
+"
+```
+
+```bash
+# Verify key transformed values appear in the output
+python3 -c "
+import zipfile
+with zipfile.ZipFile('/root/training_feedback_ready.hwpx', 'r') as z:
+    for name in z.namelist():
+        try:
+            data = z.read(name).decode('utf-8')
+        except:
+            continue
+        # Check for digits-only 참석자수 (no '명' suffix)
+        # Check for '점 (5.0점 만점)' pattern
+        # Check for '후속 심화반 검토 요망.' 
+        if '만점' in data or '심화반' in data:
+            print(f'{name} contains expected transformed values')
+            # Print relevant snippets
+            import re
+            for m in re.finditer(r'.{0,40}(만점|심화반).{0,40}', data):
+                print(f'  ...{m.group()}...')
+"
+```
+
+### 9. Confirm output file exists at the correct path
+```bash
+ls -la /root/training_feedback_ready.hwpx
+```
+
+## Key Reminders
+- The output MUST be at `/root/training_feedback_ready.hwpx` (not inside the task subfolder).
+- No `{{...}}` placeholders may remain anywhere in any file inside the HWPX package.
+- Korean labels and static note lines must be preserved exactly.
+- The 참석자수 value must be digits only (strip any non-digit characters like '명').
+- 만족도 must follow the exact format: `X.X점 (5.0점 만점)` where X.X is from the JSON.
+- The overall opinion must end with the original comment followed by ` 후속 심화반 검토 요망.`
+- Remove stale layout-cache elements from any modified paragraph to ensure clean rendering.
+- Inspect before you code. Adapt to whatever XML structure and placeholder names you actually find in the template.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

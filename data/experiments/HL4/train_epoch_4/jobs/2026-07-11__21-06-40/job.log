@@ -1,0 +1,282 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following steps precisely to produce the two deliverables.
+
+## Step 0 – Read the demand data
+
+```python
+import openpyxl
+import math
+
+# Read demand from hvac_demand_sheet.xlsx, sheet "Install"
+wb_demand = openpyxl.load_workbook('"'"'/root/hvac_demand_sheet.xlsx'"'"', data_only=True)
+ws_demand = wb_demand['"'"'Install'"'"']
+
+# Scan the sheet to find the row whose first non-empty cell contains
+# "HVAC Ductwork Demand" (case-insensitive, partial match).
+# Then read the phase numbers from the header row (usually row 1 or row above).
+# Print all rows and columns so we can understand the layout.
+for row in ws_demand.iter_rows(min_row=1, max_row=ws_demand.max_row,
+                               max_col=ws_demand.max_column, values_only=False):
+    vals = [(c.coordinate, c.value) for c in row if c.value is not None]
+    if vals:
+        print(vals)
+```
+
+Run this first, inspect the output, and identify:
+- Which row has phase numbers (8..56).
+- Which row has the demand values labeled "HVAC Ductwork Demand (Std Hrs)".
+
+Also inspect `/root/hvac_existing_plan.xlsx` sheet `Plan` to see its header and data rows.
+
+## Step 1 – Build the schedule with the deterministic policy
+
+After inspecting the data, write a single Python script that:
+
+1. Reads the demand row from `hvac_demand_sheet.xlsx` sheet `Install`, mapping each phase (8–56) to its `Scheduled Demand (Std Hrs)` value (float).
+
+2. Implements the phase-by-phase algorithm:
+
+```
+phases = list(range(8, 57))  # 8 through 56 inclusive, 49 phases
+results = []
+
+# Initial condition: Phase 8'"'"'s Calc Start + Scheduled Demand = 1138.66
+# So Calc Start for Phase 8 = 1138.66 - demand[8]
+# And Start of Phase Past Due for Phase 8 = max(0, Calc Start)
+
+first_phase = True
+prev_end_backlog = None
+
+for phase in phases:
+    demand = demand_map[phase]  # from the spreadsheet
+    
+    if first_phase:
+        calc_start = 1138.66 - demand
+        first_phase = False
+    else:
+        calc_start = prev_end_backlog
+    
+    start_past_due = max(0.0, calc_start)
+    
+    # Choose Days Worked
+    if start_past_due > 0.01:
+        # Try 5 first, then 6
+        if calc_start + demand - (35 * 5) <= 0:
+            days_worked = 5
+        elif calc_start + demand - (35 * 6) <= 0:
+            days_worked = 6
+        else:
+            days_worked = 6
+    else:
+        # No past due
+        if demand <= 140:
+            days_worked = 4
+        else:
+            days_worked = 5
+    
+    weekly_capacity = 35 * days_worked
+    end_backlog = calc_start + demand - weekly_capacity
+    overtime = 10 * max(0, days_worked - 4)
+    
+    results.append({
+        '"'"'Phase'"'"': phase,
+        '"'"'Days Worked'"'"': days_worked,
+        '"'"'Scheduled Demand (Std Hrs)'"'"': round(demand, 2),
+        '"'"'Weekly Capacity (Std Hrs)'"'"': weekly_capacity,
+        '"'"'Start of Phase Past Due (Std Hrs)'"'"': round(start_past_due, 2),
+        '"'"'End of Phase Backlog/Buffer (Std Hrs)'"'"': round(end_backlog, 2),
+        '"'"'Overtime Hours'"'"': overtime,
+    })
+    
+    prev_end_backlog = end_backlog
+```
+
+**Critical**: `calc_start` for Phase 8 is derived from the initial condition: `calc_start = 1138.66 - demand[8]`. This ensures `Start of Phase Past Due + Scheduled Demand = max(0, calc_start) + demand` which equals `1138.66` when `calc_start >= 0` (which it should be since demand alone is unlikely to exceed 1138.66). Verify this after computation.
+
+3. Print the first 5 and last 5 rows of results for verification.
+
+4. Determine `First_Week_5_Days` and `First_Week_4_Days`:
+   - `First_Week_5_Days`: the phase number of the first phase where `Days Worked == 5` (not 6), or `N/A`.
+   - `First_Week_4_Days`: the phase number of the first phase where `Days Worked == 4`, or `N/A`.
+
+## Step 2 – Write the Excel files
+
+Using openpyxl:
+
+```python
+headers = [
+    '"'"'Phase'"'"',
+    '"'"'Days Worked'"'"',
+    '"'"'Scheduled Demand (Std Hrs)'"'"',
+    '"'"'Weekly Capacity (Std Hrs)'"'"',
+    '"'"'Start of Phase Past Due (Std Hrs)'"'"',
+    '"'"'End of Phase Backlog/Buffer (Std Hrs)'"'"',
+    '"'"'Overtime Hours'"'"',
+]
+
+# Write /root/hvac_existing_plan.xlsx (overwrite)
+wb_plan = openpyxl.Workbook()
+ws_plan = wb_plan.active
+ws_plan.title = '"'"'Plan'"'"'
+ws_plan.append(headers)
+for r in results:
+    ws_plan.append([r[h] for h in headers])
+wb_plan.save('"'"'/root/hvac_existing_plan.xlsx'"'"')
+
+# Write /root/hvac_schedule_plan.xlsx (copy)
+import shutil
+shutil.copy('"'"'/root/hvac_existing_plan.xlsx'"'"', '"'"'/root/hvac_schedule_plan.xlsx'"'"')
+```
+
+## Step 3 – Write the summary file
+
+```python
+first_5 = '"'"'N/A'"'"'
+first_4 = '"'"'N/A'"'"'
+for r in results:
+    if first_5 == '"'"'N/A'"'"' and r['"'"'Days Worked'"'"'] == 5:
+        first_5 = str(r['"'"'Phase'"'"'])
+    if first_4 == '"'"'N/A'"'"' and r['"'"'Days Worked'"'"'] == 4:
+        first_4 = str(r['"'"'Phase'"'"'])
+
+with open('"'"'/root/hvac_schedule_summary.txt'"'"', '"'"'w'"'"') as f:
+    f.write(f'"'"'First_Week_5_Days: {first_5}\n'"'"')
+    f.write(f'"'"'First_Week_4_Days: {first_4}\n'"'"')
+    f.write(f'"'"'Summary: The crew works 6-day weeks to clear the initial backlog, stepping down to 5-day weeks at Phase {first_5} and to 4-day weeks at Phase {first_4} as demand normalizes. Overtime decreases correspondingly from 20 to 10 to 0 hours per week.\n'"'"')
+```
+
+Adjust the summary sentence if `first_5` or `first_4` is `N/A` — mention `N/A` explicitly in that case.
+
+## Step 4 – Validate
+
+1. Re-read `/root/hvac_schedule_plan.xlsx` and verify:
+   - Sheet name is exactly `Plan`.
+   - Row 1 has exactly the 7 headers listed above.
+   - There are exactly 49 data rows (phases 8–56).
+   - Phase 8: `Start of Phase Past Due + Scheduled Demand` equals `1138.66`.
+   - All `Days Worked` values are in {4, 5, 6}.
+   - `End of Phase Backlog/Buffer = calc_start + demand - capacity` for a few spot-checked rows.
+
+2. Re-read `/root/hvac_schedule_summary.txt` and verify:
+   - Exactly 3 lines.
+   - Line 1 starts with `First_Week_5_Days:`.
+   - Line 2 starts with `First_Week_4_Days:`.
+   - Line 3 starts with `Summary:` and is ≤ 60 words, ≤ 3 sentences.
+
+3. Confirm `/root/hvac_existing_plan.xlsx` is identical to `/root/hvac_schedule_plan.xlsx`.
+
+Do all steps in a single session. If the demand sheet layout is unexpected, adapt the parsing but keep the algorithm and output format exactly as specified.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[xlsx, operations, capacity-planning, hvac, backlog].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260711-200650-hl4-train-langchain-graph-batch4-rerun1/jobs/2026-07-11__21-06-40/run-e7f3b7f1__cqNKyZc/agent/trajectory.json

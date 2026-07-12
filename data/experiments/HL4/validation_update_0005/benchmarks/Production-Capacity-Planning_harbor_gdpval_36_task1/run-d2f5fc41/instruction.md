@@ -1,0 +1,392 @@
+# Task Instruction
+
+Execute the following Python script in a single step to produce both deliverables.
+
+```python
+import openpyxl
+import os
+
+# Step 1: Read demand data from the source workbook
+wb_src = openpyxl.load_workbook('/root/copy_of_capacity_sheet.xlsx', data_only=True)
+ws = wb_src['Weld']
+
+# Find the row labeled 'MIG weld Demand Total'
+demand_row = None
+for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=1):
+    cell = row[0]
+    if cell.value and 'MIG weld Demand Total' in str(cell.value).strip():
+        demand_row = cell.row
+        break
+
+if demand_row is None:
+    # Try broader search
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+        for cell in row:
+            if cell.value and 'MIG' in str(cell.value) and 'Demand' in str(cell.value) and 'Total' in str(cell.value):
+                demand_row = cell.row
+                break
+        if demand_row:
+            break
+
+print(f'Demand row: {demand_row}')
+
+# Find the header row to map week numbers to columns
+# The weeks are typically in a header row. Let's inspect the first few rows.
+for r in range(1, min(10, ws.max_row + 1)):
+    vals = []
+    for c in range(1, min(60, ws.max_column + 1)):
+        v = ws.cell(row=r, column=c).value
+        vals.append(v)
+    print(f'Row {r}: {vals}')
+
+print(f'Max column: {ws.max_column}')
+```
+
+After inspecting the output, run the full solution script:
+
+```python
+import openpyxl
+import os
+
+# Read source
+wb_src = openpyxl.load_workbook('/root/copy_of_capacity_sheet.xlsx', data_only=True)
+ws = wb_src['Weld']
+
+# Find demand row
+demand_row = None
+for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+    for cell in row:
+        val = str(cell.value).strip() if cell.value is not None else ''
+        if 'MIG' in val and 'Demand' in val and 'Total' in val:
+            demand_row = cell.row
+            break
+    if demand_row:
+        break
+
+assert demand_row is not None, 'Could not find MIG weld Demand Total row'
+print(f'Found demand row: {demand_row}')
+
+# Find week header row - look for a row containing sequential integers 1,2,3... or 4,5,6...
+# Also build week->column mapping
+week_col_map = {}  # week_number -> column_index
+for r in range(1, min(15, ws.max_row + 1)):
+    found_weeks = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=r, column=c).value
+        if v is not None:
+            try:
+                iv = int(float(v))
+                if 1 <= iv <= 52 and float(v) == iv:
+                    found_weeks[iv] = c
+            except (ValueError, TypeError):
+                pass
+    if len(found_weeks) >= 20:  # likely the week header row
+        week_col_map = found_weeks
+        print(f'Week header row: {r}, found {len(found_weeks)} weeks')
+        break
+
+assert len(week_col_map) >= 49, f'Expected at least 49 weeks, found {len(week_col_map)}'
+
+# Extract demand for weeks 4..52
+demand = {}
+for wk in range(4, 53):
+    col = week_col_map[wk]
+    val = ws.cell(row=demand_row, column=col).value
+    if val is None:
+        val = 0.0
+    demand[wk] = float(val)
+    
+print(f'Demand week 4: {demand[4]}')
+print(f'Sum of all demands: {sum(demand.values())}')
+
+# Step 2: Compute the plan
+# Initial condition: at Week 4, Calc Start + Scheduled Demand = 438.81
+# So Calc Start for week 4 = 438.81 - demand[4]
+# But actually the instruction says "Start of Week Past Due + Scheduled Demand = 438.81" at Week 4.
+# Start of Week Past Due = max(0, prior week End of Week Backlog/Buffer)
+# For week 4, there is no prior week, so we need to figure out the initial backlog.
+# The initial condition means: Start of Week Past Due (week 4) + Scheduled Demand (week 4) = 438.81
+# So Start of Week Past Due (week 4) = 438.81 - demand[4]
+# And Calc Start (week 4) = Start of Week Past Due (week 4) = 438.81 - demand[4]
+# (since Start of Week Past Due >= 0, Calc Start = same value for week 4)
+
+initial_total = 438.81
+start_past_due_wk4 = initial_total - demand[4]
+calc_start_wk4 = start_past_due_wk4  # For week 4, Calc Start = Start of Week Past Due
+
+print(f'Week 4 demand: {demand[4]}, Start of Week Past Due: {start_past_due_wk4}, Calc Start: {calc_start_wk4}')
+
+results = []  # list of dicts
+
+prev_end_backlog = None
+
+for wk in range(4, 53):
+    sched_demand = demand[wk]
+    
+    if wk == 4:
+        start_past_due = start_past_due_wk4
+        calc_start = calc_start_wk4
+    else:
+        start_past_due = max(0, prev_end_backlog)
+        calc_start = prev_end_backlog  # signed carryover
+    
+    # Choose Days Worked
+    if start_past_due > 0.01:
+        # Choose smallest in {5, 6} such that calc_start + sched_demand - 30*days <= 0
+        if calc_start + sched_demand - 30 * 5 <= 0:
+            days_worked = 5
+        elif calc_start + sched_demand - 30 * 6 <= 0:
+            days_worked = 6
+        else:
+            days_worked = 6
+    else:
+        # Start of Week Past Due <= 0.01
+        if sched_demand <= 120:
+            days_worked = 4
+        else:
+            days_worked = 5
+    
+    weekly_capacity = 30 * days_worked
+    end_backlog = calc_start + sched_demand - weekly_capacity
+    overtime = 10 * max(0, days_worked - 4)
+    
+    results.append({
+        'Week': wk,
+        'Days Worked': days_worked,
+        'Scheduled Demand (Std Hrs)': round(sched_demand, 2),
+        'Weekly Capacity (Std Hrs)': weekly_capacity,
+        'Start of Week Past Due (Std Hrs)': round(start_past_due, 2),
+        'End of Week Backlog/Buffer (Std Hrs)': round(end_backlog, 2),
+        'Overtime Hours': overtime,
+    })
+    
+    prev_end_backlog = end_backlog
+
+# Print first few and last few for verification
+for r in results[:5]:
+    print(r)
+print('...')
+for r in results[-3:]:
+    print(r)
+
+# Step 3: Create catch_up_plan.xlsx
+wb_out = openpyxl.Workbook()
+ws_out = wb_out.active
+ws_out.title = 'Plan'
+
+headers = [
+    'Week',
+    'Days Worked',
+    'Scheduled Demand (Std Hrs)',
+    'Weekly Capacity (Std Hrs)',
+    'Start of Week Past Due (Std Hrs)',
+    'End of Week Backlog/Buffer (Std Hrs)',
+    'Overtime Hours',
+]
+
+for ci, h in enumerate(headers, 1):
+    ws_out.cell(row=1, column=ci, value=h)
+
+for ri, rec in enumerate(results, 2):
+    for ci, h in enumerate(headers, 1):
+        ws_out.cell(row=ri, column=ci, value=rec[h])
+
+wb_out.save('/root/catch_up_plan.xlsx')
+print('Saved /root/catch_up_plan.xlsx')
+
+# Step 4: Determine step-down weeks
+first_5_day = None
+first_4_day = None
+
+for rec in results:
+    if rec['Days Worked'] == 5 and first_5_day is None:
+        # Actually we want the first week that steps DOWN to 5 days
+        # from a period of 6-day weeks. Let's reconsider.
+        pass
+    if rec['Days Worked'] == 4 and first_4_day is None:
+        pass
+
+# Re-read the instructions: 
+# First_Week_5_Days = first week where days worked is 5 (step-down from 6)
+# First_Week_4_Days = first week where days worked is 4 (step-down from 5)
+# But it could also just mean the first week with exactly 5 days, and first with exactly 4 days.
+# Given the context of "step-down week numbers", it likely means:
+# - First week that transitions to 5 days (from 6)
+# - First week that transitions to 4 days (from 5 or 6)
+
+# Let's find them both ways and use the simpler interpretation first:
+# First week with exactly 5 days worked, and first week with exactly 4 days worked.
+
+first_5 = None
+first_4 = None
+for rec in results:
+    if rec['Days Worked'] == 5 and first_5 is None:
+        first_5 = rec['Week']
+    if rec['Days Worked'] == 4 and first_4 is None:
+        first_4 = rec['Week']
+
+# But the summary says "step-down week numbers" which implies transitioning down.
+# Let's find the first week where days decrease to 5 (from 6), and first where it decreases to 4.
+first_stepdown_5 = None
+first_stepdown_4 = None
+for i, rec in enumerate(results):
+    if i > 0:
+        prev_days = results[i-1]['Days Worked']
+        curr_days = rec['Days Worked']
+        if curr_days <= 5 and prev_days > 5 and first_stepdown_5 is None:
+            first_stepdown_5 = rec['Week']
+        if curr_days <= 4 and prev_days > 4 and first_stepdown_4 is None:
+            first_stepdown_4 = rec['Week']
+
+print(f'First week with 5 days: {first_5}')
+print(f'First week with 4 days: {first_4}')
+print(f'First step-down to 5: {first_stepdown_5}')
+print(f'First step-down to 4: {first_stepdown_4}')
+
+# Use the step-down interpretation for the summary
+w5 = first_stepdown_5 if first_stepdown_5 else (first_5 if first_5 else 'N/A')
+w4 = first_stepdown_4 if first_stepdown_4 else (first_4 if first_4 else 'N/A')
+
+# But if week 4 already starts with 5 or 6 days, the "first week with 5 days" might be week 4 itself
+# which isn't really a step-down. Let's use step-down interpretation.
+# If no step-down found, use N/A.
+
+w5_str = str(w5) if w5 else 'N/A'
+w4_str = str(w4) if w4 else 'N/A'
+
+# Build summary (max 60 words, max 3 sentences, mention both step-down weeks)
+summary = f'The MIG welding catch-up plan runs from Week 4 to Week 52. Operations step down from 6-day to 5-day weeks at Week {w5_str} and further reduce to 4-day weeks at Week {w4_str}. Overtime decreases as the backlog is cleared.'
+
+word_count = len(summary.split())
+print(f'Summary word count: {word_count}')
+assert word_count <= 60, f'Summary too long: {word_count} words'
+
+with open('/root/catch_up_summary.txt', 'w') as f:
+    f.write(f'First_Week_5_Days: {w5_str}\n')
+    f.write(f'First_Week_4_Days: {w4_str}\n')
+    f.write(f'Summary: {summary}\n')
+
+print('Saved /root/catch_up_summary.txt')
+
+# Verify
+with open('/root/catch_up_summary.txt', 'r') as f:
+    print(f.read())
+
+print('Done!')
+```
+
+IMPORTANT execution notes:
+1. Run the first inspection script to see the structure of the Weld sheet (row labels, week header layout).
+2. Then adapt and run the full solution script based on what you see. If the week numbers are found differently (e.g., in a different row or format), adjust the week_col_map logic.
+3. After generating both files, verify:
+   - `/root/catch_up_plan.xlsx` has sheet named 'Plan' with 7 columns and 49 data rows (weeks 4-52)
+   - `/root/catch_up_summary.txt` has exactly 3 lines in the specified format
+   - The summary is ≤60 words and ≤3 sentences
+4. If the initial condition interpretation needs adjustment (e.g., if demand[4] is such that start_past_due_wk4 would be negative), the Calc Start for week 4 should equal 438.81 - demand[4] and Start of Week Past Due for week 4 should be max(0, 438.81 - demand[4]).
+5. Double-check: the instruction says 'Start of Week Past Due + Scheduled Demand = 438.81' at Week 4. This means the total work needed at the start of week 4 is 438.81 std hrs. So Start of Week Past Due (week 4) = 438.81 - demand[4].
+6. Make sure the catch_up_summary.txt file has NO trailing newline issues - exactly 3 lines with content.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@openai.com, author_name=Codex, category=manufacturing-planning, difficulty=medium, tags=[xlsx, operations, capacity-planning, backlog].
+Verifier config: timeout_sec=900.0.

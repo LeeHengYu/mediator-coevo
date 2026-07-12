@@ -1,0 +1,433 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following steps in order to produce `/root/renewal_playbook_updated.hwpx`.
+
+## 0. Inspect the workspace
+```bash
+ls /root/
+ls /root/renewal_playbook.hwpx 2>/dev/null || true
+file /root/renewal_playbook.hwpx
+cat /root/renewal_update.json
+cat /root/followups.csv
+```
+Understand the HWPX package structure (it is a ZIP archive containing XML files).
+
+## 1. Unpack the HWPX
+```bash
+mkdir -p /tmp/hwpx_work
+cp /root/renewal_playbook.hwpx /tmp/hwpx_work/original.hwpx
+cd /tmp/hwpx_work
+mkdir original
+cd original
+unzip ../original.hwpx
+find . -type f | sort
+```
+Identify the content XML file(s). Typically `Contents/section0.xml` (or similar). Print every XML file to understand the document structure:
+```bash
+for f in $(find . -name '"'"'*.xml'"'"'); do echo "===== $f ====="; cat "$f"; done
+```
+
+## 2. Parse the update data
+Write a Python script `/tmp/hwpx_work/update.py` that does all the work:
+
+```python
+import json, csv, os, re, shutil, copy
+from lxml import etree
+
+# --- Load update data ---
+with open('"'"'/root/renewal_update.json'"'"', '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+    updates = json.load(f)
+
+with open('"'"'/root/followups.csv'"'"', '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+    reader = csv.DictReader(f)
+    followups = sorted(list(reader), key=lambda r: int(r['"'"'sequence'"'"']))
+
+print('"'"'Updates:'"'"', json.dumps(updates, ensure_ascii=False, indent=2))
+print('"'"'Follow-ups:'"'"', followups)
+
+# --- Locate section XML(s) ---
+base = '"'"'/tmp/hwpx_work/original'"'"'
+section_files = []
+for root_dir, dirs, files in os.walk(base):
+    for fn in files:
+        if fn.endswith('"'"'.xml'"'"'):
+            full = os.path.join(root_dir, fn)
+            with open(full, '"'"'r'"'"', encoding='"'"'utf-8'"'"') as xf:
+                content = xf.read()
+            # Section files typically have <hp:p> paragraph elements
+            if '"'"'<hp:p'"'"' in content or '"'"'<p '"'"' in content:
+                section_files.append(full)
+
+print('"'"'Section files:'"'"', section_files)
+
+# --- Helper: get plain text of a paragraph (concatenate all charPr text runs) ---
+def para_plain_text(p_elem, ns):
+    """Return the concatenated plain text of all <hp:t> elements in a paragraph."""
+    texts = []
+    for t in p_elem.iter('"'"'{%s}t'"'"' % ns.get('"'"'hp'"'"', ns.get('"'"'hc'"'"', '"'"''"'"'))):
+        if t.text:
+            texts.append(t.text)
+    # Also try without namespace
+    for t in p_elem.iter('"'"'t'"'"'):
+        if t.text:
+            texts.append(t.text)
+    return '"'"''"'"'.join(texts)
+
+# --- Helper: merge split placeholder tags ---
+def merge_split_placeholders(xml_string):
+    """If a placeholder like {{...}} is split across multiple <hp:t> tags,
+    merge them so we can do simple text replacement."""
+    # Pattern: find {{ that doesn'"'"'t close on the same <hp:t>, merge forward
+    # Strategy: work on raw XML string, find sequences where '"'"'{{'"'"' and '"'"'}}'"'"' are
+    # in different <hp:t> elements and merge the text content.
+    # Simpler approach: strip internal XML tags between {{ and }}
+    result = xml_string
+    # Repeatedly merge: find '"'"'{{'"'"' not followed by '"'"'}}'"'"' before next '"'"'</hp:t>'"'"'
+    pattern = r'"'"'(\{\{[^}]*?)(</hp:t>.*?<hp:t[^>]*>)([^{]*?\}\})'"'"'
+    max_iter = 50
+    for _ in range(max_iter):
+        new_result = re.sub(pattern, r'"'"'\1\3'"'"', result, flags=re.DOTALL)
+        if new_result == result:
+            break
+        result = new_result
+    return result
+
+# --- Process each section file ---
+for section_file in section_files:
+    print(f'"'"'\nProcessing: {section_file}'"'"')
+    with open(section_file, '"'"'r'"'"', encoding='"'"'utf-8'"'"') as f:
+        raw_xml = f.read()
+
+    # Detect the namespace for hp
+    # Extract namespace map from root
+    tree = etree.parse(section_file)
+    root = tree.getroot()
+    nsmap = root.nsmap
+    print('"'"'Namespaces:'"'"', nsmap)
+
+    hp_ns = nsmap.get('"'"'hp'"'"', nsmap.get('"'"'hc'"'"', '"'"''"'"'))
+    
+    # We'"'"'ll work on raw XML text for replacements, then parse again to clean up layout cache.
+    
+    # Step A: Merge any split placeholders (just in case)
+    raw_xml = merge_split_placeholders(raw_xml)
+    
+    # Step B: Build old->new replacement map from update JSON
+    # The JSON likely has keys like "customer_name", "current_owner", etc.
+    # with sub-keys "old" and "new" or it might be flat.
+    # Inspect structure first:
+    replacements = {}  # old_text -> new_text
+    
+    if isinstance(updates, dict):
+        for key, val in updates.items():
+            if isinstance(val, dict) and '"'"'old'"'"' in val and '"'"'new'"'"' in val:
+                replacements[str(val['"'"'old'"'"'])] = str(val['"'"'new'"'"'])
+            elif isinstance(val, dict):
+                # Maybe nested differently
+                for subkey, subval in val.items():
+                    if isinstance(subval, dict) and '"'"'old'"'"' in subval and '"'"'new'"'"' in subval:
+                        replacements[str(subval['"'"'old'"'"'])] = str(subval['"'"'new'"'"'])
+            # If it'"'"'s just a simple value, we might need context from the document
+    
+    print('"'"'Replacement map:'"'"', json.dumps(replacements, ensure_ascii=False, indent=2))
+    
+    # If the JSON is flat key->value (no old/new), we need to find old values in the doc.
+    # Let'"'"'s handle that case too:
+    if not replacements:
+        # Flat structure: keys are field names, values are new values
+        # We need to find old values in the document by field name context
+        # This requires more sophisticated matching
+        print('"'"'WARNING: No old/new pairs found. JSON might be flat or differently structured.'"'"')
+        print('"'"'Will attempt direct field-value replacement strategy.'"'"')
+        # We'"'"'ll handle this after seeing the actual JSON structure
+    
+    # Step C: Apply text replacements
+    for old_text, new_text in replacements.items():
+        count = raw_xml.count(old_text)
+        print(f'"'"'  Replacing "{old_text}" -> "{new_text}" ({count} occurrences)'"'"')
+        raw_xml = raw_xml.replace(old_text, new_text)
+    
+    # Step D: Handle follow-up lines
+    # Parse the XML to find follow-up paragraphs and replace them
+    # First, let'"'"'s identify follow-up lines in the document
+    # They likely contain numbered items or specific markers
+    
+    # Parse modified XML
+    tree = etree.fromstring(raw_xml.encode('"'"'utf-8'"'"'))
+    
+    # Find all paragraphs
+    all_paras = tree.iter('"'"'{%s}p'"'"' % hp_ns) if hp_ns else tree.iter('"'"'p'"'"')
+    all_paras = list(tree.iter('"'"'{%s}p'"'"' % hp_ns)) if hp_ns else list(tree.iter('"'"'p'"'"'))
+    
+    # Identify the three follow-up paragraphs
+    # They might contain text like "1차", "2차", "3차" or "follow-up" or numbered items
+    followup_paras = []
+    followup_indices = []
+    appendix_text = '"'"'이 부록 문단은 그대로 유지해야 합니다.'"'"'
+    
+    for i, p in enumerate(all_paras):
+        texts = []
+        for t_elem in p.iter('"'"'{%s}t'"'"' % hp_ns):
+            if t_elem.text:
+                texts.append(t_elem.text)
+        full_text = '"'"''"'"'.join(texts)
+        # Skip appendix
+        if appendix_text in full_text:
+            continue
+        # Detect follow-up lines (heuristic: contains 차 follow-up, or D+number pattern)
+        if re.search(r'"'"'(\d차|D\+\d|follow.?up|팔로우|후속)'"'"', full_text, re.IGNORECASE):
+            followup_paras.append((i, p, full_text))
+            print(f'"'"'  Follow-up candidate [{i}]: {full_text[:80]}'"'"')
+    
+    print(f'"'"'  Found {len(followup_paras)} follow-up paragraphs, need to replace with {len(followups)} items'"'"')
+    
+    # For each follow-up paragraph, replace its text content with the CSV item
+    # Match by position (first 3 follow-up paragraphs -> 3 CSV items sorted by sequence)
+    for idx, (para_idx, para_elem, old_text_content) in enumerate(followup_paras[:len(followups)]):
+        fu = followups[idx]
+        # Build new follow-up text from CSV columns
+        # CSV likely has columns like: sequence, day, channel, action or similar
+        csv_keys = list(fu.keys())
+        print(f'"'"'  CSV keys: {csv_keys}'"'"')
+        # Construct replacement text - use all non-sequence fields or a specific format
+        # We need to see the CSV structure to decide
+        new_fu_parts = []
+        for k in csv_keys:
+            if k.lower() != '"'"'sequence'"'"':
+                new_fu_parts.append(fu[k])
+        new_fu_text = '"'"' / '"'"'.join(new_fu_parts) if len(new_fu_parts) > 1 else new_fu_parts[0] if new_fu_parts else str(fu)
+        
+        # Actually, let'"'"'s look at the original text format and replicate it
+        # For now, construct from CSV values
+        # Better: use all CSV fields except sequence, joined appropriately
+        # Let'"'"'s try: "label: action" or just concatenate meaningfully
+        
+        # Replace all <hp:t> text in this paragraph with the new text
+        t_elems = list(para_elem.iter('"'"'{%s}t'"'"' % hp_ns))
+        if t_elems:
+            t_elems[0].text = new_fu_text
+            for t_extra in t_elems[1:]:
+                t_extra.text = '"'"''"'"'
+        print(f'"'"'  Replaced follow-up {idx+1}: "{old_text_content[:60]}" -> "{new_fu_text}"'"'"')
+    
+    # If there are more old follow-up paragraphs than new ones, remove extras
+    for idx in range(len(followups), len(followup_paras)):
+        para_idx, para_elem, old_text_content = followup_paras[idx]
+        parent = para_elem.getparent()
+        if parent is not None:
+            parent.remove(para_elem)
+            print(f'"'"'  Removed extra follow-up paragraph: "{old_text_content[:60]}"'"'"')
+    
+    # Step E: Remove lineSegArray (layout cache) from any modified paragraphs
+    # To be safe, remove ALL lineSegArray elements since this is a content update
+    for lsa in tree.iter('"'"'{%s}lineSegArray'"'"' % hp_ns):
+        parent = lsa.getparent()
+        if parent is not None:
+            parent.remove(lsa)
+    # Also try with other possible namespace prefixes
+    for ns_uri in nsmap.values():
+        if ns_uri:
+            for lsa in tree.iter('"'"'{%s}lineSegArray'"'"' % ns_uri):
+                parent = lsa.getparent()
+                if parent is not None:
+                    parent.remove(lsa)
+    
+    # Step F: Verify appendix is preserved
+    found_appendix = False
+    for t_elem in tree.iter('"'"'{%s}t'"'"' % hp_ns):
+        if t_elem.text and appendix_text in t_elem.text:
+            found_appendix = True
+            break
+    print(f'"'"'  Appendix preserved: {found_appendix}'"'"')
+    
+    # Step G: Write back
+    final_xml = etree.tostring(tree, xml_declaration=True, encoding='"'"'UTF-8'"'"', pretty_print=False)
+    with open(section_file, '"'"'wb'"'"') as f:
+        f.write(final_xml)
+    print(f'"'"'  Written: {section_file}'"'"')
+
+# --- Repack the HWPX ---
+output_path = '"'"'/root/renewal_playbook_updated.hwpx'"'"'
+os.chdir('"'"'/tmp/hwpx_work/original'"'"')
+
+# HWPX is a ZIP; repack preserving structure
+import zipfile
+with zipfile.ZipFile(output_path, '"'"'w'"'"', zipfile.ZIP_DEFLATED) as zf:
+    for root_dir, dirs, files in os.walk('"'"'.'"'"'):
+        for fn in files:
+            filepath = os.path.join(root_dir, fn)
+            arcname = filepath[2:] if filepath.startswith('"'"'./'"'"') else filepath
+            zf.write(filepath, arcname)
+
+print(f'"'"'\nOutput written to {output_path}'"'"')
+print('"'"'Output size:'"'"', os.path.getsize(output_path))
+
+# Verify it'"'"'s a valid zip
+with zipfile.ZipFile(output_path, '"'"'r'"'"') as zf:
+    print('"'"'ZIP contents:'"'"', zf.namelist())
+    bad = zf.testzip()
+    if bad:
+        print(f'"'"'BAD FILE IN ZIP: {bad}'"'"')
+    else:
+        print('"'"'ZIP integrity: OK'"'"')
+```
+
+Run the script:
+```bash
+cd /tmp/hwpx_work
+python3 update.py
+```
+
+## 3. Inspect and fix
+After the first run, carefully review the output:
+- Check that the replacement map was populated correctly from the JSON structure. If the JSON is flat (not old/new pairs), you'"'"'ll need to adapt: inspect the original document XML to find the old values for each field, then build the replacement map manually.
+- Check that follow-up detection worked. If the heuristic missed or over-matched, adjust the regex.
+- Check that the appendix sentence is preserved verbatim.
+- Check that `lineSegArray` elements were removed from modified paragraphs.
+
+If the JSON structure is different from expected (e.g., flat `{"customer_name": "New Corp", ...}` without old values), then:
+1. Read the original section XML to find the current/old values for each field.
+2. Build the old->new map by matching field semantics (e.g., find the paragraph containing "고객명" or "Customer" and extract the adjacent value).
+3. Re-run with the corrected replacement map.
+
+## 4. Validate the final output
+```bash
+file /root/renewal_playbook_updated.hwpx
+python3 -c "
+import zipfile
+with zipfile.ZipFile('"'"'/root/renewal_playbook_updated.hwpx'"'"', '"'"'r'"'"') as zf:
+    print('"'"'Valid ZIP, contents:'"'"', zf.namelist())
+    print('"'"'Test:'"'"', zf.testzip())
+"
+# Unpack and check the section XML for correctness
+mkdir -p /tmp/verify
+cd /tmp/verify
+unzip /root/renewal_playbook_updated.hwpx
+for f in $(find . -name '"'"'*.xml'"'"'); do echo "===== $f ====="; cat "$f"; echo; done
+```
+
+Verify:
+1. The appendix sentence `이 부록 문단은 그대로 유지해야 합니다.` appears exactly as-is.
+2. Old customer name, owner, renewal window, pricing band, escalation contact, and pricing note are ALL replaced with new values (no stale occurrences remain).
+3. Follow-up lines match the CSV data in sequence order.
+4. No `lineSegArray` elements remain in modified paragraphs.
+5. The file is a valid ZIP/HWPX package.
+
+## Important Notes
+- The script above is a starting framework. You MUST inspect the actual JSON structure and XML content first, then adapt the replacement logic accordingly. Do NOT blindly run if the data structures don'"'"'t match.
+- If the follow-up lines in the original XML use a specific format pattern (e.g., `D+7 이메일 안부 인사`), replicate that format with the new CSV data.
+- HWPX files sometimes have `mimetype` as the first entry in the ZIP without compression. Check the original ZIP structure and replicate it: if `mimetype` exists, store it uncompressed as the first entry.
+- Ensure no old/stale values remain anywhere in the document by searching for them explicitly after replacement.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260711-162911-hl4-val-langchain-graph-batch2-rerun2/jobs/2026-07-11__16-57-32/run-fe3fb427__sjbvhof/agent/trajectory.json

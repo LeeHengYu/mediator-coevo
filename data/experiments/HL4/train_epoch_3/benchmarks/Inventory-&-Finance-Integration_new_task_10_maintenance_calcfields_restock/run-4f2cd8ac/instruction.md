@@ -1,0 +1,190 @@
+# Task Instruction
+
+Execute the following Python script to build the required Excel workbook.
+
+```bash
+cd /root && python3 << 'PYEOF'
+import openpyxl
+from openpyxl import Workbook
+from datetime import datetime, timedelta
+from math import floor, ceil
+
+# ── Load source workbook ──
+src = openpyxl.load_workbook('/root/Maintenance_Parts_and_Deliveries_Latest.xlsx', data_only=True)
+
+# ── Inspect source sheets ──
+print('Source sheets:', src.sheetnames)
+
+# ── Read Current Parts ──
+cp = src['Current Parts']
+print('Current Parts dimensions:', cp.dimensions)
+print('Row 1:', [c.value for c in cp[1]])
+print('Row 2:', [c.value for c in cp[2]])
+print('Row 3:', [c.value for c in cp[3]])
+print('Row 4:', [c.value for c in cp[4]])
+print('Row 5:', [c.value for c in cp[5]])
+print('Row 6:', [c.value for c in cp[6]])
+for r in range(1, min(cp.max_row+1, 25)):
+    print(f'  CP row {r}:', [c.value for c in cp[r]])
+
+# ── Read Scheduled Deliveries ──
+sd = src['Scheduled Deliveries']
+print('\nScheduled Deliveries dimensions:', sd.dimensions)
+for r in range(1, min(sd.max_row+1, 25)):
+    print(f'  SD row {r}:', [c.value for c in sd[r]])
+
+# ── Read Ratio ──
+ra = src['Ratio']
+print('\nRatio dimensions:', ra.dimensions)
+for r in range(1, min(ra.max_row+1, 15)):
+    print(f'  RA row {r}:', [c.value for c in ra[r]])
+
+PYEOF
+```
+
+After inspecting the output, run a second script that:
+
+1. Reads the source workbook.
+2. Extracts AsOfDate from Current Parts B1 and PlanningHorizonEnd from Current Parts D1. If these cells contain labels instead of dates, scan the sheet to find the actual date values (they may be in B2/D2 or elsewhere – use the inspection output to determine the correct cells).
+3. Parses the parts data (Part_Code, Current_Units, Daily_Consumption_Units) from the Current Parts sheet. Identify the header row and data rows from the inspection.
+4. Parses the Scheduled Deliveries sheet to build a dict mapping Part_Code -> list of (date, quantity) tuples.
+5. Parses the Ratio sheet to build a dict mapping Part_Code -> crate conversion ratio (units per crate). If there's a single universal ratio, use that for all parts.
+6. Computes all fields per the specification:
+   - RemainingDaysInSeptember = (PlanningHorizonEnd - AsOfDate).days
+   - Current_DOH = Current_Units / Daily_Consumption_Units (if rate > 0, else None)
+   - Projected_Stockout_Date = AsOfDate + timedelta(days=floor(Current_DOH)) (if rate > 0, else None)
+   - Inbound_Units_By_Sep30 = sum of quantities for that part where delivery date <= PlanningHorizonEnd
+   - Delivered_DOH_To_Sep30 = (Current_Units + Inbound_Units_By_Sep30) / Daily_Consumption_Units (if rate > 0, else None)
+   - Remaining_September_Demand_Units = Daily_Consumption_Units * RemainingDaysInSeptember
+   - Additional_Units_Needed = max(0, Remaining_September_Demand_Units - Current_Units - Inbound_Units_By_Sep30)
+   - Crates_Required_Rounded_Up = ceil(Additional_Units_Needed / ratio) if Additional_Units_Needed > 0, else 0
+   - Rounding_Applied = TRUE if Additional_Units_Needed > 0 and ceil(Additional_Units_Needed/ratio) != Additional_Units_Needed/ratio, else FALSE
+   - Earliest_Scheduled_Delivery_Date = min date from deliveries for that part, or None
+   - Required_Delivery_Date:
+     - None if Crates_Required_Rounded_Up == 0
+     - else if Earliest_Scheduled_Delivery_Date is not None and Earliest_Scheduled_Delivery_Date <= Projected_Stockout_Date: AsOfDate + timedelta(days=floor(Delivered_DOH_To_Sep30))
+     - else: Projected_Stockout_Date
+   - Earlier_Delivery_Required = TRUE if Crates_Required_Rounded_Up > 0 and (Earliest_Scheduled_Delivery_Date is None or Required_Delivery_Date < Earliest_Scheduled_Delivery_Date), else FALSE
+7. All date outputs must be ISO format strings (YYYY-MM-DD).
+8. Creates the output workbook with exactly two sheets: Part_Results and Additional_Resupply_Needed.
+9. Part_Results:
+   - A1='Field', B1='Value'
+   - A2='AsOfDate', B2=<ISO date>
+   - A3='PlanningHorizonEnd', B3=<ISO date>
+   - A4='RemainingDaysInSeptember', B4=<integer>
+   - Row 6 has the 14-column header.
+   - Data rows start at row 7, one per part in source order.
+   - Numeric fields are numeric (int or float). Date fields are strings. Boolean fields are Python True/False (which openpyxl writes as Excel TRUE/FALSE).
+10. Additional_Resupply_Needed:
+    - Row 1 has the 6-column header.
+    - Only rows where Crates_Required_Rounded_Up > 0, in same order as Part_Results.
+11. Saves to /root/maintenance_resupply_actions_sep_2025.xlsx.
+12. Does NOT modify source files.
+13. Prints summary of computed values for verification.
+
+IMPORTANT: First run the inspection script, read the output carefully, then write and run the computation script using the actual cell layout discovered. Do not assume cell positions before inspecting.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Task-local resources are available under `environment/skills`: Inventory Turnover Analyzer, bc-calculated-fields-manufacturing.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@example.com, author_name=Codex, category=manufacturing-maintenance, difficulty=medium, tags=[excel, manufacturing, maintenance, calculated-fields, restock].
+Verifier config: timeout_sec=900.0.
