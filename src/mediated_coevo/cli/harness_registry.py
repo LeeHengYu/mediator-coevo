@@ -53,6 +53,83 @@ def _apply_harness_overlay(harness_dir: Path, project_root: Path) -> list[str]:
     return applied
 
 
+def _apply_harness_overlay_with_backup(
+    harness_dir: Path,
+    project_root: Path,
+    backup_dir: Path,
+) -> list[str]:
+    """Apply an overlay and retain enough information to restore the checkout."""
+    overlay_root = _harness_overlay_root(harness_dir)
+    entries: list[dict[str, object]] = []
+    applied: list[str] = []
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    if any(backup_dir.iterdir()):
+        raise ValueError(f"harness backup directory is not empty: {backup_dir}")
+    try:
+        for source in sorted(path for path in overlay_root.rglob("*") if path.is_file()):
+            rel = source.relative_to(overlay_root)
+            if len(rel.parts) == 1 and rel.name.startswith("manifest."):
+                continue
+            target = project_root / rel
+            if source.resolve() == target.resolve():
+                continue
+            existed = target.exists()
+            if existed:
+                backup_target = backup_dir / "files" / rel
+                backup_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup_target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            entries.append({"path": rel.as_posix(), "existed": existed})
+            applied.append(rel.as_posix())
+    except Exception:
+        _restore_harness_overlay_entries(project_root, backup_dir, entries)
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise
+    if not applied:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise typer.BadParameter(
+            f"harness overlay contains no source files: {harness_dir}"
+        )
+    (backup_dir / "manifest.json").write_text(
+        json.dumps({"entries": entries}, indent=2, sort_keys=True) + "\n"
+    )
+    return applied
+
+
+def _restore_harness_overlay_backup(project_root: Path, backup_dir: Path) -> None:
+    """Restore a checkout after a process-scoped overlay run."""
+    manifest_path = backup_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    payload = _read_json_mapping(manifest_path)
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        raise RuntimeError(f"invalid harness backup manifest: {manifest_path}")
+    entries = [entry for entry in raw_entries if isinstance(entry, dict)]
+    _restore_harness_overlay_entries(project_root, backup_dir, entries)
+    shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def _restore_harness_overlay_entries(
+    project_root: Path,
+    backup_dir: Path,
+    entries: list[dict[str, object]],
+) -> None:
+    for entry in reversed(entries):
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str):
+            continue
+        target = project_root / raw_path
+        existed = entry.get("existed") is True
+        if existed:
+            source = backup_dir / "files" / raw_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        elif target.exists():
+            target.unlink()
+
+
 def _harness_overlay_root(harness_dir: Path) -> Path:
     if not harness_dir.is_dir():
         raise typer.BadParameter(f"harness directory not found: {harness_dir}")

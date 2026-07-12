@@ -7,9 +7,11 @@ import pytest
 import typer
 
 import mediated_coevo.cli.harness_registry as harness_registry
+import mediated_coevo.cli.run as run_module
 from mediated_coevo.cli.harness_registry import (
     RuntimeStateSource,
     _apply_harness_overlay,
+    _apply_harness_overlay_with_backup,
     _copy_explicit_state,
     _harness_overlay_root,
     _publish_graph_state_ref,
@@ -17,6 +19,7 @@ from mediated_coevo.cli.harness_registry import (
     _prepare_harness_workspace,
     _resolve_harness_ref,
     _resolve_state_ref,
+    _restore_harness_overlay_backup,
 )
 from mediated_coevo.diffusion import (
     DiffusionArtifact,
@@ -50,6 +53,49 @@ def test_harness_overlay_accepts_overlay_subdir(tmp_path):
     (overlay / "tests/test_policy.py").write_text("def test_ok(): pass\n")
 
     assert _harness_overlay_root(harness) == overlay
+
+
+def test_harness_overlay_backup_restores_existing_and_new_files(tmp_path):
+    harness = tmp_path / "harness"
+    (harness / "src/pkg").mkdir(parents=True)
+    (harness / "src/pkg/module.py").write_text("VALUE = 2\n")
+    (harness / "config").mkdir()
+    (harness / "config/default.toml").write_text("[models]\n")
+    project = tmp_path / "project"
+    (project / "src/pkg").mkdir(parents=True)
+    (project / "src/pkg/module.py").write_text("VALUE = 1\n")
+    backup = tmp_path / "backup"
+
+    copied = _apply_harness_overlay_with_backup(harness, project, backup)
+
+    assert copied == ["config/default.toml", "src/pkg/module.py"]
+    assert (project / "src/pkg/module.py").read_text() == "VALUE = 2\n"
+    _restore_harness_overlay_backup(project, backup)
+    assert (project / "src/pkg/module.py").read_text() == "VALUE = 1\n"
+    assert not (project / "config/default.toml").exists()
+    assert not backup.exists()
+
+
+def test_harness_overlay_reexec_failure_restores_checkout(monkeypatch, tmp_path):
+    harness = tmp_path / "harness"
+    (harness / "src/pkg").mkdir(parents=True)
+    (harness / "src/pkg/module.py").write_text("VALUE = 2\n")
+    project = tmp_path / "project"
+    (project / "src/pkg").mkdir(parents=True)
+    target = project / "src/pkg/module.py"
+    target.write_text("VALUE = 1\n")
+    monkeypatch.setattr(run_module, "PROJECT_ROOT", project)
+    monkeypatch.delenv(run_module._HARNESS_APPLIED_ENV, raising=False)
+    monkeypatch.setattr(
+        run_module.os,
+        "execvpe",
+        lambda *args: (_ for _ in ()).throw(OSError("exec failed")),
+    )
+
+    with pytest.raises(OSError, match="exec failed"):
+        run_module._apply_harness_overlay_and_reexec(harness)
+
+    assert target.read_text() == "VALUE = 1\n"
 
 
 def test_harness_overlay_rejects_non_overlay_folder(tmp_path):

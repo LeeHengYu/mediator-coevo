@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -23,12 +24,13 @@ def _artifact(
     source_task_id: str,
     source_iteration: int = 0,
     verifier_reward: float = 1.0,
+    artifact_type: DiffusionArtifactType = DiffusionArtifactType.DEBUG_HINT,
 ) -> DiffusionArtifact:
     return DiffusionArtifact(
         artifact_id=artifact_id,
         source_task_id=source_task_id,
         source_iteration=source_iteration,
-        artifact_type=DiffusionArtifactType.DEBUG_HINT,
+        artifact_type=artifact_type,
         risk_level=DiffusionRiskLevel.LOW,
         content=f"hint from {source_task_id}",
         verifier_reward=verifier_reward,
@@ -545,6 +547,141 @@ async def test_langchain_graph_fallback_skips_cross_family_failure_graph_priors(
 
 
 @pytest.mark.asyncio
+async def test_langchain_graph_fallback_keeps_same_family_failure_graph_priors():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=[
+            "Inventory-&-Finance-Integration/task-A",
+            "Inventory-&-Finance-Integration/task-B",
+        ],
+        graph_policy="langchain_graph",
+        edge_records=[
+            TaskGraphEdgeRecord(
+                source_task_id="Inventory-&-Finance-Integration/task-B",
+                target_task_id="Inventory-&-Finance-Integration/task-A",
+                relation="agent_transfer_prior",
+                weight=0.95,
+            )
+        ],
+        metadata={
+            "task_nodes": {
+                "Inventory-&-Finance-Integration/task-A": {
+                    "task_ids": ["Inventory-&-Finance-Integration/task-A"],
+                    "last_iteration": 0,
+                },
+                "Inventory-&-Finance-Integration/task-B": {
+                    "task_ids": ["Inventory-&-Finance-Integration/task-B"],
+                    "last_iteration": 0,
+                },
+            }
+        },
+    )
+    policy = _EmptySelectionSameTaskLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=1,
+    )
+
+    result = await policy.prepare(
+        task_profile={
+            "task_id": "Inventory-&-Finance-Integration/task-A",
+            "instruction": "same workbook family with incoming failure prior",
+        },
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[
+            _artifact(
+                "artifact-failure-same-family",
+                source_task_id="Inventory-&-Finance-Integration/task-B",
+                verifier_reward=0.0,
+            )
+        ],
+    )
+
+    assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
+        "artifact-failure-same-family"
+    ]
+    assert result.subscriptions[0].relation == "same_family_failure_graph_prior"
+    assert result.subscriptions[0].context_channel == AVOID_RECHECK_CHANNEL
+    assert result.subscriptions[0].metadata == {"fallback": "empty_agent_selection"}
+
+
+@pytest.mark.asyncio
+async def test_langchain_graph_fallback_limits_same_family_failure_graph_priors_to_one_source_task():
+    previous = TaskGraphSnapshot(
+        run_id="run-1",
+        iteration=0,
+        task_ids=[
+            "Inventory-&-Finance-Integration/task-A",
+            "Inventory-&-Finance-Integration/task-B",
+        ],
+        graph_policy="langchain_graph",
+        edge_records=[
+            TaskGraphEdgeRecord(
+                source_task_id="Inventory-&-Finance-Integration/task-B",
+                target_task_id="Inventory-&-Finance-Integration/task-A",
+                relation="agent_transfer_prior",
+                weight=0.95,
+            )
+        ],
+        metadata={
+            "task_nodes": {
+                "Inventory-&-Finance-Integration/task-A": {
+                    "task_ids": ["Inventory-&-Finance-Integration/task-A"],
+                    "last_iteration": 0,
+                },
+                "Inventory-&-Finance-Integration/task-B": {
+                    "task_ids": ["Inventory-&-Finance-Integration/task-B"],
+                    "last_iteration": 0,
+                },
+            }
+        },
+    )
+    policy = _EmptySelectionSameTaskLangChainGraphPolicy(
+        model="openrouter/test/model",
+        run_id="run-1",
+        max_artifacts=3,
+    )
+
+    result = await policy.prepare(
+        task_profile={
+            "task_id": "Inventory-&-Finance-Integration/task-A",
+            "instruction": "same workbook family with only failure priors",
+        },
+        current_iteration=1,
+        previous_snapshot=previous,
+        artifacts=[
+            _artifact(
+                "artifact-debug-hint",
+                source_task_id="Inventory-&-Finance-Integration/task-B",
+                verifier_reward=0.0,
+                artifact_type=DiffusionArtifactType.DEBUG_HINT,
+            ),
+            _artifact(
+                "artifact-run-outcome",
+                source_task_id="Inventory-&-Finance-Integration/task-B",
+                verifier_reward=0.0,
+                artifact_type=DiffusionArtifactType.RUN_OUTCOME,
+            ),
+            _artifact(
+                "artifact-mediator-summary",
+                source_task_id="Inventory-&-Finance-Integration/task-B",
+                verifier_reward=0.0,
+                artifact_type=DiffusionArtifactType.MEDIATOR_REPORT_SUMMARY,
+            ),
+        ],
+    )
+
+    assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
+        "artifact-mediator-summary"
+    ]
+    assert result.subscriptions[0].relation == "same_family_failure_graph_prior"
+    assert result.subscriptions[0].context_channel == AVOID_RECHECK_CHANNEL
+    assert result.subscriptions[0].metadata == {"fallback": "empty_agent_selection"}
+
+
+@pytest.mark.asyncio
 async def test_langchain_graph_filters_cross_family_success_outside_incoming_graph_support():
     previous = TaskGraphSnapshot(
         run_id="run-1",
@@ -707,3 +844,49 @@ def test_graph_agent_prompt_and_tools_define_weight_as_agent_output():
     )
     assert "agent-authored edge weights" in tool_docs
     assert "calibrating a graph edge weight" in tool_docs
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_with_timeout_returns_result_before_deadline():
+    async def run() -> Any:
+        return await langchain_graph_module._invoke_agent_with_timeout(
+            lambda: {"selected_artifacts": []},
+            timeout_sec=0.1,
+        )
+
+    result = await run()
+
+    assert result == {"selected_artifacts": []}
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_with_timeout_returns_none_after_deadline():
+    start = time.perf_counter()
+    result = await langchain_graph_module._invoke_agent_with_timeout(
+        lambda: time.sleep(0.2) or {"selected_artifacts": []},
+        timeout_sec=0.02,
+    )
+    elapsed = time.perf_counter() - start
+
+    assert result is None
+    assert elapsed < 0.15
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_with_timeout_raises_worker_exception():
+    with pytest.raises(RuntimeError, match="boom"):
+        await langchain_graph_module._invoke_agent_with_timeout(
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            timeout_sec=0.1,
+        )
+
+
+def test_parse_json_object_accepts_python_literal_dict():
+    parsed = langchain_graph_module._parse_json_object("{'selected_artifacts': []}")
+
+    assert parsed == {"selected_artifacts": []}
+
+
+def test_parse_json_object_rejects_non_object_text():
+    with pytest.raises(ValueError, match="JSON object"):
+        langchain_graph_module._parse_json_object("not json at all")

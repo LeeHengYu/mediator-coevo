@@ -6,6 +6,7 @@ import os
 import random
 import shutil
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -24,6 +25,7 @@ from mediated_coevo.cli.experiment import (
     TaskSelection,
     annotate_judge_rewards_or_exit,
     ensure_harbor_available,
+    load_task_manifest_selection,
     prepare_llm_credentials_or_exit,
     resolve_task_selection,
     run_experiment_or_exit,
@@ -33,7 +35,7 @@ from mediated_coevo.cli.experiment import (
 from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
 from mediated_coevo.cli.harness_registry import (
     RuntimeStateSource,
-    _apply_harness_overlay,
+    _apply_harness_overlay_with_backup,
     _copy_explicit_state,
     _experiment_split,
     _prepare_harness_workspace,
@@ -41,6 +43,7 @@ from mediated_coevo.cli.harness_registry import (
     _publish_promoted_harness,
     _resolve_harness_options,
     _resolve_state_options,
+    _restore_harness_overlay_backup,
 )
 from mediated_coevo.cli.output import (
     console,
@@ -58,6 +61,7 @@ from mediated_coevo.experiment.runtime_factory import (
 )
 
 _HARNESS_APPLIED_ENV = "MEDCOEVO_HARNESS_APPLIED"
+_HARNESS_BACKUP_ENV = "MEDCOEVO_HARNESS_BACKUP"
 
 
 def run_skillflow_experiment(
@@ -173,11 +177,28 @@ def _apply_harness_overlay_and_reexec(harness_dir: Path) -> None:
     resolved = harness_dir.expanduser().resolve()
     if os.environ.get(_HARNESS_APPLIED_ENV) == str(resolved):
         return
-    applied_files = _apply_harness_overlay(resolved, PROJECT_ROOT)
+    backup_dir = Path(tempfile.mkdtemp(prefix="mediated-coevo-harness-"))
+    applied_files = _apply_harness_overlay_with_backup(
+        resolved,
+        PROJECT_ROOT,
+        backup_dir,
+    )
     typer.echo(f"Applied harness overlay: {resolved} ({len(applied_files)} files)")
     env = os.environ.copy()
     env[_HARNESS_APPLIED_ENV] = str(resolved)
-    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+    env[_HARNESS_BACKUP_ENV] = str(backup_dir)
+    try:
+        os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+    except OSError:
+        _restore_harness_overlay_backup(PROJECT_ROOT, backup_dir)
+        raise
+
+
+def _restore_scoped_harness_overlay() -> None:
+    backup_value = os.environ.pop(_HARNESS_BACKUP_ENV, None)
+    if backup_value is None:
+        return
+    _restore_harness_overlay_backup(PROJECT_ROOT, Path(backup_value))
 
 
 def run(
@@ -193,6 +214,16 @@ def run(
         typer.Option(
             "--split",
             help="Optional task split to sample from: train | validation | test.",
+        ),
+    ] = None,
+    task_manifest: Annotated[
+        Path | None,
+        typer.Option(
+            "--task-manifest",
+            help=(
+                "Frozen JSON task stream to replay exactly. Preserves order and "
+                "duplicates; cannot be combined with --family."
+            ),
         ),
     ] = None,
     iterations: Annotated[
@@ -377,64 +408,79 @@ def run(
     state_source = _resolve_state_options(state_dir, state_ref)
     if resolved_harness_dir is not None:
         _apply_harness_overlay_and_reexec(resolved_harness_dir)
-    setup_logging(verbose)
-    config = _load_config_or_bad_parameter(
-        config_dir,
-        overrides=_run_config_overrides(
-            iterations=iterations,
-            seed=seed,
-            condition=condition,
-            skill_updates=skill_updates,
-            coevo_interval=coevo_interval,
-            advisor_buffer_max=advisor_buffer_max,
-            diffusion_enabled=diffusion_enabled,
-            diffusion_policy=diffusion_policy,
-            diffusion_graph=diffusion_graph,
-            diffusion_max_artifacts=diffusion_max_artifacts,
-            diffusion_top_k_neighbors=diffusion_top_k_neighbors,
-            harbor_agent_setup_timeout_multiplier=(
-                harbor_agent_setup_timeout_multiplier
-            ),
-        ),
-    )
     try:
-        validate_experiment_design(
-            condition=config.experiment.condition_name,
-            skill_updates=config.experiment.skill_updates,
-            baseline_preset=config.experiment.baseline_preset,
+        setup_logging(verbose)
+        config = _load_config_or_bad_parameter(
+            config_dir,
+            overrides=_run_config_overrides(
+                iterations=iterations,
+                seed=seed,
+                condition=condition,
+                skill_updates=skill_updates,
+                coevo_interval=coevo_interval,
+                advisor_buffer_max=advisor_buffer_max,
+                diffusion_enabled=diffusion_enabled,
+                diffusion_policy=diffusion_policy,
+                diffusion_graph=diffusion_graph,
+                diffusion_max_artifacts=diffusion_max_artifacts,
+                diffusion_top_k_neighbors=diffusion_top_k_neighbors,
+                harbor_agent_setup_timeout_multiplier=(
+                    harbor_agent_setup_timeout_multiplier
+                ),
+            ),
         )
-    except ExperimentDesignError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    repository = build_benchmark_repo(PROJECT_ROOT, config)
-    selection = resolve_task_selection(
-        repository=repository,
-        family=family,
-        seed=config.experiment.seed,
-        split=split,
-    )
-    if publish_state_ref is not None and selection.split != "train":
-        raise typer.BadParameter(
-            "--publish-state-ref may only publish graph state from --split train runs"
-        )
-    if cloud:
         try:
-            remote_harbor_config = load_vm_config(cloud_env_file)
-        except (OSError, CloudVMConfigError) as exc:
+            validate_experiment_design(
+                condition=config.experiment.condition_name,
+                skill_updates=config.experiment.skill_updates,
+                baseline_preset=config.experiment.baseline_preset,
+            )
+        except ExperimentDesignError as exc:
             raise typer.BadParameter(str(exc)) from exc
-    else:
-        remote_harbor_config = None
-    run_skillflow_experiment(
-        config=config,
-        selection=selection,
-        iterations=config.experiment.num_iterations,
-        seed=config.experiment.seed,
-        condition_name=config.experiment.condition_name,
-        run_id=run_id,
-        harness_dir=resolved_harness_dir,
-        state_source=state_source,
-        publish_state_ref=publish_state_ref,
-        remote_harbor_config=remote_harbor_config,
-    )
+        repository = build_benchmark_repo(PROJECT_ROOT, config)
+        if task_manifest is not None:
+            if family:
+                raise typer.BadParameter("--task-manifest cannot be combined with --family")
+            selection = load_task_manifest_selection(
+                repository=repository,
+                manifest_path=task_manifest,
+            )
+            if split is not None and split.strip().lower() != selection.split:
+                raise typer.BadParameter(
+                    "--split must match the split declared in --task-manifest"
+                )
+        else:
+            selection = resolve_task_selection(
+                repository=repository,
+                family=family,
+                seed=config.experiment.seed,
+                split=split,
+            )
+        if publish_state_ref is not None and selection.split != "train":
+            raise typer.BadParameter(
+                "--publish-state-ref may only publish graph state from --split train runs"
+            )
+        if cloud:
+            try:
+                remote_harbor_config = load_vm_config(cloud_env_file)
+            except (OSError, CloudVMConfigError) as exc:
+                raise typer.BadParameter(str(exc)) from exc
+        else:
+            remote_harbor_config = None
+        run_skillflow_experiment(
+            config=config,
+            selection=selection,
+            iterations=config.experiment.num_iterations,
+            seed=config.experiment.seed,
+            condition_name=config.experiment.condition_name,
+            run_id=run_id,
+            harness_dir=resolved_harness_dir,
+            state_source=state_source,
+            publish_state_ref=publish_state_ref,
+            remote_harbor_config=remote_harbor_config,
+        )
+    finally:
+        _restore_scoped_harness_overlay()
 
 
 def publish_harness(
