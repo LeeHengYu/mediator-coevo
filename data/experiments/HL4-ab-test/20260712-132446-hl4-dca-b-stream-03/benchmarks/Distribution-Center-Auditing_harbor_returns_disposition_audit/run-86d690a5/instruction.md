@@ -1,0 +1,221 @@
+# Task Instruction
+
+## Task: Returns Disposition Audit
+
+You must produce two files:
+1. `/root/Returns_Disposition_Audit.xlsx`
+2. `/root/Returns_Disposition_Brief.docx`
+
+### Step 0 — Inspect source data
+
+```bash
+pip install openpyxl python-docx pandas
+```
+
+Then write and run a Python script that:
+1. Reads `/root/Return_Plan.xlsx`, `/root/Disposition_Event_Log.xlsx`, `/root/Disposition_Alias.xlsx`.
+2. Prints `.columns`, `.shape`, `.head(10)`, and a few sample rows for each file so you understand the schemas before writing any logic.
+3. Prints unique values of `Event Status` in the event log.
+4. Prints all rows of `Disposition_Alias.xlsx`.
+
+Study the output carefully before proceeding.
+
+### Step 1 — Build the audit workbook
+
+Write a single Python script (`/root/build_audit.py`) that does everything below, then run it.
+
+#### 1a) Read data
+- `plan_df` from `Return_Plan.xlsx` (first/only sheet).
+- `events_df` from `Disposition_Event_Log.xlsx`.
+- `alias_df` from `Disposition_Alias.xlsx`.
+
+#### 1b) RawData sheet
+- Copy `plan_df` exactly (same columns, same row order) into sheet `RawData`.
+
+#### 1c) Formatted Data sheet
+
+**Derive the kept event per (Return ID, Line ID):**
+- Filter `events_df` to rows where `Event Status` == `COMPLETED` (case-insensitive compare to be safe).
+- Among those, for each `(Return ID, Line ID)` group, keep only the row with the latest timestamp/sequence (inspect column names — likely a date/time or sequence column; pick the one that orders events chronologically). If there's a tie, keep the last row in file order.
+- Result: `kept_events` — one row per (Return ID, Line ID) or none.
+
+**Build alias lookup:**
+- From `alias_df`, build a dict mapping `alias.lower()` → `standard_disposition` (the canonical name). Inspect the column names carefully — they may be named e.g. `Alias`, `Standard Disposition` or similar.
+
+**Normalize function:**
+```python
+def normalize_disposition(raw_disp, alias_map):
+    if pd.isna(raw_disp):
+        return None
+    key = str(raw_disp).strip().lower()
+    return alias_map.get(key, str(raw_disp).strip())
+```
+
+**For each row in plan_df (preserving order), compute columns 9-12:**
+- Look up (Return ID, Line ID) in kept_events.
+- `Missing Final Event`: 1 if no kept event, else 0.
+- `Disposition Mismatch`: 0 if missing final event. Otherwise 1 if `normalize_disposition(final_disposition)` (case-insensitive) != `Planned Disposition` (case-insensitive after stripping), else 0.
+- `Total Errors` = Missing Final Event + Disposition Mismatch.
+- `Error Summary`: exactly one of `None`, `Missing Final Event`, `Disposition Mismatch`, `Missing Final Event, Disposition Mismatch` — pick based on which flags are 1.
+
+**Important:** The first 8 columns must be exactly named: `Return ID`, `Line ID`, `Planned Disposition`, `Reason Code`, `Requested Qty`, `Warehouse`, `Carrier`, `Lane`. If the source plan has different column names, rename them to match. Preserve row order.
+
+Write concrete values (no Excel formulas).
+
+#### 1d) Summary sheet
+
+- From the Formatted Data, group by `(Warehouse, Carrier)`.
+- Sum `Missing Final Event` → `Missing Final Events`, `Disposition Mismatch` → `Disposition Mismatches`, `Total Errors` → `Total Errors`.
+- Keep only groups where `Total Errors > 0`.
+- Sort ascending by `Warehouse` then `Carrier`.
+- Append a Grand Total row: `Warehouse`=`Grand Total`, `Carrier`=`-`, sums of the three numeric columns across ALL kept groups.
+- Headers must be exactly: `Warehouse`, `Carrier`, `Missing Final Events`, `Disposition Mismatches`, `Total Errors`.
+
+#### 1e) Save
+- Save to `/root/Returns_Disposition_Audit.xlsx` with `engine='openpyxl'`, using `ExcelWriter` with three sheets in order: `RawData`, `Formatted Data`, `Summary`. Use `index=False`.
+
+### Step 2 — Build the Word brief
+
+In the same script, after saving the Excel file:
+
+- Compute grand totals: total_missing, total_mismatch, total_errors from Formatted Data.
+- Identify the top 2+ Return IDs with the highest Total Errors (sum across their lines). These are the "high-priority return IDs".
+- Create `/root/Returns_Disposition_Brief.docx` using `python-docx`.
+- Add a heading "Returns Disposition Audit – Executive Summary".
+- Add a paragraph (3-6 sentences) that includes:
+  - Plain-language definition of Missing Final Event check (a return line has no completed disposition event in the log).
+  - Plain-language definition of Disposition Mismatch check (the final completed disposition does not match the originally planned disposition).
+  - The exact computed totals: e.g. "The audit identified X Missing Final Events, Y Disposition Mismatches, and Z Total Errors."
+  - Mention at least two high-priority Return IDs by their actual ID values, e.g. "Return IDs RET-001 and RET-005 had the most exceptions."
+  - At least one actionable recommendation, e.g. "We recommend investigating these returns and implementing automated disposition verification."
+- Save the document.
+
+**CRITICAL for the Word doc:** The verifier likely searches the full text for Return ID strings. Make sure the actual Return ID values (e.g., `RET-001`) appear verbatim in the paragraph text — not just in a table or heading. Include at least two distinct Return IDs that have the highest error counts.
+
+### Step 3 — Validate
+
+After running the script:
+1. Re-read the Excel file and print:
+   - Sheet names (must be exactly `RawData`, `Formatted Data`, `Summary`).
+   - Shape and first 5 rows of each sheet.
+   - Column names of each sheet.
+   - Sum of Total Errors from Formatted Data.
+   - Summary sheet contents.
+2. Re-read the Word file and print all paragraph text to confirm the Return IDs and totals appear.
+3. If anything is wrong, fix and re-run.
+
+### Step 4 — Run the verifier if available
+
+Check if `/root/test_output.py` or similar test file exists. If so, run `cd /root && python -m pytest test_output.py -v` and fix any failures.
+
+### Key Pitfalls to Avoid
+- Do NOT leave Error Summary or numeric columns as formulas — write plain values.
+- Do NOT forget to normalize dispositions using the alias table before comparing.
+- Do NOT include groups with 0 total errors in the Summary sheet.
+- Do NOT forget to mention actual Return ID values in the Word doc text (this was a failure mode in a similar task).
+- The Grand Total row sums should be computed from the filtered summary groups (where Total Errors > 0), which equals the dataset totals since we only include error groups.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@meituan.com, author_name=CatPaw Benchmark Builder, category=spreadsheet-audit, difficulty=hard, tags=[excel, openpyxl, docx, audit, returns].
+Verifier config: timeout_sec=900.0.

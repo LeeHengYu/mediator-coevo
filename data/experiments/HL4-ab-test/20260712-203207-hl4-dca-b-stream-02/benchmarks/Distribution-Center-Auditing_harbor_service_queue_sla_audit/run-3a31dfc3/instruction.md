@@ -1,0 +1,310 @@
+# Task Instruction
+
+## Task: Service Queue SLA Audit
+
+You must read `/root/Ticket_Queue.xlsx` and produce two deliverables:
+1. `/root/Service_Queue_SLA_Audit.xlsx`
+2. `/root/Service_Queue_SLA_Brief.docx`
+
+### Step-by-step instructions
+
+#### Step 0 – Inspect the source workbook
+```python
+import openpyxl
+wb = openpyxl.load_workbook('/root/Ticket_Queue.xlsx')
+print(wb.sheetnames)
+```
+Read the `Tickets` sheet: print the header row and first 5 data rows. Note exact column names.
+Read the `SLA_Rules` sheet: print ALL rows (it should be small). Note exact column names including `Priority Tier` (or similar), `Max Open Hours`, and `Escalation Required`.
+
+Record the exact column names you find — you will need them for lookups.
+
+#### Step 1 – Load data with pandas
+```python
+import pandas as pd
+
+tickets = pd.read_excel('/root/Ticket_Queue.xlsx', sheet_name='Tickets')
+sla_rules = pd.read_excel('/root/Ticket_Queue.xlsx', sheet_name='SLA_Rules')
+
+print(tickets.columns.tolist())
+print(tickets.shape)
+print(tickets.head())
+print(sla_rules)
+```
+
+Identify the join key between tickets and SLA_Rules. It should be `Priority Tier` (or whatever the exact column name is in both sheets). Build a dictionary from SLA_Rules:
+```python
+# Adjust column names to match what you actually see
+max_hours = dict(zip(sla_rules['Priority Tier'], sla_rules['Max Open Hours']))
+esc_required = dict(zip(sla_rules['Priority Tier'], sla_rules['Escalation Required']))
+```
+
+#### Step 2 – Build `Formatted Data`
+Start from a copy of the tickets dataframe. Keep the same row order. Keep exactly these first 8 columns (rename if needed to match exactly):
+1. Ticket ID
+2. Queue
+3. Priority Tier
+4. Open Age Hours
+5. Owner
+6. Escalation Code
+7. Region
+8. Analyst
+
+If the source columns have different names, rename them. If the source has columns in a different order, reorder to match.
+
+Compute the 4 new columns:
+```python
+df = formatted.copy()
+
+# SLA Breach: 1 if Open Age Hours > Max Open Hours for that Priority Tier, else 0
+df['SLA Breach'] = df.apply(lambda r: 1 if r['Open Age Hours'] > max_hours[r['Priority Tier']] else 0, axis=1)
+
+# Missing Escalation: 1 if Escalation Required is 'Y' for that Priority Tier AND Escalation Code is blank/NaN
+df['Missing Escalation'] = df.apply(
+    lambda r: 1 if esc_required[r['Priority Tier']] == 'Y' and (pd.isna(r['Escalation Code']) or str(r['Escalation Code']).strip() == '') else 0, axis=1)
+
+# Total Errors
+df['Total Errors'] = df['SLA Breach'] + df['Missing Escalation']
+
+# Error Summary
+def error_summary(row):
+    parts = []
+    if row['SLA Breach'] == 1:
+        parts.append('SLA Breach')
+    if row['Missing Escalation'] == 1:
+        parts.append('Missing Escalation')
+    return ', '.join(parts) if parts else 'None'
+
+df['Error Summary'] = df.apply(error_summary, axis=1)
+```
+
+The final `Formatted Data` dataframe must have exactly 12 columns in the order listed above.
+
+#### Step 3 – Build `Summary`
+```python
+error_rows = df[df['Total Errors'] > 0]
+summary = error_rows.groupby(['Queue', 'Region']).agg(
+    **{'SLA Breaches': ('SLA Breach', 'sum'),
+       'Missing Escalations': ('Missing Escalation', 'sum'),
+       'Total Errors': ('Total Errors', 'sum')}
+).reset_index()
+summary = summary.sort_values(['Queue', 'Region']).reset_index(drop=True)
+
+# Grand Total row
+grand = pd.DataFrame([{
+    'Queue': 'Grand Total',
+    'Region': '-',
+    'SLA Breaches': summary['SLA Breaches'].sum(),
+    'Missing Escalations': summary['Missing Escalations'].sum(),
+    'Total Errors': summary['Total Errors'].sum()
+}])
+summary = pd.concat([summary, grand], ignore_index=True)
+```
+
+Ensure numeric columns are int, not float.
+
+#### Step 4 – Write the Excel output
+Use `openpyxl` for precise control:
+```python
+from openpyxl import Workbook
+
+wb_out = Workbook()
+
+# RawData sheet – exact copy of Tickets
+ws_raw = wb_out.active
+ws_raw.title = 'RawData'
+# Write tickets dataframe including headers
+for r_idx, row in enumerate([tickets.columns.tolist()] + tickets.values.tolist(), 1):
+    for c_idx, val in enumerate(row, 1):
+        cell = ws_raw.cell(row=r_idx, column=c_idx, value=val)
+        # Convert numpy types
+        import numpy as np
+        if isinstance(val, (np.integer,)):
+            cell.value = int(val)
+        elif isinstance(val, (np.floating,)):
+            cell.value = float(val)
+        elif isinstance(val, (np.bool_,)):
+            cell.value = bool(val)
+
+# Formatted Data sheet
+ws_fmt = wb_out.create_sheet('Formatted Data')
+for r_idx, row in enumerate([df.columns.tolist()] + df.values.tolist(), 1):
+    for c_idx, val in enumerate(row, 1):
+        cell = ws_fmt.cell(row=r_idx, column=c_idx, value=val)
+        if isinstance(val, (np.integer,)):
+            cell.value = int(val)
+        elif isinstance(val, (np.floating,)):
+            cell.value = float(val)
+
+# Summary sheet
+ws_sum = wb_out.create_sheet('Summary')
+for r_idx, row in enumerate([summary.columns.tolist()] + summary.values.tolist(), 1):
+    for c_idx, val in enumerate(row, 1):
+        cell = ws_sum.cell(row=r_idx, column=c_idx, value=val)
+        if isinstance(val, (np.integer,)):
+            cell.value = int(val)
+        elif isinstance(val, (np.floating,)):
+            cell.value = float(val)
+
+wb_out.save('/root/Service_Queue_SLA_Audit.xlsx')
+```
+
+#### Step 5 – Verify the Excel output
+Reload the file and check:
+- Sheet names are exactly `['RawData', 'Formatted Data', 'Summary']`
+- `RawData` row count matches source Tickets
+- `Formatted Data` has 12 columns with correct headers
+- `Summary` last row is Grand Total
+- Print a few sample rows from each sheet to confirm correctness
+- Print the grand total values
+
+#### Step 6 – Create the Word document
+```python
+from docx import Document
+
+total_sla = int(df['SLA Breach'].sum())
+total_missing = int(df['Missing Escalation'].sum())
+total_errors = int(df['Total Errors'].sum())
+
+# Find top queues by total errors
+queue_errors = df.groupby('Queue')['Total Errors'].sum().sort_values(ascending=False)
+top_queues = queue_errors.head(2).index.tolist()
+
+doc = Document()
+doc.add_heading('Service Queue SLA Audit Brief', level=1)
+
+paragraph = (
+    f'This audit reviews ticket queue health against defined SLA thresholds. '
+    f'An SLA Breach is flagged when a ticket\'s Open Age Hours exceeds the maximum allowed hours for its Priority Tier as defined in the SLA rules. '
+    f'A Missing Escalation is flagged when a ticket\'s Priority Tier requires escalation but no Escalation Code has been recorded. '
+    f'Across the dataset, {total_sla} SLA Breaches, {total_missing} Missing Escalations, and {total_errors} Total Errors were identified. '
+    f'The queues with the most frequent exceptions are {top_queues[0]} and {top_queues[1]}, which should be prioritized for remediation. '
+    f'We recommend conducting root-cause analysis on these high-error queues, reviewing staffing levels, and implementing automated escalation triggers to reduce future SLA violations.'
+)
+doc.add_paragraph(paragraph)
+doc.save('/root/Service_Queue_SLA_Brief.docx')
+```
+
+#### Step 7 – Final verification
+- Confirm `/root/Service_Queue_SLA_Audit.xlsx` exists and can be opened
+- Confirm `/root/Service_Queue_SLA_Brief.docx` exists and can be opened
+- Re-read the Word doc and print its text to verify content includes all required elements
+- Print summary stats one more time for confirmation
+
+### Critical details to watch for:
+- **Column name matching**: The source may use slightly different names. Inspect first, then adapt.
+- **Blank Escalation Code**: Could be NaN, None, empty string, or whitespace. Handle all cases.
+- **Numeric types**: Convert numpy types to Python native types before writing to openpyxl cells.
+- **Sheet names must be exact**: `RawData`, `Formatted Data`, `Summary`
+- **File names must be exact**: `/root/Service_Queue_SLA_Audit.xlsx`, `/root/Service_Queue_SLA_Brief.docx`
+- **Error Summary strings must be exact**: `None`, `SLA Breach`, `Missing Escalation`, `SLA Breach, Missing Escalation`
+- **Summary only includes groups with Total Errors > 0**
+- **Summary sorted by Queue asc, then Region asc**
+- **Grand Total row**: Queue='Grand Total', Region='-'
+- **SLA Breach uses strict greater-than** (not >=)
+- **Write concrete values, not formulas**
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@meituan.com, author_name=CatPaw Benchmark Builder, category=spreadsheet-audit, difficulty=hard, tags=[excel, openpyxl, docx, audit, service].
+Verifier config: timeout_sec=900.0.

@@ -1,0 +1,206 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Execute the following steps in order:
+
+## Step 1: Inspect the source workbook
+```bash
+cd /root
+python3 -c "
+import openpyxl
+wb = openpyxl.load_workbook('"'"'Timesheet_Submissions.xlsx'"'"')
+print('"'"'Sheet names:'"'"', wb.sheetnames)
+for name in wb.sheetnames:
+    ws = wb[name]
+    print(f'"'"'\n=== {name} === (rows={ws.max_row}, cols={ws.max_column})'"'"')
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        print(row)
+        if i >= 25:
+            print('"'"'... (truncated)'"'"')
+            break
+"
+```
+
+## Step 2: Inspect the test/verifier file
+```bash
+find /root -name '"'"'*.py'"'"' -path '"'"'*/test*'"'"' | head -20
+cat /root/tests/test_output*.py 2>/dev/null || cat /root/tests/test_outputs.py 2>/dev/null || find /root -name '"'"'test_*.py'"'"' -exec cat {} \;
+```
+
+## Step 3: Build the solution script
+After inspecting the data and tests, create and run a Python script `/root/solve.py` that does the following:
+
+### 3a: Read source data
+- Load `Timesheet_Submissions.xlsx`.
+- Read the `Entries` sheet into a list of dicts (preserving row order).
+- Read the `BreakRules` sheet into a dict keyed by Role, storing `Min Break Minutes` and `Overtime Threshold` for each role.
+- **Use the actual column headers from the sheets** (inspect them first). Do NOT hardcode role thresholds; look them up from `BreakRules` by each row'"'"'s Role.
+
+### 3b: Create `/root/Timesheet_Compliance_Audit.xlsx`
+Using `openpyxl`:
+
+**`RawData` sheet:**
+- Copy the `Entries` table exactly (headers + all data rows), preserving original order.
+
+**`Formatted Data` sheet:**
+- Same rows, same order as RawData.
+- First 8 columns exactly: `Week Ending`, `Employee ID`, `Role`, `Hours Worked`, `Break Minutes`, `Approval Code`, `Project Code`, `Manager`.
+- Add 4 computed columns (write concrete values, not formulas):
+  - Col 9 `Break Deficit`: 1 if `Break Minutes` < `Min Break Minutes` for that Role, else 0.
+  - Col 10 `Approval Missing`: 1 if `Hours Worked` > `Overtime Threshold` for that Role AND `Approval Code` is blank/None/empty, else 0.
+  - Col 11 `Total Errors`: Break Deficit + Approval Missing.
+  - Col 12 `Error Summary`: exactly one of `None`, `Break Deficit`, `Approval Missing`, or `Break Deficit, Approval Missing` (note the comma-space separator).
+
+**`Summary` sheet:**
+- Headers: `Employee ID`, `Week Ending`, `Break Deficits`, `Approval Gaps`, `Total Errors`.
+- Aggregate from Formatted Data by (Employee ID, Week Ending).
+- Include ONLY groups where Total Errors > 0.
+- Sort by Employee ID ascending, then Week Ending ascending.
+- Append a final row: `Grand Total`, `-`, sum of Break Deficits, sum of Approval Gaps, sum of Total Errors.
+
+### 3c: Create `/root/Timesheet_Compliance_Brief.docx`
+Using `python-docx`:
+- Write a heading "Timesheet Compliance Brief" or similar.
+- Write an executive summary paragraph (3-6 sentences) that:
+  1. Defines Break Deficit check: flagged when an employee'"'"'s break minutes fall below the minimum required for their role.
+  2. Defines Approval Missing check: flagged when hours worked exceed the overtime threshold for the role but no approval code is recorded.
+  3. States the computed totals: total Break Deficits = X, total Approval Gaps = Y, total Total Errors = Z (use actual computed numbers).
+  4. Mentions at least two specific Employee IDs that have the highest error counts (pick the top 2+ by total errors from the Summary data).
+  5. Includes at least one actionable recommendation (e.g., "We recommend mandatory break-time tracking enforcement and pre-approval workflows for overtime hours.").
+
+**CRITICAL for the Word doc:** Make sure the high-priority Employee IDs appear explicitly in the text (e.g., "Employee EMP-1042 and EMP-1087 had the most frequent exceptions"). This was a failure point in similar tasks.
+
+### 3d: Validate
+After generating both files:
+- Re-open the Excel file and print sheet names, row counts, and sample rows from each sheet.
+- Re-open the Word file and print all paragraph text.
+- Confirm the `Formatted Data` sheet has exactly 12 columns.
+- Confirm the `Summary` sheet'"'"'s last row is the Grand Total row.
+- Confirm the Word doc mentions at least 2 Employee IDs.
+
+## Step 4: Run the verifier
+```bash
+cd /root && python3 -m pytest tests/ -v 2>&1 | head -80
+```
+
+If any tests fail, read the failure output carefully, identify the issue, fix the script, re-run, and re-test. Iterate until all tests pass.
+
+## Important Notes
+- Install any missing packages: `pip install openpyxl python-docx` if needed.
+- Use the ACTUAL column names from the source sheets (inspect first, then code).
+- For `Approval Code` blank check: treat None, empty string, and whitespace-only as blank.
+- For `Week Ending` values: preserve whatever type/format they are in the source (dates, strings, etc.).
+- Write concrete values (integers 0/1, text strings) in the computed columns, not Excel formulas.
+- The `Error Summary` string `None` should be the text string "None", not Python'"'"'s None value.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@meituan.com, author_name=CatPaw Benchmark Builder, category=spreadsheet-audit, difficulty=hard, tags=[excel, openpyxl, docx, audit, timesheet].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260712-203207-hl4-dca-b-stream-02/jobs/2026-07-12__20-41-37/run-de3f038c__EsDk8G9/agent/trajectory.json
