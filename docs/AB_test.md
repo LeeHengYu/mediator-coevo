@@ -61,8 +61,6 @@ Option B uses the stored pre-HL4 baseline overlay, an empty per-run artifact
 bank, and no graph state:
 
 ```zsh
-PYTHONDONTWRITEBYTECODE=1 \
-UV_CACHE_DIR=data/experiments/HL4/.uv-cache-ab-b-stream-01 \
 uv run medcoevo run \
   --config-dir data/experiments/HL4/ab_control \
   --task-manifest data/experiments/HL4/test_final/task_manifest.json \
@@ -76,8 +74,6 @@ uv run medcoevo run \
 Option C uses the final promoted harness and frozen final graph bundle:
 
 ```zsh
-PYTHONDONTWRITEBYTECODE=1 \
-UV_CACHE_DIR=data/experiments/HL4/.uv-cache-ab-c-stream-01 \
 uv run medcoevo run \
   --config-dir data/experiments/HL4/ab_control \
   --task-manifest data/experiments/HL4/test_final/task_manifest.json \
@@ -93,6 +89,58 @@ Do not add `--state-dir`, `--state-ref`, or `--publish-state-ref` to B. Do not
 use a moving channel reference for C. The original final-C result already uses
 this manifest, so a B run is paired to that stored C stream; rerun C only when
 measuring runtime/provider variance.
+
+### DCA OOD Hard/Expert Streams
+
+The original four-family stream is an in-distribution test. The DCA manifests
+are a separate out-of-distribution generalization benchmark. They contain the
+same five unique hard/expert tasks in three predeclared orders:
+
+- `data/experiments/HL4/ab_control/dca_hard_stream_01.json`
+- `data/experiments/HL4/ab_control/dca_hard_stream_02.json`
+- `data/experiments/HL4/ab_control/dca_hard_stream_03.json`
+
+Run all three arms on each manifest. Use serial execution and rotate arm order:
+stream 01: B, C, A; stream 02: C, A, B; stream 03: A, B, C.
+
+```zsh
+STREAM=03
+MANIFEST=data/experiments/HL4/ab_control/dca_hard_stream_${STREAM}.json
+
+# A: baseline harness, no diffusion.
+uv run medcoevo run \
+  --config-dir data/experiments/HL4/ab_control \
+  --task-manifest "$MANIFEST" \
+  --harness-dir data/experiments/HL4/baseline \
+  --no-diffusion-enabled \
+  --diffusion-policy none \
+  --run-id hl4-dca-a-stream-${STREAM}
+
+# B: baseline harness, Random-K, no graph state.
+uv run medcoevo run \
+  --config-dir data/experiments/HL4/ab_control \
+  --task-manifest "$MANIFEST" \
+  --harness-dir data/experiments/HL4/baseline \
+  --diffusion-enabled \
+  --diffusion-policy random_k \
+  --diffusion-max-artifacts 1 \
+  --run-id hl4-dca-b-stream-${STREAM}
+
+# C: final promoted harness plus the frozen final HL4 graph bundle.
+uv run medcoevo run \
+  --config-dir data/experiments/HL4/ab_control \
+  --task-manifest "$MANIFEST" \
+  --harness-dir data/experiments/HL4/train_epoch_5/harnesses/update_0005 \
+  --state-dir data/experiments/HL4/bundles/0aa32962e37bae99ce557a0cb805b0ce51419d6d2821835d81ba1be36a416471/state \
+  --diffusion-enabled \
+  --diffusion-policy langchain_graph \
+  --diffusion-max-artifacts 1 \
+  --run-id hl4-dca-c-stream-${STREAM}
+```
+
+Do not publish graph state from any DCA run. Aggregate outcomes by stream,
+not by repeated observations, and report the DCA result separately from the
+original four-family test.
 
 Recommended minimum: five independently sampled, predeclared held-out streams,
 with each stream executed under A, B, and C. Randomize arm execution order per
