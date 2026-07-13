@@ -51,6 +51,12 @@ from mediated_coevo.evolution.candidates import (
 from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.evolution.reflector import ReflectionDraft, Reflector
 from mediated_coevo.evolution.skill_advisor import SkillAdvisor
+from mediated_coevo.execution.adapters import portable_execution_trace
+from mediated_coevo.execution.models import (
+    ContextPack,
+    TaskProfile,
+    redact_sensitive_data,
+)
 from mediated_coevo.experiment.conditions import (
     ConditionName,
     get_cross_task_prior_context,
@@ -88,6 +94,20 @@ from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
 logger = logging.getLogger(__name__)
+
+_EXPLICIT_CONTEXT_UNSET = object()
+
+
+def _validate_portable_filename_component(value: str, *, label: str) -> None:
+    if (
+        not value
+        or value != value.strip()
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+    ):
+        raise ValueError(f"{label} must be a portable filename component")
 
 
 @dataclass(frozen=True)
@@ -163,6 +183,10 @@ class Orchestrator:
         self._previous_reward_by_task: dict[str, float] = {}
         self._prior_context_by_target: dict[tuple[str, int], dict[str, Any]] = {}
         self._diffusion_context_by_target: dict[tuple[str, int], dict[str, Any]] = {}
+        self._explicit_execution_provenance_by_key: dict[
+            tuple[str, int],
+            dict[str, Any],
+        ] = {}
         self._diffusion_sub_board: dict[
             tuple[int, str],
             list[DiffusionSubscription],
@@ -175,6 +199,12 @@ class Orchestrator:
         self._langchain_graph_policy: Any | None = None
         self._diffusion_snapshot_by_iteration: dict[int, TaskGraphSnapshot] = {}
         self._diffusion_target_task_ids: list[str] = []
+
+    @property
+    def diffusion_store(self) -> DiffusionStore:
+        """Return the durable diffusion store used by this runtime."""
+        self._ensure_diffusion_runtime_state()
+        return self._diffusion_store
 
     async def run_experiment(
         self,
@@ -287,10 +317,49 @@ class Orchestrator:
         )
         self._staged_cross_task_reports_by_task.clear()
 
+    async def execute_task_with_context(
+        self,
+        *,
+        task_id: str,
+        position: int,
+        context: ContextPack,
+        task: TaskProfile,
+    ) -> IterationRecord:
+        """Execute one task using the caller's complete context pack.
+
+        This is the sample-runtime seam. It bypasses all legacy prior-context
+        discovery and prevents the legacy loop from emitting transfer artifacts;
+        the causal sample state machine performs its own validated bank update.
+        """
+        return await self._run_iteration(
+            task_id,
+            position,
+            _explicit_context=context,
+            _explicit_task=task,
+        )
+
+    def take_explicit_execution_provenance(
+        self,
+        *,
+        task_id: str,
+        position: int,
+    ) -> dict[str, Any]:
+        """Consume judge/verifier provenance produced by one explicit execution."""
+        store = getattr(self, "_explicit_execution_provenance_by_key", None)
+        if store is None:
+            return {}
+        return store.pop(
+            (task_id, position),
+            {},
+        )
+
     async def _run_iteration(
         self,
         task_id: str,
         iteration: int,
+        *,
+        _explicit_context: ContextPack | object = _EXPLICIT_CONTEXT_UNSET,
+        _explicit_task: TaskProfile | None = None,
     ) -> IterationRecord:
         start = time.time()
         condition = self.config.experiment.condition_name
@@ -298,21 +367,29 @@ class Orchestrator:
         executor_skill_text = self.skill_store.read_skill("executor") or ""
         planner_skill_text = self.skill_store.read_skill("planner") or None
 
-        try:
-            benchmark_task = self.benchmark_repo.resolve(task_id)
-        except FileNotFoundError as e:
-            return self._record_missing_task(
-                task_id=task_id,
-                iteration=iteration,
-                condition=condition,
-                start=start,
-                exc=e,
-                skill_hashes=skill_hashes,
-            )
+        if _explicit_task is not None and _explicit_task.task_id != task_id:
+            raise ValueError("explicit task profile does not match task_id")
+        if _explicit_task is not None:
+            task_instruction = _explicit_task.instruction
+            task_config = _explicit_task.task_config
+        else:
+            try:
+                benchmark_task = self.benchmark_repo.resolve(task_id)
+            except FileNotFoundError as e:
+                return self._record_missing_task(
+                    task_id=task_id,
+                    iteration=iteration,
+                    condition=condition,
+                    start=start,
+                    exc=e,
+                    skill_hashes=skill_hashes,
+                )
+            task_instruction = benchmark_task.instruction
+            task_config = benchmark_task.task_config
 
         task_metadata = task_metadata_fields(
             task_id=task_id,
-            task_config=benchmark_task.task_config,
+            task_config=task_config,
         )
 
         self.planner.set_skill_context(
@@ -321,22 +398,45 @@ class Orchestrator:
         )
 
         skill_texts = [executor_skill_text] if executor_skill_text else []
-        prior_context = await self._build_prior_context(
-            condition,
-            task_id,
-            current_iteration=iteration,
-        )
+        if _explicit_context is _EXPLICIT_CONTEXT_UNSET:
+            prior_context = await self._build_prior_context(
+                condition,
+                task_id,
+                current_iteration=iteration,
+            )
+        else:
+            assert isinstance(_explicit_context, ContextPack)
+            prior_context = _explicit_context.text
         logger.info("Step 1: Planner planning task (condition=%s)...", condition)
         task_spec = await self.planner.plan_task(
             task_id=task_id,
-            base_instruction=benchmark_task.instruction,
+            base_instruction=task_instruction,
             prior_context=prior_context,
             current_skills=skill_texts,
             iteration=iteration,
         )
+        if _explicit_context is not _EXPLICIT_CONTEXT_UNSET and (
+            task_spec.task_id != task_id or task_spec.iteration != iteration
+        ):
+            raise ValueError(
+                "explicit-context planner returned a different task occurrence"
+            )
 
         logger.info("Step 2: Executor running task...")
         trace = await self.executor.execute_task(task_spec, skill_texts)
+        explicit_external_refs: tuple[dict[str, Any], ...] = ()
+        if _explicit_context is not _EXPLICIT_CONTEXT_UNSET:
+            if trace.task_id != task_id or trace.iteration != iteration:
+                raise ValueError(
+                    "explicit-context executor returned a different task occurrence"
+                )
+            trace = ExecutionTrace.model_validate(
+                redact_sensitive_data(trace.model_dump(mode="python"))
+            )
+            trace, _, explicit_external_refs = portable_execution_trace(
+                trace,
+                workspace=self.experiment_dir,
+            )
 
         report = None
         trace_path = self.artifact_store.store_trace(trace)
@@ -373,56 +473,88 @@ class Orchestrator:
                 format_optional_reward(trace.reward),
             )
 
-        report = await self.mediator.mediate_trace(condition, trace, task_spec)
+        if _explicit_context is _EXPLICIT_CONTEXT_UNSET or not hasattr(
+            self.mediator,
+            "_artifact_store",
+        ):
+            report = await self.mediator.mediate_trace(condition, trace, task_spec)
+        else:
+            # The explicit sample seam receives all transfer context from its
+            # ContextPack; same-task summaries are legacy hidden state.
+            mediator_artifact_store = self.mediator._artifact_store
+            self.mediator._artifact_store = None
+            try:
+                report = await self.mediator.mediate_trace(condition, trace, task_spec)
+            finally:
+                self.mediator._artifact_store = mediator_artifact_store
+        if report is not None and _explicit_context is not _EXPLICIT_CONTEXT_UNSET:
+            if report.task_id != task_id or report.iteration != iteration:
+                raise ValueError(
+                    "explicit-context mediator returned a different task occurrence"
+                )
+            _validate_portable_filename_component(
+                report.report_id,
+                label="mediator report_id",
+            )
+            report = MediatorReport.model_validate(
+                redact_sensitive_data(report.model_dump(mode="python"))
+            )
         if report is not None:
             self.artifact_store.store_report(report)
 
-        proposal_feedback = await get_executor_proposal_feedback(
-            condition=condition,
-            task_id=task_id,
-            artifact_store=self.artifact_store,
-            mediator_report=report,
-            llm_client=self.mediator.llm_client if condition == "full_traces" else None,
-            model=self.planner.llm_client.model,
-            budgets=self.config.budgets,
-            condition_name=condition,
-        )
+        if _explicit_context is _EXPLICIT_CONTEXT_UNSET:
+            proposal_feedback = await get_executor_proposal_feedback(
+                condition=condition,
+                task_id=task_id,
+                artifact_store=self.artifact_store,
+                mediator_report=report,
+                llm_client=(
+                    self.mediator.llm_client if condition == "full_traces" else None
+                ),
+                model=self.planner.llm_client.model,
+                budgets=self.config.budgets,
+                condition_name=condition,
+            )
 
-        await self._ask_planner_for_skill_proposal(
-            task_id=task_id,
-            iteration=iteration,
-            executor_skill=executor_skill_text,
-            feedback=proposal_feedback,
-        )
-
-        self.history_store.tag_outcome(
-            task_id,
-            trace,
-            proposals=self._proposal_buffer,
-            outcome_reward=outcome_reward,
-            outcome_metadata=outcome_metadata,
-        )
-
-        skill_update = await self.executor_skill_gate.review_and_patch(
-            iteration=iteration,
-            proposal_buffer=self._proposal_buffer,
-        )
-        mediator_entry_id, planner_entry_id = (
-            await self._record_history_entries(
+            await self._ask_planner_for_skill_proposal(
                 task_id=task_id,
                 iteration=iteration,
-                condition=condition,
-                report=report,
-                skill_update=skill_update,
+                executor_skill=executor_skill_text,
+                feedback=proposal_feedback,
             )
-        )
-        self.history_store.tag_outcome(
-            task_id,
-            trace,
-            entry_ids=[mediator_entry_id, planner_entry_id],
-            outcome_reward=outcome_reward,
-            outcome_metadata=outcome_metadata,
-        )
+
+            self.history_store.tag_outcome(
+                task_id,
+                trace,
+                proposals=self._proposal_buffer,
+                outcome_reward=outcome_reward,
+                outcome_metadata=outcome_metadata,
+            )
+
+            skill_update = await self.executor_skill_gate.review_and_patch(
+                iteration=iteration,
+                proposal_buffer=self._proposal_buffer,
+            )
+            mediator_entry_id, planner_entry_id = (
+                await self._record_history_entries(
+                    task_id=task_id,
+                    iteration=iteration,
+                    condition=condition,
+                    report=report,
+                    skill_update=skill_update,
+                )
+            )
+            self.history_store.tag_outcome(
+                task_id,
+                trace,
+                entry_ids=[mediator_entry_id, planner_entry_id],
+                outcome_reward=outcome_reward,
+                outcome_metadata=outcome_metadata,
+            )
+        else:
+            skill_update = None
+            mediator_entry_id = None
+            planner_entry_id = None
 
         duration = time.time() - start
         llm_token_events = self._drain_llm_token_events()
@@ -441,21 +573,46 @@ class Orchestrator:
             task_metadata=task_metadata,
             llm_token_events=llm_token_events,
             config=self.config,
-            previous_reward_by_task=self._previous_reward_by_task,
+            previous_reward_by_task=(
+                self._previous_reward_by_task
+                if _explicit_context is _EXPLICIT_CONTEXT_UNSET
+                else {}
+            ),
         )
-        if self.executor_skill_gate.last_advisor_decision:
+        if (
+            _explicit_context is _EXPLICIT_CONTEXT_UNSET
+            and self.executor_skill_gate.last_advisor_decision
+        ):
             record.advisor_decision = self.executor_skill_gate.last_advisor_decision
             record.advisor_reason = self.executor_skill_gate.last_advisor_reason
             record.advisor_rejection_id = self.executor_skill_gate.last_rejection_id
             record.proposal_ids = list(self.executor_skill_gate.last_proposal_ids)
-        self._attach_diffusion_context_metrics(record)
-        await self._emit_diffusion_artifacts(
-            trace=trace,
-            report=report,
-            record=record,
-            task_metadata=task_metadata,
-            judge_reward=outcome_reward,
-        )
+        if _explicit_context is _EXPLICIT_CONTEXT_UNSET:
+            self._attach_diffusion_context_metrics(record)
+            await self._emit_diffusion_artifacts(
+                trace=trace,
+                report=report,
+                record=record,
+                task_metadata=task_metadata,
+                judge_reward=outcome_reward,
+            )
+        else:
+            assert isinstance(_explicit_context, ContextPack)
+            self._attach_explicit_context_metrics(record, _explicit_context)
+            provenance = dict(outcome_metadata or {})
+            if outcome_reward is not None:
+                provenance["judge_reward"] = outcome_reward
+            if explicit_external_refs:
+                provenance["external_archive_refs"] = explicit_external_refs
+            provenance_store = getattr(
+                self,
+                "_explicit_execution_provenance_by_key",
+                None,
+            )
+            if provenance_store is None:
+                provenance_store = {}
+                self._explicit_execution_provenance_by_key = provenance_store
+            provenance_store[(task_id, iteration)] = provenance
         return record
 
     async def _judge_evolution_reward(
@@ -1309,6 +1466,45 @@ class Orchestrator:
         record.context_budget_violation = (
             record.context_budget_violation or context["budget_violation"]
         )
+        if record.diffusion_artifacts_rendered > 0:
+            record.reward_after_diffusion_context = record.reward
+            record.regression_after_diffusion_context = (
+                record.delta_reward is not None and record.delta_reward < 0
+            )
+
+    def _attach_explicit_context_metrics(
+        self,
+        record: IterationRecord,
+        context: ContextPack,
+    ) -> None:
+        """Copy the validated sample context contract onto the iteration row."""
+        record.diffusion_policy = context.policy_name
+        record.diffusion_enabled = context.policy_name != "none"
+        record.graph_snapshot_id = context.snapshot_id
+        record.diffusion_graph = (
+            str(context.metadata.get("graph_policy") or "") or None
+            if context.snapshot_id is not None
+            else None
+        )
+        record.diffusion_artifacts_eligible = len(context.eligible_artifact_ids)
+        record.diffusion_artifacts_selected = len(context.selected_artifact_ids)
+        record.diffusion_artifacts_rendered = len(context.rendered_artifact_ids)
+        record.diffusion_artifact_store_count = len(context.eligible_artifact_ids)
+        record.transfer_context_kind = "diffusion" if context.text is not None else "none"
+        record.transfer_context_tokens = context.token_count
+        record.same_task_prior_tokens = 0
+        record.total_planner_prior_context_tokens = context.token_count
+        record.max_same_task_prior_tokens = 0
+        record.max_transfer_context_tokens = context.max_context_tokens or 0
+        record.max_total_prior_context_tokens = context.max_context_tokens or 0
+        record.context_budget_violation = context.budget_violation
+        record.compacted_diffusion_artifact_ids = list(
+            context.compacted_artifact_ids
+        )
+        record.dropped_for_budget_artifact_ids = list(
+            context.dropped_for_budget_artifact_ids
+        )
+        record.source_task_ids = list(context.source_task_ids)
         if record.diffusion_artifacts_rendered > 0:
             record.reward_after_diffusion_context = record.reward
             record.regression_after_diffusion_context = (
