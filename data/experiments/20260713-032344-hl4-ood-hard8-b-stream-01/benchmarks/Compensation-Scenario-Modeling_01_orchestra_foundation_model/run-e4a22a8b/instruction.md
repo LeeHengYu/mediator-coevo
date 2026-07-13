@@ -1,0 +1,243 @@
+# Task Instruction
+
+Complete the following steps to build the Orchestra Compensation Model.
+
+## Step 1: Inspect the source file
+
+Read `/root/orchestra_assumptions_and_roster.xlsx` thoroughly. Use Python with openpyxl:
+
+```python
+import openpyxl
+wb = openpyxl.load_workbook('/root/orchestra_assumptions_and_roster.xlsx', data_only=True)
+for name in wb.sheetnames:
+    ws = wb[name]
+    print(f'=== Sheet: {name} (rows={ws.max_row}, cols={ws.max_column}) ===')
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, values_only=False):
+        print([(c.coordinate, c.value) for c in row if c.value is not None])
+```
+
+Print ALL data — every cell with a value. We need to understand:
+- What assumptions exist (MWS, premiums, media fee, withholding/tax rates, seniority tiers, principal tiers)
+- The roster structure (columns, number of musicians, fields like instrument, section, years of service, overscale, principal status, etc.)
+- Any named ranges already defined in the source
+
+Do NOT proceed until you have printed and understood the complete contents.
+
+## Step 2: Also check named ranges in source
+```python
+for name, defn in wb.defined_names.items():
+    print(f'{name} = {defn.attr_text}')
+```
+
+## Step 3: Build the output workbook
+
+Create a comprehensive Python script that builds `/root/Orchestra_Compensation.xlsx`. The script must:
+
+### 3a. Create sheets in EXACT order:
+1. `Summary`
+2. `Assumptions`
+3. `Roster`
+4. `Calculations --->`
+5. `EE Calcs (Current)`
+6. `EE Calcs (Yr+1)`
+7. `EE Calcs (Yr+2)`
+
+Remove the default sheet if openpyxl creates one.
+
+### 3b. Assumptions sheet:
+- Copy ALL assumption text and numeric drivers from the source workbook's assumptions sheet.
+- Preserve the layout (same rows/columns as source where possible).
+- Include values for MWS, principal pay tiers, media/exploitation fees, payroll tax rates/tiers/limits, seniority tiers, withholding rates, overscale info, premiums — everything from the source.
+
+### 3c. Roster sheet:
+- Copy ALL musicians from the source roster. Verify row count matches source exactly — no dropped or duplicated rows.
+- Include all columns from source (name, instrument, section, years of service, hire date, overscale amount, principal status, etc.).
+
+### 3d. Calculations ---> sheet:
+- This is a separator/label sheet. Put a label like 'Calculation Sheets Follow' in A1.
+
+### 3e. EE Calcs sheets (Current, Yr+1, Yr+2):
+- Each sheet has per-employee rows (one per musician from the roster).
+- Columns should cover each compensation component BY QUARTER (Q1-Q4):
+  - Base MWS (weekly rate × weeks per quarter, referencing Assumptions)
+  - Overscale
+  - Principal Pay
+  - Media/Exploitation Fee
+  - Seniority Pay (based on years of service and seniority tier from Assumptions)
+  - Gross Pay subtotals
+  - Payroll Tax (with tiered treatment — e.g., Social Security up to wage base, Medicare, FUTA/SUTA with limits)
+  - Total compensation per employee per quarter
+- Row 107 MUST contain aggregate (SUM) formulas totaling each column across all employees.
+- For Yr+1 sheet: years-of-service = current + 1. For Yr+2: current + 2. Use formulas referencing the Roster sheet's YOS column plus the offset.
+- ALL values must be FORMULA-DRIVEN referencing Assumptions sheet cells or named ranges.
+
+### 3f. Summary sheet:
+- Input drivers section at top: MWS rates, premiums, media fee, withholding/tax rates, seniority tiers for all 3 years. These should reference (via formula) the Assumptions sheet.
+- Quarterly compensation summary section with rows for:
+  - MWS
+  - Overscale
+  - Principal Pay
+  - Media Exploitation
+  - Seniority
+  - Payroll Tax
+  - Total Compensation Expense
+  - Y/Y Growth Rate
+- Each cell in the quarterly summary MUST be a formula referencing the corresponding aggregate in row 107 of the appropriate EE Calcs sheet.
+- Y/Y growth = (current year total / prior year total) - 1, as a formula.
+
+### 3g. Named Ranges:
+- Define named ranges for key assumptions: MWS (all 3 years), principal tiers, media fee, payroll tax tiers/rates/limits, seniority tiers.
+- Use the Assumptions sheet cells as the targets.
+- Use descriptive names like `MWS_Current`, `MWS_Yr1`, `MWS_Yr2`, `MediaFee_Current`, `SeniorityTier1_Current`, `PayrollTax_SS_Rate`, `PayrollTax_SS_Limit`, etc.
+
+### 3h. Formula construction notes:
+- Use openpyxl formula strings (e.g., `'=Assumptions!B5'`, `'=SUM(B3:B106)'`).
+- For cross-sheet references use the sheet name in quotes if it contains spaces: `"='EE Calcs (Current)'!B107"`.
+- Ensure all formulas use proper Excel syntax.
+
+## Step 4: Validate the output
+
+After creating the workbook, re-open it and verify:
+1. Sheet names and order are exactly correct (print `wb.sheetnames`).
+2. Roster row count matches source (no drops/duplicates).
+3. Row 107 on each EE Calcs sheet contains formulas (not None/empty).
+4. Summary sheet cells contain formulas (check `.value` starts with `=`).
+5. Named ranges are defined (print them all).
+6. Assumptions sheet has content matching source.
+
+```python
+wb2 = openpyxl.load_workbook('/root/Orchestra_Compensation.xlsx')
+print('Sheets:', wb2.sheetnames)
+# Check roster count
+roster = wb2['Roster']
+print(f'Roster rows (excl header): {roster.max_row - 1}')
+# Check row 107 formulas
+for sn in ['EE Calcs (Current)', 'EE Calcs (Yr+1)', 'EE Calcs (Yr+2)']:
+    ws = wb2[sn]
+    row107 = [(c.coordinate, c.value) for c in ws[107] if c.value is not None]
+    print(f'{sn} row 107: {row107[:5]}...')
+# Check Summary formulas
+ws = wb2['Summary']
+for row in ws.iter_rows(min_row=1, max_row=ws.max_row, values_only=False):
+    for c in row:
+        if c.value and str(c.value).startswith('='):
+            print(f'Summary formula: {c.coordinate} = {c.value}')
+            break
+# Named ranges
+for name, defn in wb2.defined_names.items():
+    print(f'Named range: {name} = {defn.attr_text}')
+```
+
+Fix any issues found during validation.
+
+## CRITICAL CONSTRAINTS:
+- The output file MUST be at exactly `/root/Orchestra_Compensation.xlsx`
+- Do NOT hardcode numeric values in Summary or quarterly totals — use Excel formulas
+- Row 107 must be the aggregate row on EE Calcs sheets
+- All 7 sheets must exist in the specified order
+- Every musician from the source roster must appear exactly once
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=noreply@example.com, author_name=Evalskill Refactor, category=spreadsheet-modeling, difficulty=hard, tags=[excel, compensation, workbook, latent-skill-reuse, workflow-family].
+Verifier config: timeout_sec=900.0.

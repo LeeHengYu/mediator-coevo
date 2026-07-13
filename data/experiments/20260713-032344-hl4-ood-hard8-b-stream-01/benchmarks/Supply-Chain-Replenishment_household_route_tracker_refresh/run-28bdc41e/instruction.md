@@ -1,0 +1,228 @@
+# Task Instruction
+
+You must produce the file `/root/household_route_tracker_refresh.xlsx` by reading the template and two source workbooks, computing coverage and dispatch data, and writing the result. Follow these steps exactly:
+
+## Step 1 – Inspect all source files
+
+```python
+import openpyxl, os
+
+# 1a. Template
+wb_tpl = openpyxl.load_workbook('/root/Household_Route_Template.xlsx')
+print('Template sheets:', wb_tpl.sheetnames)
+for sn in wb_tpl.sheetnames:
+    ws = wb_tpl[sn]
+    print(f'\n--- {sn} (max_row={ws.max_row}, max_col={ws.max_column}) ---')
+    for r in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 20), values_only=False):
+        print([(c.coordinate, c.value) for c in r])
+
+# 1b. Stock
+wb_stock = openpyxl.load_workbook('/root/Household_Current_Stock.xlsx')
+ws_snap = wb_stock['Route Snapshot']
+print('\n=== Route Snapshot ===')
+for r in ws_snap.iter_rows(min_row=1, max_row=ws_snap.max_row, values_only=False):
+    print([(c.coordinate, c.value) for c in r])
+
+# 1c. Queue
+wb_q = openpyxl.load_workbook('/root/Household_Dispatch_Queue.xlsx')
+ws_q = wb_q['Queue Export']
+print('\n=== Queue Export ===')
+for r in ws_q.iter_rows(min_row=1, max_row=ws_q.max_row, values_only=False):
+    print([(c.coordinate, c.value) for c in r])
+```
+
+Print everything. Do NOT proceed until you have seen all data.
+
+## Step 2 – Build the solution
+
+Write a single Python script that does the following. Use `openpyxl` throughout.
+
+### 2a. Parse `Route Alias Map` from the template
+Read the sheet into a dict mapping each alias → canonical route code.
+
+### 2b. Parse `Pack Matrix` from the template
+Read into a dict mapping `(canonical_route, SKU)` → `Cases_Per_Load`.
+
+### 2c. Parse `Route Snapshot`
+- `B1` = AsOfDate, `D1` = HorizonEnd. Convert to `datetime.date` objects. If they are already datetime objects, extract `.date()`. If strings, parse `YYYY-MM-DD`.
+- `PlanningDays` = `(HorizonEnd - AsOfDate).days`
+- Walk rows starting at row 3. Detect section headers where column A matches pattern `Route <code>` (use regex `^Route\s+(.+)$`). The next row is the local header. Subsequent non-empty rows until the next section header or blank row A are data rows. Collect a list of `(route_code, SKU, on_hand_cases, daily_demand)` preserving encounter order.
+
+### 2d. Parse `Queue Export`
+- Identify column indices from the header row (row 1): `Row Type`, `Queue ID`, `Revision No`, `Queue State`, `Route Alias`, `SKU`, `Ship Date`, `Cases`.
+- Filter to rows where `Row Type == 'DISPATCH'`.
+- Group by `Queue ID`, keep only the row with the highest `Revision No` per Queue ID.
+- From those, keep only rows where `Queue State` is `Approved` or `Released`.
+- Skip rows with blank SKU, blank Ship Date, or Ship Date that cannot be parsed as a date.
+- Map `Route Alias` → canonical route using the alias map; skip rows with unknown alias.
+- Parse `Ship Date` to `datetime.date`. If already a datetime, use `.date()`.
+- Result: list of qualifying dispatch rows with `(canonical_route, SKU, ship_date, cases)`.
+
+### 2e. Compute per route/SKU aggregates from qualifying dispatches
+For each `(route, SKU)` pair, compute:
+- `inbound_cases_by_horizon` = sum of `cases` where `ship_date <= HorizonEnd`
+- `earliest_dispatch_date` = min `ship_date` among qualifying rows (or None)
+
+### 2f. Build `Coverage_Detail` rows
+For each `(route, SKU, on_hand, daily_demand)` from Route Snapshot (in order):
+1. `Current_Days_On_Hand` = `on_hand / daily_demand` if `daily_demand > 0` else `None`
+2. `Projected_OOS_Date` = `AsOfDate + timedelta(days=floor(Current_Days_On_Hand))` if computable else `None`
+3. `Inbound_Cases_By_Horizon` = from dispatch aggregates, default 0
+4. `Delivered_Days_On_Hand` = `(on_hand + inbound) / daily_demand` if `daily_demand > 0` else `None`
+5. `Remaining_Demand_Cases` = `daily_demand * PlanningDays`
+6. `Additional_Cases_Needed` = `max(0, Remaining_Demand_Cases - on_hand - inbound)`
+7. Look up `Cases_Per_Load` from Pack Matrix for `(route, SKU)`. `Loads_Required` = `ceil(additional / cases_per_load)` if `additional > 0` else `0`. Use `math.ceil`.
+8. `Required_Delivery_Date` = `Projected_OOS_Date` if `Loads_Required > 0` else `None`
+9. `Earlier_Delivery_Required`: if `Loads_Required > 0` and (no qualifying dispatch exists for that route/SKU OR `Required_Delivery_Date < earliest_dispatch_date`), then `True`; else `False`.
+
+Format dates as ISO strings `YYYY-MM-DD` (use `.isoformat()`).
+
+### 2g. Write `Coverage_Detail`
+- Open the template workbook fresh: `wb = openpyxl.load_workbook('/root/Household_Route_Template.xlsx')`
+- Get `ws = wb['Coverage_Detail']`
+- Delete all existing data (iterate all rows and clear, or delete rows). Be careful to clear all cells.
+- Write metadata: A1='Field', B1='Value', A2='AsOfDate', B2=AsOfDate ISO string, A3='HorizonEnd', B3=HorizonEnd ISO string, A4='PlanningDays', B4=integer PlanningDays.
+- Row 5 is blank.
+- Row 6: header row with the 13 column names exactly as specified.
+- Data rows starting at row 7.
+- Keep numeric fields as numbers (int or float). Date columns F and L as ISO strings. Boolean column M as Python `True`/`False`. Blank cells as `None`.
+
+### 2h. Write `Dispatch_Plan`
+- `ws = wb['Dispatch_Plan']`
+- Clear all existing data.
+- Row 1: headers `Route`, `SKU`, `Required_Delivery_Date`, `Loads_Required`, `Additional_Cases_Needed`, `Earlier_Delivery_Required`.
+- Include only rows where `Loads_Required > 0`, in the same order as Coverage_Detail.
+- Same data types: numbers numeric, dates as ISO strings, booleans as True/False.
+
+### 2i. Verify sheet order and save
+- Confirm `wb.sheetnames == ['Overview', 'Coverage_Detail', 'Dispatch_Plan', 'Pack Matrix', 'Route Alias Map']`.
+- Save to `/root/household_route_tracker_refresh.xlsx`.
+
+## Step 3 – Validate
+
+After saving, re-open the output file and print:
+- Sheet names and order
+- All cells of `Coverage_Detail`
+- All cells of `Dispatch_Plan`
+- Spot-check that `Overview`, `Pack Matrix`, `Route Alias Map` are unchanged (print first few rows of each)
+
+Verify:
+- Date strings match `YYYY-MM-DD` format
+- Numeric fields are numbers, not strings
+- `Loads_Required` values are integers
+- `Earlier_Delivery_Required` values are booleans
+- Sheet order is exactly as required
+
+If anything is wrong, fix and re-save before finishing.
+
+## Important edge-case notes
+- When clearing sheets, make sure to clear ALL rows and columns, not just a subset.
+- `math.floor` for days-on-hand in OOS date, `math.ceil` for loads.
+- If `Cases_Per_Load` is missing for a route/SKU pair, treat `Loads_Required` as 0 (but print a warning so we can investigate).
+- Be very careful with date parsing: cells may contain datetime objects or strings.
+- `Inbound_Cases_By_Horizon` should be 0 (not blank) when no qualifying dispatches exist for a route/SKU.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=Catpaw, category=supply-chain, difficulty=hard, tags=[inventory, excel, replenishment, logistics].
+Verifier config: timeout_sec=900.0.

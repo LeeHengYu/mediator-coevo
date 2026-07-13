@@ -147,6 +147,46 @@ with each stream executed under A, B, and C. Randomize arm execution order per
 stream. Keep their task manifests, frozen harness paths, and graph-bundle
 digests alongside the results.
 
+Run all arms serially against the same ordered manifest:
+
+```zsh
+MANIFEST=data/experiments/HL4/ab_control/ood_hard_8_stream_01.json
+
+# A: baseline harness, no diffusion.
+uv run medcoevo run \
+  --config-dir data/experiments/HL4/ab_control \
+  --task-manifest "$MANIFEST" \
+  --harness-dir data/experiments/HL4/baseline \
+  --no-diffusion-enabled \
+  --diffusion-policy none \
+  --run-id hl4-ood-hard8-a-stream-01
+
+# B: baseline harness, Random-K artifact selection, no graph state.
+uv run medcoevo run \
+  --config-dir data/experiments/HL4/ab_control \
+  --task-manifest "$MANIFEST" \
+  --harness-dir data/experiments/HL4/baseline \
+  --diffusion-enabled \
+  --diffusion-policy random_k \
+  --diffusion-max-artifacts 1 \
+  --run-id hl4-ood-hard8-b-stream-01
+
+# C: final promoted harness plus frozen final HL4 graph state.
+uv run medcoevo run \
+  --config-dir data/experiments/HL4/ab_control \
+  --task-manifest "$MANIFEST" \
+  --harness-dir data/experiments/HL4/train_epoch_5/harnesses/update_0005 \
+  --state-dir data/experiments/HL4/bundles/0aa32962e37bae99ce557a0cb805b0ce51419d6d2821835d81ba1be36a416471/state \
+  --diffusion-enabled \
+  --diffusion-policy langchain_graph \
+  --diffusion-max-artifacts 1 \
+  --run-id hl4-ood-hard8-c-stream-01
+```
+
+Do not publish graph state from these OOD test runs. Report this stream as a
+separate held-out generalization result, not as part of the in-distribution
+HL4 final test.
+
 ## Controls
 
 Hold these constant across A, B, and C:

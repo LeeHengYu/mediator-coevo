@@ -1,0 +1,203 @@
+# Task Instruction
+
+You must produce the file `/root/participant_release_flags.json` by analyzing four source files. Follow every step below carefully.
+
+## Step 0 – Inspect the environment and source files
+
+```bash
+ls -la /root/
+file /root/participant_release_bundle.pdf
+head -5 /root/release_versions.csv
+python3 -c "import json; print(json.dumps(json.load(open('/root/award_catalog.json')), indent=2)[:3000])"
+python3 -c "import openpyxl; wb=openpyxl.load_workbook('/root/participant_registry.xlsx'); print(wb.sheetnames); ws=wb['participants']; [print(list(r)) for r in ws.iter_rows(max_row=min(ws.max_row,10), values_only=False)]"
+python3 -c "import openpyxl; wb=openpyxl.load_workbook('/root/participant_registry.xlsx'); ws=wb['aliases']; [print(list(r)) for r in ws.iter_rows(max_row=min(ws.max_row,30), values_only=False)]"
+```
+
+Install any missing packages (`pip install pdfplumber openpyxl` etc.) before proceeding.
+
+## Step 1 – Extract PDF pages
+
+Use `pdfplumber` (or PyMuPDF as fallback) to extract text from every page of `participant_release_bundle.pdf`. For each page record its 1-based page number and full text. Print all extracted pages so you can inspect them.
+
+## Step 2 – Identify in-scope pages
+
+A page is in-scope only if its **first non-empty line** (strip whitespace from each line; skip blank lines) is exactly `Participant Release Request`. Discard all other pages entirely.
+
+## Step 3 – Deduplicate by Packet Ref / Revision No
+
+From each in-scope page, parse `Packet Ref` and `Revision No` (integer). Group by `Packet Ref`. Within each group keep only the page(s) with the highest `Revision No`. If there are still ties (same Packet Ref and same Revision No), keep only the **last** such page in PDF order (highest page number). The surviving pages are the "retained request pages".
+
+## Step 4 – Parse fields from each retained page
+
+From each retained page extract:
+- `participant_name` (value after `Participant Name` label)
+- `payment_token` (value after `Payment Token` label)
+- `award_ref` (value after `Award Ref` label; if no such line exists, set to `null`)
+- `requested_amount` (numeric value after `Requested Amount` label; parse to float)
+
+Copy `participant_name`, `payment_token`, and `award_ref` exactly as they appear on the PDF (preserve original casing, spacing, punctuation).
+
+## Step 5 – Build participant lookup from the workbook
+
+Load `participants` sheet. Record each participant's name, participant_code, and payment_token (identify column headers from row 1). Then load `aliases` sheet. Build a mapping from every known alias to the canonical participant record. Normalize lookup keys by lowercasing and collapsing whitespace for fuzzy matching.
+
+## Step 6 – Build the valid award set
+
+Load `award_catalog.json`. Recursively traverse every sponsor and program container, collecting all award entries (leaf objects that have fields like `award_ref`, `status`, `amount`, `participant_code`). Keep only entries where `status` == `active`. Index them by `award_ref`.
+
+## Step 7 – Apply version overrides from release_versions.csv
+
+Load `release_versions.csv`. Keep only rows where `approval_state` == `approved` AND both `version_amount` and `participant_code` are non-empty. Group usable rows by `award_ref`; within each group keep only the row with the highest `version_no`. For each such award_ref that exists in the flattened active award set, override the award's `amount` with `version_amount` and `participant_code` with the version row's `participant_code`.
+
+## Step 8 – Flag each retained page
+
+For each retained request page, evaluate these checks **in order** and assign the **first** matching reason:
+
+1. **Unknown Participant**: Try to match `participant_name` against all participant names and aliases. Use case-insensitive comparison; also try fuzzy matching for minor typos (e.g., Levenshtein distance ≤ 2 on the lowered, whitespace-collapsed name). If no match is found → flag.
+2. **Account Mismatch**: Participant matched, but the PDF `payment_token` ≠ the participant record's payment token → flag.
+3. **Invalid Award Ref**: `award_ref` is not `null` but is not found in the valid active award set → flag. If `award_ref` is `null`, also flag as Invalid Award Ref (there is no valid award).
+4. **Amount Mismatch**: The award exists, but `abs(requested_amount - expected_amount) > 0.01` → flag.
+5. **Participant Mismatch**: The award exists, but the award's `participant_code` (after version override) ≠ the matched participant's `participant_code` → flag.
+
+If **none** of these apply, the page is clean — do NOT include it in the output.
+
+## Step 9 – Write output
+
+Collect all flagged entries. Sort by `request_page_number` ascending. Write to `/root/participant_release_flags.json` with this exact structure:
+```json
+[
+  {
+    "request_page_number": <int>,
+    "participant_name": "<exact from PDF>",
+    "requested_amount": <float>,
+    "payment_token": "<exact from PDF>",
+    "award_ref": "<exact from PDF or null>",
+    "reason": "<one of the five reasons>"
+  }
+]
+```
+
+Use `json.dump` with `indent=2`. Ensure `requested_amount` is a JSON number (float), `award_ref` is either a string or JSON `null`, and `request_page_number` is an integer.
+
+## Step 10 – Validate
+
+After writing, re-read and print the output file. Verify:
+- It is valid JSON, an array of objects.
+- Each object has exactly the six required keys.
+- `reason` values are from the allowed set.
+- Array is sorted by `request_page_number`.
+- Page numbers are 1-based original PDF page numbers.
+
+If a verifier script exists (e.g., `test_output.py`), run it with `pytest` and report results.
+
+## Important edge-case notes
+- For fuzzy name matching, be generous but careful. The task says "minor typos or small formatting variations". Use normalized comparison first, then Levenshtein if needed.
+- When checking `award_ref is null`: if the PDF page has no Award Ref line at all, set `award_ref` to JSON `null` and flag as `Invalid Award Ref`.
+- `requested_amount` should be parsed as a float even if it appears with currency symbols or commas on the PDF.
+- Make sure to handle the case where `release_versions.csv` has no usable rows gracefully.
+- Print intermediate results at each step so you can debug.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=gpt54@example.com, author_name=GPT-5.4, category=data-validation, difficulty=hard, tags=[pdf, xlsx, csv, json, fuzzy-matching, clinical-payments].
+Verifier config: timeout_sec=900.0.

@@ -1,0 +1,345 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Create two deliverables: `/root/server_provisioning_recovery_plan_analysis.xlsx` and `/root/server_provisioning_recovery_summary.md`.
+
+## Step 0: Inspect the reference file
+
+```bash
+python3 -c "
+import openpyxl
+wb = openpyxl.load_workbook('"'"'/root/Open_Server_Requests_Listing.xlsx'"'"')
+for s in wb.sheetnames:
+    ws = wb[s]
+    print(f'"'"'Sheet: {s}, dims: {ws.dimensions}'"'"')
+    for row in ws.iter_rows(min_row=1, max_row=min(10, ws.max_row), values_only=False):
+        print([(c.coordinate, c.value) for c in row])
+"
+```
+
+Review the output to understand any reference data, then proceed.
+
+## Step 1: Build the Excel workbook with openpyxl
+
+Write a Python script `/root/solve.py` that:
+
+### 1.1 Date setup
+- Creates 100 dates from 2018-01-22 to 2018-05-01 inclusive (verify `datetime(2018,1,22) + timedelta(99)` == `datetime(2018,5,1)`).
+- Identifies weekends (Saturday=5, Sunday=6 in `.weekday()`).
+- Identifies Manitoba holidays: 2018-02-19 (Louis Riel Day) and 2018-03-30 (Good Friday).
+- A day is a "non-working day" if it'"'"'s a weekend or a holiday.
+
+### 1.2 PO due schedule
+Define PO due dates and quantities:
+```python
+po_schedule = {
+    datetime(2018,1,22): {'"'"'web'"'"': 1065, '"'"'db'"'"': 855},
+    datetime(2018,2,1):  {'"'"'web'"'"': 855,  '"'"'db'"'"': 555},
+    datetime(2018,2,15): {'"'"'web'"'"': 900,  '"'"'db'"'"': 900},
+    datetime(2018,3,1):  {'"'"'web'"'"': 900,  '"'"'db'"'"': 575},
+    datetime(2018,4,2):  {'"'"'web'"'"': 900,  '"'"'db'"'"': 575},
+    datetime(2018,5,1):  {'"'"'web'"'"': 900,  '"'"'db'"'"': 575},
+}
+```
+These are the same across all 3 sheets.
+
+### 1.3 Production planning logic
+
+For each sheet, compute daily planned production for Web (col C), Database (col F), and Network Appliances (col I). All must be integers >= 0. Non-working days must be 0 for all three.
+
+**Sheet 1: "Current Capacity and Racks"**
+- Web cap: 120 before 2018-02-05, 135 on/after 2018-02-05.
+- Database cap: same as Web cap, but production cannot start before 2018-03-01.
+- Network Appliances: distribute at least 1200 total across working days. Use a steady rate (e.g., spread across all working days: compute working_days count, set daily = ceil(1200/working_days) or similar, ensuring total >= 1200 and each day is a reasonable whole number).
+- Strategy: On each working day, produce at the cap for Web. For Database, produce at the cap on working days on/after 2018-03-01. The goal is to accumulate enough to meet POs.
+
+**Sheet 2: "Relocated Network Equipment"**
+- Web cap: 120 before 2018-02-05, 135 on/after 2018-02-05.
+- Database cap: same as Web, but production cannot start before 2018-02-20.
+- Network Appliances: at least 100 total before 2018-02-01, and exactly 0 on/after 2018-02-01. So distribute 100+ across working days in [2018-01-22, 2018-01-31]. Count those working days and set daily = ceil(100/count) or use 15 per day etc. Ensure total >= 100.
+- Strategy: Produce at cap for Web on all working days. Produce at cap for Database on working days on/after 2018-02-20.
+
+**Sheet 3: "10 hr Shift Relocate Network Eq"**
+- Network Appliances: 0 for entire horizon.
+- Outside the temporary 10-hr window: Web/DB <= 120 before 2018-02-05, <= 135 on/after 2018-02-05.
+- Temporary window: working days on/after 2018-02-01 where Web or DB > 135 (up to 170 each). Must have between 20 and 24 such days.
+- Database cannot start before 2018-02-20.
+- Strategy: 
+  - Before 2018-02-01: Web at cap (120), DB at 0 (since before 2018-02-20 anyway, and before 2018-02-05 cap is 120).
+  - 2018-02-01 to 2018-02-04: Web at 120 (before 2018-02-05), DB at 0 (before 2018-02-20). These are NOT in the temp window since 120 <= 135.
+  - 2018-02-05 to 2018-02-19: Web at 135 (normal cap), DB still 0 (before 2018-02-20). Not temp window.
+  - 2018-02-20 onward: This is where we can use the temp window. Pick exactly 22 working days starting from 2018-02-20 (skip non-working days). On those 22 days, set Web=170 and DB=170. On remaining working days after the window, set Web=135, DB=135.
+  - Verify: all 22 window days are working days on/after 2018-02-01 ✓, each value <= 170 ✓, count between 20-24 ✓.
+  - Outside window on/after 2018-02-05: Web and DB <= 135 ✓.
+
+### 1.4 Cumulative PO formulas
+
+For each sheet, columns E, H, J must contain formulas:
+- `E` (Cumulative Open PO for Web): `E4 = D4`, `E5 = E4 + D5`, etc. Actually, cumulative open PO should track: cumulative PO due minus cumulative production? Let me re-read...
+
+The columns are:
+- C: Planned Production (Web)
+- D: Purchase Orders Due (Web) 
+- E: Cumulative Open Purchase Orders (EOD) (Web)
+- F: Planned Production (DB)
+- G: Purchase Orders Due (DB)
+- H: Cumulative Open Purchase Orders (EOD) (DB)
+- I: Actual Var to PO
+- J: Total Prod
+- K: Notes
+
+So E = cumulative of D minus cumulative of C? Or just cumulative of D? The name "Cumulative Open Purchase Orders (EOD)" suggests it tracks outstanding/unfulfilled POs. A reasonable formula: `E4 = D4 - C4`, `E5 = E4 + D5 - C5`. This represents open (unfilled) POs at end of day.
+
+Alternatively, it could just be cumulative sum of D. But "Open" suggests net of production.
+
+Use: `E4 = D4 - C4`, `En = E(n-1) + Dn - Cn` for n>4.
+Similarly: `H4 = G4 - F4`, `Hn = H(n-1) + Gn - Fn`.
+
+For columns I, J, K:
+- I: "Actual Var to PO" — this could be a formula. But the instructions say columns C,D,F,G,I must be numeric constants. So I is a numeric constant column. Set I to 0 for all rows (or compute a meaningful value as a constant).
+- J: "Total Prod" — must be a formula. `J4 = C4 + F4 + I4` (sum of all production types).
+- K: "Notes" — leave blank or add relevant notes.
+
+Wait, re-reading: `C,D,F,G,I`: numeric constants. `E,H,J`: formulas.
+
+So:
+- E: formula for Cumulative Open PO (Web)
+- H: formula for Cumulative Open PO (DB)  
+- J: formula for Total Prod
+
+J = C + F + I (total production for the day).
+
+For E: `E4 = D4 - C4`, `E(n) = E(n-1) + D(n) - C(n)`
+For H: `H4 = G4 - F4`, `H(n) = H(n-1) + G(n) - F(n)`
+
+Use openpyxl to write these as Excel formula strings.
+
+### 1.5 Write the workbook
+
+For each of the 3 sheets:
+1. Set `C2` = "Rack-Mount Web Servers", `F2` = "Blade Database Servers", `I2` = "Network Appliances".
+2. Set `C3:K3` headers as specified.
+3. For rows 4-103:
+   - `B{row}`: date value. B4 = date(2018,1,22). For B5-B103, can use formula `=B{row-1}+1` or literal dates. Use literal dates for safety.
+   - `C{row}`: Web planned production (integer)
+   - `D{row}`: Web PO due (integer)
+   - `E{row}`: formula string, e.g., `=D4-C4` for row 4, `=E{row-1}+D{row}-C{row}` for rows 5+
+   - `F{row}`: DB planned production (integer)
+   - `G{row}`: DB PO due (integer)
+   - `H{row}`: formula string, same pattern as E
+   - `I{row}`: Network Appliances production (integer)
+   - `J{row}`: formula `=C{row}+F{row}+I{row}`
+   - `K{row}`: Notes (empty string or blank)
+
+4. Format date cells with date number format.
+
+### 1.6 May PO On-Time determination
+
+After computing all values, check if cumulative open POs at row 103 (2018-05-01) are <= 0 (meaning all POs fulfilled):
+
+- **Scenario 1 (Current Capacity)**: Web production starts at cap from day 1, DB only from 2018-03-01. DB will likely not catch up → May PO On-Time: No (both Web and DB likely behind, or at least one).
+- **Scenario 2 (Relocated Network Eq)**: DB starts 2018-02-20 (earlier). Web likely catches up, DB may not → May PO On-Time: Web Yes, Database No.
+- **Scenario 3 (10 hr Shift)**: With 170/day during temp window, both catch up → May PO On-Time: Yes.
+
+To ensure these outcomes, you may need to tune production rates. After initial computation, check the cumulative values at row 103 and adjust if needed. The key constraint is:
+- Total Web PO due = 1065+855+900+900+900+900 = 5520
+- Total DB PO due = 855+555+900+575+575+575 = 4035
+
+Count working days and verify production capacity meets/doesn'"'"'t meet these totals for each scenario.
+
+### 1.7 Verification
+
+After writing the workbook, reload it and verify:
+- 3 sheets with correct names
+- C2, F2, I2 values correct
+- C3:K3 headers correct
+- 100 rows of data (rows 4-103)
+- Dates start 2018-01-22, end 2018-05-01, increment by 1
+- PO due values match schedule
+- Weekend/holiday production = 0
+- DB production start dates correct per sheet
+- Cap constraints met
+- Network appliances constraints met
+- Columns E, H, J contain formula strings (start with '"'"'='"'"')
+- Columns C, D, F, G, I contain numbers
+
+## Step 2: Build the summary markdown
+
+Create `/root/server_provisioning_recovery_summary.md` with this structure:
+
+```markdown
+# Server Provisioning Recovery Plan Summary
+
+## Scenario 1
+
+**Actions:** [Describe: operate within current capacity and rack constraints; Web production at 120/135 cap; DB production starts 2018-03-01; Network Appliances production distributed across full horizon totaling 1200+]
+
+**Rack-Mount Web Servers Impact:** [State total production vs total PO due, shortfall if any]
+
+**Blade Database Servers Impact:** [State total production vs total PO due, shortfall — late start at 2018-03-01 limits output]
+
+**Network Appliances Impact:** [State total >= 1200 produced]
+
+**May PO On-Time: No**
+
+## Scenario 2
+
+**Actions:** [Describe: relocate network equipment to free rack space; DB production starts earlier at 2018-02-20; Network Appliances relocated before 2018-02-01 (100+ units), then 0 production after]
+
+**Rack-Mount Web Servers Impact:** [State total production vs PO due]
+
+**Blade Database Servers Impact:** [Earlier start helps but still insufficient for all POs]
+
+**Network Appliances Impact:** [100+ units produced before Feb 1, then 0]
+
+**May PO On-Time: Web Yes, Database No**
+
+## Scenario 3
+
+**Actions:** [Describe: implement temporary 10-hour shifts after 30-day notification to increase capacity; Web and DB can run at up to 170/day during the window; Network Appliances production is 0 as equipment is fully relocated]
+
+**Rack-Mount Web Servers Impact:** [Sufficient production to meet all POs on time]
+
+**Blade Database Servers Impact:** [Sufficient production to meet all POs on time with extended shifts]
+
+**Network Appliances Impact:** [0 production — equipment fully relocated]
+
+**May PO On-Time: Yes**
+```
+
+Ensure:
+- Exactly `## Scenario 1`, `## Scenario 2`, `## Scenario 3` headings
+- Each has `Actions:`, `Rack-Mount Web Servers Impact:`, `Blade Database Servers Impact:`, `Network Appliances Impact:`, `May PO On-Time:`
+- Scenario 1: `May PO On-Time: No`
+- Scenario 2: `May PO On-Time: Web Yes, Database No`
+- Scenario 3: `May PO On-Time: Yes`
+- Scenario 3 mentions `30-day notification`
+
+## Step 3: Final validation
+
+Run a validation script that:
+1. Opens the xlsx and checks all structural requirements (sheet names, cell positions, header values)
+2. Checks date range and increment
+3. Checks PO due values on all sheets
+4. Checks weekend/holiday zeros
+5. Checks DB start constraints per sheet
+6. Checks cap constraints per sheet
+7. Checks Network Appliances constraints per sheet
+8. Checks formula cells (E, H, J) contain strings starting with '"'"'='"'"'
+9. Checks numeric cells (C, D, F, G, I) contain int/float
+10. Checks the 10-hr shift window day count is 20-24
+11. Opens the .md and checks for required sections and phrases
+
+Print PASS/FAIL for each check. Fix any failures before declaring done.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Task-local resources are available under `environment/skills`: Automotiveproductplanning, Directorofoperations, bc-calculated-fields-manufacturing, dispatching-parallel-agents, writing-plans.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@example.com, author_name=Codex, category=datacenter-capacity-planning, difficulty=hard, tags=[excel, operations, capacity-planning, server-provisioning, datacenter].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260713-081100-hl4-ood-hard8-a-stream-01/jobs/2026-07-13__09-08-18/run-bbb117d6__qvfbjyH/agent/trajectory.json

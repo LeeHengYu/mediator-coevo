@@ -1,0 +1,271 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Create and run a Python script `/root/solve.py` that builds the required workbook. Follow these steps precisely:
+
+## Step 1: Inspect all source files
+
+Before writing any code, read and print the contents/structure of each source file:
+```
+cat /root/bucket_aliases.csv
+cat /root/manual_bridge.csv
+cat /root/gl_balances.json
+python3 -c "import json; print(json.dumps(json.load(open('"'"'/root/contract_liability_dump.json'"'"')), indent=2)[:5000])"
+python3 -c "import openpyxl; wb=openpyxl.load_workbook('"'"'/root/liability_template.xlsx'"'"'); [print(s, wb[s].max_row, wb[s].max_column) for s in wb.sheetnames]; [print(s, [(c.coordinate, c.value) for row in wb[s].iter_rows() for c in row if c.value is not None]) for s in wb.sheetnames]"
+```
+
+Then write `/root/solve.py` incorporating everything learned from inspection.
+
+## Step 2: Write `/root/solve.py`
+
+The script must:
+
+### 2a. Load sources
+- Load `/root/contract_liability_dump.json` (the export payload)
+- Load `/root/bucket_aliases.csv` (maps export sections/buckets to sheet names)
+- Load `/root/manual_bridge.csv` (override/insert actions)
+- Load `/root/gl_balances.json` (GL checkpoint balances by account and month)
+- Load `/root/liability_template.xlsx` as the base workbook using openpyxl
+
+### 2b. Parse and route export data
+- The JSON dump likely has sections/buckets. Use `bucket_aliases.csv` to map each section to the correct detail sheet (`Subscriptions #2350` or `Services #2355`).
+- Filter: keep only records where `active_flag` is true (or truthy) and `record_type` is `detail`.
+- Deduplicate: if multiple records share the same `contract_key` within a bucket, keep only the one with the highest `revision_no`.
+
+### 2c. Normalize month_roll
+- Each record likely has a `month_roll` dict/list with monthly billings and revenue. The months of interest are Sep, Oct, Nov, Dec.
+- Missing months = zero billings and zero revenue for that month.
+- Extract: beginning_balance, and for each of Sep/Oct/Nov/Dec: billings and revenue.
+- Also extract: customer name, contract_key, contract_months, notes, liability_account.
+
+### 2d. Apply manual bridge
+- Process `/root/manual_bridge.csv` after normalization.
+- `action=override`: find the matching row (by contract_key and bucket) and replace any nonblank field values from the bridge row.
+- `action=insert`: add a new row to the matching bucket'"'"'s data.
+- After all bridge operations, recompute each row'"'"'s ending balances:
+  - Sep Ending = Beginning + Sep Billings - Sep Revenue
+  - Oct Ending = Sep Ending + Oct Billings - Oct Revenue
+  - Nov Ending = Oct Ending + Nov Billings - Nov Revenue
+  - Dec Ending = Nov Ending + Dec Billings - Dec Revenue
+
+### 2e. Prepare the workbook
+- Start from the template workbook.
+- Ensure exactly three sheets in this order: `Contract Liability Summary`, `Subscriptions #2350`, `Services #2355`. Remove any other sheets. Rename/reorder as needed based on what the template provides.
+- Clear any content from row 6 downward in the detail sheets.
+
+### 2f. Populate detail sheets
+For each detail sheet (`Subscriptions #2350`, `Services #2355`):
+- Sort rows by customer name (col A), then by contract_key.
+- Write one row per line item starting at row 6, columns A through Q:
+  - A: Customer
+  - B: Beginning Balance (numeric)
+  - C: Sep Billings (numeric)
+  - D: Sep Revenue (numeric)
+  - E: Sep Ending Balance (numeric)
+  - F: Oct Billings (numeric)
+  - G: Oct Revenue (numeric)
+  - H: Oct Ending Balance (numeric)
+  - I: Nov Billings (numeric)
+  - J: Nov Revenue (numeric)
+  - K: Nov Ending Balance (numeric)
+  - L: Dec Billings (numeric)
+  - M: Dec Revenue (numeric)
+  - N: Dec Ending Balance (numeric)
+  - O: Contract Months (numeric)
+  - P: Notes (text)
+  - Q: Liability Account (text or number as appropriate)
+- All amount values must be numeric (int or float), NOT strings.
+
+### 2g. Write control rows
+Let `first_data_row = 6` and `last_data_row = 6 + num_items - 1`. The four control rows go at `last_data_row + 1` through `last_data_row + 4`.
+
+Use openpyxl formula strings (e.g., `=SUM(B6:B15)`).
+
+Let ptr = period_totals_row, ebr = ending_balance_row, vr = variance_row, glr = gl_balance_row.
+
+**Period Totals row (ptr):**
+- A: "Period Totals"
+- B through N: `=SUM(X6:X{last_data_row})` for each column X in B..N
+- O: `=C{ptr}+F{ptr}+I{ptr}+L{ptr}`
+
+**Ending Balance row (ebr):**
+- A: "Ending Balance"
+- E: `=B{ebr}+C{ebr}-D{ebr}`
+- H: `=E{ebr}+F{ebr}-G{ebr}`
+- K: `=H{ebr}+I{ebr}-J{ebr}`
+- N: `=K{ebr}+L{ebr}-M{ebr}`
+- O: `=D{ebr}+G{ebr}+J{ebr}+M{ebr}`
+
+**Variance row (vr):**
+- A: "Variance"
+- O: `=O{glr}-N{glr}`
+
+**GL Balance row (glr):**
+- A: "GL Balance"
+- E, H, K, N: hardcoded numeric values from `/root/gl_balances.json` for the corresponding account (2350 or 2355) and month (Sep/Oct/Nov/Dec ending balances).
+- O: `=O{ptr}-O{ebr}`
+
+### 2h. Summary sheet
+In `Contract Liability Summary`:
+- Write company name "Meridian Mobility Network" (inspect template to see where it goes, likely A1 or A2).
+- Write period ending (extract from the JSON dump or template - look for a date field like "period_ending" or "as_of_date" in the dump).
+- Create sections for both accounts.
+- Use cross-sheet formula references:
+  - B7: `='"'"'Subscriptions #2350'"'"'!O{ptr_sub}` (where ptr_sub is the Period Totals row number in that sheet)
+  - B8: `='"'"'Subscriptions #2350'"'"'!O{ebr_sub}`
+  - B9: `='"'"'Subscriptions #2350'"'"'!O{glr_sub}`
+  - B12: `='"'"'Services #2355'"'"'!O{ptr_svc}`
+  - B13: `='"'"'Services #2355'"'"'!O{ebr_svc}`
+  - B14: `='"'"'Services #2355'"'"'!O{glr_svc}`
+  - B16: `=B9+B14`
+- Also write appropriate labels in column A for these rows (e.g., A6: "Subscriptions #2350", A7: "Period Totals", A8: "Ending Balance", A9: "GL Balance", A11: "Services #2355", A12-A14 similarly, A16: "Combined GL Balance" or similar). Inspect the template first to see if labels already exist.
+
+### 2i. Save
+- Save to `/root/Meridian_Contract_Liability_12-25.xlsx`
+- Do NOT modify any source files.
+
+## Step 3: Run and validate
+
+```bash
+python3 /root/solve.py
+```
+
+Then validate:
+```python
+import openpyxl
+wb = openpyxl.load_workbook('"'"'/root/Meridian_Contract_Liability_12-25.xlsx'"'"')
+print('"'"'Sheets:'"'"', wb.sheetnames)
+for s in wb.sheetnames:
+    ws = wb[s]
+    print(f'"'"'\n=== {s} ==='"'"')
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=17, values_only=False):
+        vals = [(c.coordinate, c.value) for c in row if c.value is not None]
+        if vals:
+            print(vals)
+```
+
+Verify:
+1. Exactly 3 sheets in correct order
+2. Detail sheets have data rows starting at row 6 with numeric amounts
+3. Control rows (Period Totals, Ending Balance, Variance, GL Balance) are present with proper formulas
+4. Summary sheet has cross-sheet formulas in B7, B8, B9, B12, B13, B14, B16
+5. Company name and period ending are present on summary sheet
+
+If any issues are found, fix and re-run. Pay special attention to:
+- Mapping bucket aliases correctly (inspect the CSV carefully)
+- Matching GL balance account keys to the right sheets
+- Ensuring all amounts are numeric (use float() or int() when writing)
+- Formula strings must start with '"'"'='"'"' in openpyxl
+- The JSON field names may differ from expected - adapt based on actual inspection
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw, category=finance-accounting, difficulty=hard, tags=[excel, rollforward, contract-liability, orchestration].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260713-081100-hl4-ood-hard8-a-stream-01/jobs/2026-07-13__08-45-57/run-e2ae04cf__nWanXwf/agent/trajectory.json

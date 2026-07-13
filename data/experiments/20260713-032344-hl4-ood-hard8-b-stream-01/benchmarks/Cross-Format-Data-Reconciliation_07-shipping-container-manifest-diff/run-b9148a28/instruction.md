@@ -1,0 +1,170 @@
+# Task Instruction
+
+## Task: Reconcile Shipping Container Manifest (PDF vs Excel)
+
+### Objective
+Compare an archived PDF container manifest against a current Excel workbook, detect missing and changed records, and write a structured JSON diff report.
+
+### Step-by-step Instructions
+
+1. **Inspect the input files**
+   - List `/root/` to confirm both `container_manifest_old.pdf` and `container_manifest_current.xlsx` exist.
+   - Check what Python libraries are available for PDF table extraction (`tabula`, `camelot`, `pdfplumber`, `PyPDF2`, etc.) and Excel reading (`openpyxl`, `pandas`).
+   - Run: `pip list 2>/dev/null | grep -iE 'tabula|camelot|pdfplumber|pypdf|openpyxl|pandas|xlrd'`
+   - If `pdfplumber` is not installed, try `pip install pdfplumber`. If that fails, try `tabula-py` or `camelot-py[cv]`. As a last resort, use `PyPDF2` or `pdfminer` to extract text and parse the table manually.
+
+2. **Extract the PDF table**
+   - Use `pdfplumber` (preferred) to extract all pages' tables into a single DataFrame.
+   - Inspect the first few rows and all column names. Print them out.
+   - Ensure the `ID` column is identified (it may appear as `ID`, `Id`, `id`, or similar). Normalize the column name to `ID`.
+   - Verify IDs match the pattern `^CNT\d{4}$`. Print any that don't match and investigate (could be header rows, merged cells, or extraction artifacts). Filter to only valid rows.
+
+3. **Read the Excel file**
+   - Use `pandas.read_excel` to read `/root/container_manifest_current.xlsx`.
+   - Print column names and first few rows.
+   - Normalize the `ID` column name to `ID` if needed.
+   - Filter to only rows with valid `CNT\d{4}` IDs.
+
+4. **Detect missing containers**
+   - Find IDs present in the PDF (old) but absent in the Excel (current).
+   - Collect these as a sorted list of ID strings.
+
+5. **Detect changed containers**
+   - For IDs present in both datasets, compare every field (excluding `ID` itself) between old and new.
+   - Before comparing, ensure consistent column names between the two DataFrames. Only compare columns that exist in both.
+   - For numeric columns (like `WeightTons`), compare as floats. Round both values to a reasonable precision (e.g., 2 decimal places) before comparing to avoid floating-point noise. If both round to the same value, treat as unchanged.
+   - For text/string columns, compare as stripped strings.
+   - For each difference found, emit an object: `{"id": "CNT...", "field": "<column_name>", "old_value": <old>, "new_value": <new>}`.
+   - `old_value` and `new_value` must be numbers for numeric fields and strings for text fields. Do NOT convert numbers to strings.
+   - If a record has multiple changed fields, emit one object per field.
+   - Sort `changed_containers` by `id` first, then by `field` for deterministic output.
+
+6. **Write the output**
+   - Construct the final JSON:
+     ```json
+     {
+       "missing_containers": ["CNT0009", ...],
+       "changed_containers": [{"id": "...", "field": "...", "old_value": ..., "new_value": ...}, ...]
+     }
+     ```
+   - Write to `/root/container_diff_report.json` using `json.dump` with `indent=2`.
+
+7. **Validate the output**
+   - Re-read `/root/container_diff_report.json` and parse it.
+   - Verify `missing_containers` is a sorted list of strings matching `^CNT\d{4}$`.
+   - Verify `changed_containers` is a sorted list of objects with keys `id`, `field`, `old_value`, `new_value`.
+   - Verify numeric `old_value`/`new_value` are actual numbers (int or float), not strings.
+   - Print the full JSON content for inspection.
+
+### Critical Details
+- The PDF is the OLD/baseline. The Excel is the NEW/current.
+- "Missing" means in old but not in new (i.e., removed from current dataset).
+- Do NOT include IDs that are in the new but not in the old (those would be additions, not removals).
+- Ensure the output file is written to exactly `/root/container_diff_report.json`.
+- If PDF extraction yields messy results (merged columns, wrong splits), inspect the raw text and try alternative extraction methods or manual parsing.
+- Pay special attention to data type consistency: WeightTons and similar numeric fields must be numbers in the JSON output.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=task-engineer@meituan.com, author_name=CatPaw Task Engineer, category=logistics, difficulty=hard, tags=[pdf, xlsx, shipping, manifest, diff].
+Verifier config: timeout_sec=900.0.

@@ -1,0 +1,306 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+You must build the workbook `/root/Meridian_Contract_Liability_12-25.xlsx` from several source files. Follow every step below carefully and in order.
+
+## Step 0 – Inspect all source files
+
+```bash
+cd /root
+python3 -c "
+import json, csv, openpyxl
+
+# JSON files
+for fn in ['"'"'contract_liability_dump.json'"'"','"'"'gl_balances.json'"'"']:
+    with open(fn) as f:
+        data = json.load(f)
+    print(f'"'"'\n=== {fn} ==='"'"')
+    print(json.dumps(data, indent=2)[:6000])
+
+# CSV files
+for fn in ['"'"'bucket_aliases.csv'"'"','"'"'manual_bridge.csv'"'"']:
+    with open(fn) as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    print(f'"'"'\n=== {fn} ({len(rows)} rows) ==='"'"')
+    for r in rows[:30]:
+        print(r)
+
+# Template
+wb = openpyxl.load_workbook('"'"'liability_template.xlsx'"'"')
+for sn in wb.sheetnames:
+    ws = wb[sn]
+    print(f'"'"'\n=== Template sheet: {sn} (rows={ws.max_row}, cols={ws.max_column}) ==='"'"')
+    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row,20), values_only=False):
+        print([(c.coordinate, c.value) for c in row if c.value is not None])
+"
+```
+
+Read the output carefully before proceeding. You need to understand:
+- The structure of `contract_liability_dump.json` (sections, keys like `bucket`, `contract_key`, `customer`, `active_flag`, `record_type`, `revision_no`, `beginning_balance`, `month_roll`, etc.)
+- The `bucket_aliases.csv` mapping (which bucket names route to which sheet/account)
+- The `manual_bridge.csv` columns and actions
+- The `gl_balances.json` structure (account → month → balance)
+- The template layout (header rows 1-5, column headers, any existing content)
+
+## Step 1 – Build the workbook with Python
+
+Write a single Python script `/root/build_workbook.py` that does everything described below, then run it. The script must:
+
+### 1a. Load sources
+- Load `liability_template.xlsx` with openpyxl (keep any formatting).
+- Load `contract_liability_dump.json`.
+- Load `bucket_aliases.csv` – build a mapping from each alias/bucket name to the target sheet name (`Subscriptions #2350` or `Services #2355`).
+- Load `manual_bridge.csv`.
+- Load `gl_balances.json`.
+
+### 1b. Route and filter records
+- For each record in the JSON dump, use the bucket field and the alias CSV to determine which sheet it belongs to.
+- Keep only records where `active_flag` is true (boolean or string "true"/"True") AND `record_type` is `"detail"`.
+- Deduplicate: if multiple records share the same `contract_key` within the same bucket/sheet, keep only the one with the highest `revision_no`.
+
+### 1c. Apply manual bridge
+- For each row in `manual_bridge.csv`:
+  - If `action` == `"override"`: find the matching record (by `contract_key` and bucket/sheet) and replace any field that is non-blank in the bridge row.
+  - If `action` == `"insert"`: add a new record to the appropriate bucket/sheet.
+
+### 1d. Normalize month_roll and compute ending balances
+- Each record has a `month_roll` (dict or list of monthly data). The months of interest are Sep, Oct, Nov, Dec.
+- For each month, extract `billings` and `revenue`. Missing months → 0 billings, 0 revenue.
+- Recompute ending balances from scratch:
+  - Sep Ending = Beginning Balance + Sep Billings − Sep Revenue
+  - Oct Ending = Sep Ending + Oct Billings − Oct Revenue
+  - Nov Ending = Oct Ending + Nov Billings − Nov Revenue
+  - Dec Ending = Nov Ending + Dec Billings − Dec Revenue
+
+### 1e. Sort
+- Sort records for each sheet by `customer` (ascending), then by `contract_key` (ascending).
+
+### 1f. Ensure exactly three sheets in order
+- The output workbook must have exactly three sheets in this order:
+  1. `Contract Liability Summary`
+  2. `Subscriptions #2350`
+  3. `Services #2355`
+- Rename/reorder/create sheets from the template as needed. Delete any extra sheets.
+
+### 1g. Write detailed sheets
+For each of the two detailed sheets (`Subscriptions #2350`, `Services #2355`):
+
+- Clear all content from row 6 downward.
+- Write one row per record starting at row 6, columns A–Q:
+  - A: Customer
+  - B: Beginning Balance
+  - C: Sep Billings
+  - D: Sep Revenue
+  - E: Sep Ending Balance
+  - F: Oct Billings
+  - G: Oct Revenue
+  - H: Oct Ending Balance
+  - I: Nov Billings
+  - J: Nov Revenue
+  - K: Nov Ending Balance
+  - L: Dec Billings
+  - M: Dec Revenue
+  - N: Dec Ending Balance
+  - O: Contract Months
+  - P: Notes
+  - Q: Liability Account
+- All amount values must be numeric (int or float), not strings.
+
+Let `first_data_row = 6` and `last_data_row = 6 + num_records - 1`.
+Let `ptr` = `last_data_row + 1` (Period Totals row), `ebr` = ptr+1, `vr` = ebr+1, `glr` = vr+1.
+
+**Period Totals row** (label in column A):
+- Columns B through N: `=SUM(B6:B{last_data_row})` etc.
+- Column O: `=C{ptr}+F{ptr}+I{ptr}+L{ptr}` (same row references for C, F, I, L).
+
+**Ending Balance row** (label in column A):
+- E: `=B{ebr}+C{ebr}-D{ebr}`
+- H: `=E{ebr}+F{ebr}-G{ebr}`
+- K: `=H{ebr}+I{ebr}-J{ebr}`
+- N: `=K{ebr}+L{ebr}-M{ebr}`
+- O: `=D{ebr}+G{ebr}+J{ebr}+M{ebr}`
+
+**Variance row** (label in column A):
+- O: `=O{glr}-N{glr}`
+
+**GL Balance row** (label in column A):
+- Columns E, H, K, N: hard-coded numeric values from `gl_balances.json` for the corresponding account (2350 or 2355) and month (Sep→E, Oct→H, Nov→K, Dec→N). Inspect the JSON to find the correct keys.
+- O: `=O{ptr}-O{ebr}`
+
+### 1h. Write Summary sheet
+On `Contract Liability Summary`:
+- Cell A1 (or appropriate header area): `Meridian Mobility Network`
+- Include the period ending date from the source package (look in the JSON dump for a date field like `period_ending` or similar; inspect the data).
+- Sections for both accounts. Use these exact formula cells:
+  - `B7`: `='"'"'Subscriptions #2350'"'"'!O{ptr_sub}` (where ptr_sub is the Period Totals row number on that sheet)
+  - `B8`: `='"'"'Subscriptions #2350'"'"'!O{ebr_sub}`
+  - `B9`: `='"'"'Subscriptions #2350'"'"'!O{glr_sub}`
+  - `B12`: `='"'"'Services #2355'"'"'!O{ptr_svc}`
+  - `B13`: `='"'"'Services #2355'"'"'!O{ebr_svc}`
+  - `B14`: `='"'"'Services #2355'"'"'!O{glr_svc}`
+  - `B16`: `=B9+B14`
+- Add appropriate labels in column A for these rows (e.g., A6: "Subscriptions #2350", A7: "Contract Months (Period Totals)", A8: "Revenue (Ending Balance)", A9: "GL Balance", A11: "Services #2355", A12-A14 similar, A16: "Combined GL Balance" or similar).
+
+### 1i. Save
+- Save the workbook to `/root/Meridian_Contract_Liability_12-25.xlsx`.
+- Do NOT modify any source files.
+
+## Step 2 – Run the script
+
+```bash
+cd /root && python3 build_workbook.py
+```
+
+If there are errors, debug and fix them. Re-read source files if needed to understand data structure.
+
+## Step 3 – Validate the output
+
+```bash
+python3 -c "
+import openpyxl
+wb = openpyxl.load_workbook('"'"'/root/Meridian_Contract_Liability_12-25.xlsx'"'"')
+print('"'"'Sheets:'"'"', wb.sheetnames)
+assert wb.sheetnames == ['"'"'Contract Liability Summary'"'"', '"'"'Subscriptions #2350'"'"', '"'"'Services #2355'"'"'], f'"'"'Wrong sheets: {wb.sheetnames}'"'"'
+for sn in ['"'"'Subscriptions #2350'"'"', '"'"'Services #2355'"'"']:
+    ws = wb[sn]
+    print(f'"'"'\n=== {sn} ==='"'"')
+    # Print header rows
+    for r in range(1, 6):
+        vals = [(c.coordinate, c.value) for c in ws[r] if c.value is not None]
+        if vals: print(f'"'"'  Row {r}: {vals}'"'"')
+    # Print data rows
+    for r in range(6, ws.max_row+1):
+        vals = [(c.coordinate, c.value) for c in ws[r] if c.value is not None]
+        if vals: print(f'"'"'  Row {r}: {vals}'"'"')
+
+ws = wb['"'"'Contract Liability Summary'"'"']
+print('"'"'\n=== Contract Liability Summary ==='"'"')
+for r in range(1, ws.max_row+1):
+    vals = [(c.coordinate, c.value) for c in ws[r] if c.value is not None]
+    if vals: print(f'"'"'  Row {r}: {vals}'"'"')
+"
+```
+
+Check:
+- Exactly 3 sheets in correct order.
+- Data rows start at row 6 on detailed sheets.
+- Control rows (Period Totals, Ending Balance, Variance, GL Balance) appear immediately after last data row.
+- All B–N cells in data rows are numeric.
+- Formulas are present (they'"'"'ll show as strings starting with `=` when loaded with `data_only=False`).
+- Summary sheet has cross-sheet formula references in B7, B8, B9, B12, B13, B14, B16.
+- GL Balance row has correct hard-coded values from gl_balances.json.
+
+If anything is wrong, fix and re-run. The final file MUST exist at `/root/Meridian_Contract_Liability_12-25.xlsx`.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw, category=finance-accounting, difficulty=hard, tags=[excel, rollforward, contract-liability, orchestration].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/experiments/20260713-032344-hl4-ood-hard8-b-stream-01/jobs/2026-07-13__04-10-03/run-196b9945__DDagQkv/agent/trajectory.json
