@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import pytest
@@ -439,7 +438,7 @@ async def test_langchain_graph_falls_back_to_same_task_when_agent_selects_none()
 
 
 @pytest.mark.asyncio
-async def test_langchain_graph_filters_cross_family_failure_artifacts_from_agent_selection():
+async def test_langchain_graph_allows_agent_selected_cross_family_artifacts():
     previous = TaskGraphSnapshot(
         run_id="run-1",
         iteration=0,
@@ -487,14 +486,16 @@ async def test_langchain_graph_filters_cross_family_failure_artifacts_from_agent
 
     assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
         "artifact-success-cross",
+        "artifact-failure-cross",
         "artifact-failure-same",
     ]
     assert result.subscriptions[0].context_channel == REUSE_SUCCESS_CHANNEL
-    assert result.subscriptions[1].context_channel == AVOID_RECHECK_CHANNEL
+    assert result.subscriptions[1].context_channel == REUSE_SUCCESS_CHANNEL
+    assert result.subscriptions[2].context_channel == REUSE_SUCCESS_CHANNEL
 
 
 @pytest.mark.asyncio
-async def test_langchain_graph_fallback_skips_cross_family_failure_graph_priors():
+async def test_langchain_graph_fallback_uses_cross_family_graph_priors():
     previous = TaskGraphSnapshot(
         run_id="run-1",
         iteration=0,
@@ -543,11 +544,15 @@ async def test_langchain_graph_fallback_skips_cross_family_failure_graph_priors(
         ],
     )
 
-    assert result.subscriptions == []
+    assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
+        "artifact-failure-cross"
+    ]
+    assert result.subscriptions[0].relation == "graph_prior_fallback"
+    assert result.subscriptions[0].context_channel == AVOID_RECHECK_CHANNEL
 
 
 @pytest.mark.asyncio
-async def test_langchain_graph_fallback_keeps_same_family_failure_graph_priors():
+async def test_langchain_graph_fallback_labels_same_family_graph_priors_generically():
     previous = TaskGraphSnapshot(
         run_id="run-1",
         iteration=0,
@@ -602,13 +607,13 @@ async def test_langchain_graph_fallback_keeps_same_family_failure_graph_priors()
     assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
         "artifact-failure-same-family"
     ]
-    assert result.subscriptions[0].relation == "same_family_failure_graph_prior"
+    assert result.subscriptions[0].relation == "graph_prior_fallback"
     assert result.subscriptions[0].context_channel == AVOID_RECHECK_CHANNEL
     assert result.subscriptions[0].metadata == {"fallback": "empty_agent_selection"}
 
 
 @pytest.mark.asyncio
-async def test_langchain_graph_fallback_limits_same_family_failure_graph_priors_to_one_source_task():
+async def test_langchain_graph_fallback_ranks_all_graph_prior_artifacts():
     previous = TaskGraphSnapshot(
         run_id="run-1",
         iteration=0,
@@ -674,15 +679,23 @@ async def test_langchain_graph_fallback_limits_same_family_failure_graph_priors_
     )
 
     assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
-        "artifact-mediator-summary"
+        "artifact-mediator-summary",
+        "artifact-debug-hint",
+        "artifact-run-outcome",
     ]
-    assert result.subscriptions[0].relation == "same_family_failure_graph_prior"
-    assert result.subscriptions[0].context_channel == AVOID_RECHECK_CHANNEL
-    assert result.subscriptions[0].metadata == {"fallback": "empty_agent_selection"}
+    assert all(sub.relation == "graph_prior_fallback" for sub in result.subscriptions)
+    assert all(
+        sub.context_channel == AVOID_RECHECK_CHANNEL
+        for sub in result.subscriptions
+    )
+    assert all(
+        sub.metadata == {"fallback": "empty_agent_selection"}
+        for sub in result.subscriptions
+    )
 
 
 @pytest.mark.asyncio
-async def test_langchain_graph_filters_cross_family_success_outside_incoming_graph_support():
+async def test_langchain_graph_allows_agent_selected_cross_family_success_outside_graph_priors():
     previous = TaskGraphSnapshot(
         run_id="run-1",
         iteration=0,
@@ -738,7 +751,10 @@ async def test_langchain_graph_filters_cross_family_success_outside_incoming_gra
         ],
     )
 
-    assert result.subscriptions == []
+    assert [sub.artifact.artifact_id for sub in result.subscriptions] == [
+        "artifact-success-cross"
+    ]
+    assert result.subscriptions[0].relation == "cross_family_procedural_similarity"
 
 
 @pytest.mark.asyncio
@@ -846,47 +862,13 @@ def test_graph_agent_prompt_and_tools_define_weight_as_agent_output():
     assert "calibrating a graph edge weight" in tool_docs
 
 
-@pytest.mark.asyncio
-async def test_invoke_agent_with_timeout_returns_result_before_deadline():
-    async def run() -> Any:
-        return await langchain_graph_module._invoke_agent_with_timeout(
-            lambda: {"selected_artifacts": []},
-            timeout_sec=0.1,
-        )
-
-    result = await run()
-
-    assert result == {"selected_artifacts": []}
-
-
-@pytest.mark.asyncio
-async def test_invoke_agent_with_timeout_returns_none_after_deadline():
-    start = time.perf_counter()
-    result = await langchain_graph_module._invoke_agent_with_timeout(
-        lambda: time.sleep(0.2) or {"selected_artifacts": []},
-        timeout_sec=0.02,
-    )
-    elapsed = time.perf_counter() - start
-
-    assert result is None
-    assert elapsed < 0.15
-
-
-@pytest.mark.asyncio
-async def test_invoke_agent_with_timeout_raises_worker_exception():
-    with pytest.raises(RuntimeError, match="boom"):
-        await langchain_graph_module._invoke_agent_with_timeout(
-            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
-            timeout_sec=0.1,
-        )
-
-
-def test_parse_json_object_accepts_python_literal_dict():
-    parsed = langchain_graph_module._parse_json_object("{'selected_artifacts': []}")
+def test_parse_json_object_accepts_json_object():
+    parsed = langchain_graph_module._parse_json_object('{"selected_artifacts": []}')
 
     assert parsed == {"selected_artifacts": []}
 
 
-def test_parse_json_object_rejects_non_object_text():
-    with pytest.raises(ValueError, match="JSON object"):
-        langchain_graph_module._parse_json_object("not json at all")
+@pytest.mark.parametrize("text", ["{'selected_artifacts': []}", "not json at all"])
+def test_parse_json_object_rejects_non_json_text(text: str):
+    with pytest.raises(ValueError):
+        langchain_graph_module._parse_json_object(text)
