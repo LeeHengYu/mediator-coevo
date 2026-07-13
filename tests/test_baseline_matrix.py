@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 import tomllib
 
+from click import unstyle
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -1097,7 +1098,7 @@ def test_run_command_requires_family_before_harbor(monkeypatch, tmp_path):
     )
 
     assert result.exit_code != 0
-    assert "--family" in result.output
+    assert "--family" in unstyle(result.output)
 
 
 def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
