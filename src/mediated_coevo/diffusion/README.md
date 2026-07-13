@@ -65,7 +65,15 @@ while standalone agents expose explicit behavior for new integrations.
 
 ## Scope boundary
 
-This package supplies independently callable graph and policy components. A
-sample lifecycle—including warm-up tasks, task ordering, state reset,
-experimental arms, sequence rewards, and end-to-end execution wiring—is outside
-this change and belongs to a separate orchestration integration.
+This package supplies independently callable graph and policy components; it
+still does not own task execution, artifact-bank mutation, or experiment
+sequencing. The sample integration composes these agents through the
+[orchestration contracts](../orchestration/README.md) and the
+[single-sample runtime](../experiment/README.md), without routing new code
+through `LangChainGraphPolicy`.
+
+The [July 4 design](../../../docs/july_4_note.md) remains the final target. The
+current sample runtime has no train/validation/test split, sample CLI, batch or
+ten-sequence aggregator, or automated heuristic-learning loop. The legacy
+split-oriented CLI and harness-overlay path remain separate compatibility
+surfaces.

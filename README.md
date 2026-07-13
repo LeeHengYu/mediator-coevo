@@ -6,19 +6,31 @@ The executor backend now targets SkillFlow tasks through Harbor, while the
 planner, mediator, judge, reward tagging, reflection, validation, and diffusion
 concepts remain the same experimental frame.
 
-## Target Architecture
+## Architecture And Sample Runtime
 
-The target online architecture separates task-graph construction, diffusion
-policy, and task execution into explicit responsibilities. The graph agent
-organizes task relationships, the policy agent selects useful prior artifacts,
-and the existing execution pipeline consumes the resulting context without
-owning either orchestration decision.
+The [July 4 design note](docs/july_4_note.md) is the final target architecture.
+The current code moves toward it in two layers: independently callable
+task-graph and diffusion-policy agents, plus a library-only runtime for one
+causal warm-up-and-suffix sample. Task execution receives an explicit context
+pack and does not own graph construction or artifact selection.
 
-See the [July 4 design note](docs/july_4_note.md) for the motivating system
-design and the [diffusion package guide](src/mediated_coevo/diffusion/README.md)
-for implementation and compatibility boundaries. The existing CLI and
-historical online skill-evolution runtime remain supported while this separation
-is introduced incrementally.
+Package guides describe the boundaries and public contracts:
+
+- [diffusion](src/mediated_coevo/diffusion/README.md): standalone graph and
+  policy agents, shared LangChain runtime, and the legacy facade.
+- [orchestration](src/mediated_coevo/orchestration/README.md): graph, policy,
+  context-packing contracts, and the four fixed experimental arms.
+- [execution](src/mediated_coevo/execution/README.md): frozen task profiles and
+  explicit-context task execution.
+- [artifacts](src/mediated_coevo/artifacts/README.md): projection and
+  transactional artifact-bank updates.
+- [experiment](src/mediated_coevo/experiment/README.md): causal sample state
+  machine, shared warm-up archive, rewards, journals, and loading APIs.
+
+This sample API does not define train/validation/test splits, a CLI, a batch or
+ten-sequence runner, or automated heuristic learning. The existing CLI and
+historical split-oriented and online skill-evolution paths below remain
+supported, but they are separate from the new sample runtime.
 
 ## How It Works
 
