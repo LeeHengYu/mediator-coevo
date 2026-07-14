@@ -36,6 +36,7 @@ from mediated_coevo.experiment.sample_archive import (
 from mediated_coevo.experiment.sample_models import (
     FailureRecord,
     FailureStage,
+    PositionJournal,
     RunProgress,
     SampleRunError,
     SampleSpec,
@@ -111,7 +112,9 @@ class _UnusedGraphAgent:
 @dataclass
 class _UnusedDiffusionPolicyAgent:
     async def select(self, request: PolicyAgentRequest) -> PolicyAgentResponse:
-        raise AssertionError(f"diffusion policy must not be called at {request.position}")
+        raise AssertionError(
+            f"diffusion policy must not be called at {request.position}"
+        )
 
 
 @dataclass
@@ -315,12 +318,15 @@ async def test_runtime_builds_warmup_from_portable_task_stores_without_execution
         0,
         1,
     ]
-    assert {
-        artifact.source_run_id for artifact in bundle.final_artifact_bank
-    } == {"warmup-run"}
-    assert load_warmup_bundle(
-        sequence_dir / "warmup" / "warmup-run" / "warmup_bundle.json"
-    ) == bundle
+    assert {artifact.source_run_id for artifact in bundle.final_artifact_bank} == {
+        "warmup-run"
+    }
+    assert (
+        load_warmup_bundle(
+            sequence_dir / "warmup" / "warmup-run" / "warmup_bundle.json"
+        )
+        == bundle
+    )
 
 
 @pytest.mark.asyncio
@@ -358,7 +364,16 @@ async def test_runtime_e2e_reuses_one_portable_warmup_without_copying_harbor(tmp
         sequence_dir=sequence_dir,
         run_id=spec.sample_id,
     )
-    result = await sample_runtime.run(spec, warmup=bundle)
+    completed_positions: list[int] = []
+
+    def on_position_complete(journal: PositionJournal) -> None:
+        completed_positions.append(journal.position)
+
+    result = await sample_runtime.run(
+        spec,
+        warmup=bundle,
+        on_position_complete=on_position_complete,
+    )
 
     sample_terminal = sequence_dir / "samples" / spec.sample_id / "sample_result.json"
     assert load_sample_result(sample_terminal) == result
@@ -370,6 +385,7 @@ async def test_runtime_e2e_reuses_one_portable_warmup_without_copying_harbor(tmp
         sequence_dir / "samples" / spec.sample_id / "jobs" / "position-0000"
     ).exists()
     assert len(sample_orchestrator.execution_calls) == 2
+    assert completed_positions == [1, 2]
     assert all(
         context.policy_name == "random_uniform"
         for _, context in sample_orchestrator.execution_calls
@@ -1107,10 +1123,7 @@ async def test_redacted_executor_output_remains_stable_across_archive_round_trip
             update={
                 "execution_trace": trace.model_copy(
                     update={
-                        "stdout": (
-                            "Bearer one-time-secret "
-                            "token=assignment-secret"
-                        )
+                        "stdout": ("Bearer one-time-secret token=assignment-secret")
                     }
                 )
             }
@@ -1188,9 +1201,7 @@ async def test_executor_dot_tmp_evidence_is_redacted_and_manifested(
     async def execute_with_dot_tmp(**kwargs):
         record = await original(**kwargs)
         position = kwargs["position"]
-        evidence = (
-            workspace / "jobs" / f"position-{position:04d}" / ".evidence.tmp"
-        )
+        evidence = workspace / "jobs" / f"position-{position:04d}" / ".evidence.tmp"
         evidence.write_text(f"diagnostic {secret}\n", encoding="utf-8")
         return record
 
@@ -1239,9 +1250,7 @@ async def test_nonportable_executor_filename_fails_before_journal_and_is_quarant
 
     assert raised.value.stage is FailureStage.PERSIST
     assert not list((workspace / "journal").glob("*.json"))
-    assert not (
-        workspace / "jobs" / "position-0000" / "bad\\name.txt"
-    ).exists()
+    assert not (workspace / "jobs" / "position-0000" / "bad\\name.txt").exists()
     assert (workspace / "sample_failure.json").is_file()
     assert (workspace / "archive_manifest.json").is_file()
 

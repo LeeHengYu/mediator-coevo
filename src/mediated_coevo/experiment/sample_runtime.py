@@ -63,7 +63,10 @@ from mediated_coevo.experiment.sample_models import (
     WarmupExecution,
     WarmupTaskRecord,
 )
-from mediated_coevo.experiment.sample_runner import SampleRunner
+from mediated_coevo.experiment.sample_runner import (
+    PositionCompleteCallback,
+    SampleRunner,
+)
 from mediated_coevo.orchestration.adapters import (
     DiffusionContextPacker,
     LangChainDiffusionPolicyAdapter,
@@ -165,7 +168,9 @@ class SampleRuntime:
                     store_dir,
                     expected_store_id=task.task_id,
                 )
-                if any(artifact.source_task_id != task.task_id for artifact in artifacts):
+                if any(
+                    artifact.source_task_id != task.task_id for artifact in artifacts
+                ):
                     raise ValueError(
                         f"artifact store contains another task's artifacts: {task.task_id}"
                     )
@@ -340,6 +345,7 @@ class SampleRuntime:
         spec: SampleSpec,
         *,
         warmup: WarmupBundle | None = None,
+        on_position_complete: PositionCompleteCallback | None = None,
     ) -> SampleResult:
         """Execute and archive only the arm-specific suffix."""
         spec = SampleSpec.model_validate(spec)
@@ -391,7 +397,12 @@ class SampleRuntime:
             raise wrapped_error from cause
 
         async def journal_callback(journal: PositionJournal) -> str:
-            return self._write_journal(workspace, journal)
+            path = self._write_journal(workspace, journal)
+            if on_position_complete is not None:
+                result = on_position_complete(journal)
+                if inspect.isawaitable(result):
+                    await result
+            return path
 
         try:
             execution = await self.runner.run(
@@ -479,8 +490,16 @@ class SampleRuntime:
         """Require durable state stores to belong to the claimed workspace."""
         expected_roots = (
             (self.diffusion_store, "_base_dir", "diffusion"),
-            (getattr(self.orchestrator, "artifact_store", None), "_base_dir", "artifacts"),
-            (getattr(self.orchestrator, "history_store", None), "_history_dir", "history"),
+            (
+                getattr(self.orchestrator, "artifact_store", None),
+                "_base_dir",
+                "artifacts",
+            ),
+            (
+                getattr(self.orchestrator, "history_store", None),
+                "_history_dir",
+                "history",
+            ),
             (self.orchestrator, "_snapshots_dir", "skills_snapshots"),
             (self.orchestrator, "_metrics_path", "metrics.jsonl"),
             (
@@ -550,7 +569,9 @@ class SampleRuntime:
             "benchmarks",
         ):
             path = workspace / relative
-            if path.is_file() or (path.is_dir() and any(item.is_file() for item in path.rglob("*"))):
+            if path.is_file() or (
+                path.is_dir() and any(item.is_file() for item in path.rglob("*"))
+            ):
                 blockers.append(str(path))
         metrics = workspace / "metrics.jsonl"
         if metrics.exists():
@@ -562,7 +583,9 @@ class SampleRuntime:
         )
         jobs = Path(str(jobs_dir))
         jobs = jobs if jobs.is_absolute() else workspace / jobs
-        if jobs.is_file() or (jobs.is_dir() and any(item.is_file() for item in jobs.rglob("*"))):
+        if jobs.is_file() or (
+            jobs.is_dir() and any(item.is_file() for item in jobs.rglob("*"))
+        ):
             blockers.append(str(jobs))
 
         for name in (
@@ -691,17 +714,16 @@ class SampleRuntime:
             raise ValueError("warm-up bundle belongs to another sequence")
         if warmup.warmup_count != spec.sequence.warmup_count:
             raise ValueError("warm-up bundle has the wrong prefix length")
-        if tuple(record.task for record in warmup.task_records) != (
-            spec.sequence.tasks[: spec.sequence.warmup_count]
+        if (
+            tuple(record.task for record in warmup.task_records)
+            != (spec.sequence.tasks[: spec.sequence.warmup_count])
         ):
             raise ValueError("warm-up bundle differs from the frozen task prefix")
 
         _validate_path_component(warmup.warmup_run_id, label="warmup_run_id")
 
         relative_bundle = f"warmup/{warmup.warmup_run_id}/{WARMUP_BUNDLE_FILENAME}"
-        relative_manifest = (
-            f"warmup/{warmup.warmup_run_id}/{ARCHIVE_MANIFEST_FILENAME}"
-        )
+        relative_manifest = f"warmup/{warmup.warmup_run_id}/{ARCHIVE_MANIFEST_FILENAME}"
         persisted = load_warmup_bundle(self.sequence_dir / relative_bundle)
         if persisted != warmup:
             raise ValueError("provided warm-up bundle differs from the shared archive")
@@ -727,7 +749,9 @@ class SampleRuntime:
         )
         for path in paths:
             if path.exists():
-                raise FileExistsError(f"sample transfer artifact already exists: {path}")
+                raise FileExistsError(
+                    f"sample transfer artifact already exists: {path}"
+                )
         try:
             for artifact in warmup.final_artifact_bank:
                 self.diffusion_store.store_artifact(artifact)
@@ -756,8 +780,7 @@ class SampleRuntime:
                 "execution produced non-portable archive paths before journal: "
                 + ", ".join(
                     sorted(
-                        path.relative_to(workspace).as_posix()
-                        for path in invalid_paths
+                        path.relative_to(workspace).as_posix() for path in invalid_paths
                     )
                 )
             )
@@ -776,9 +799,7 @@ class SampleRuntime:
             path
             for record in records
             for path in (
-                record.execution.archive_paths
-                if record.execution is not None
-                else ()
+                record.execution.archive_paths if record.execution is not None else ()
             )
         }
         for removed in removed_paths:
@@ -789,8 +810,7 @@ class SampleRuntime:
                 for declared in declared_paths
             ):
                 raise ValueError(
-                    "archive sanitizer removed a declared execution path: "
-                    f"{removed}"
+                    f"archive sanitizer removed a declared execution path: {removed}"
                 )
         persisted_records = self._workspace_journal_records(workspace, records)
         run_relative = workspace.relative_to(self.sequence_dir).as_posix()
@@ -894,8 +914,14 @@ class SampleRuntime:
         records: list[Any] = []
         for value in paths:
             relative = PurePosixPath(value)
-            if relative.is_absolute() or ".." in relative.parts or "." in relative.parts:
-                raise ValueError(f"journal path is not normalized and relative: {value!r}")
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or "." in relative.parts
+            ):
+                raise ValueError(
+                    f"journal path is not normalized and relative: {value!r}"
+                )
             path = self.sequence_dir.joinpath(*relative.parts)
             if path.is_file():
                 journal = PositionJournal.model_validate_json(
@@ -993,18 +1019,14 @@ class SampleRuntime:
         config = getattr(self.orchestrator, "config", None)
         models = _json_mapping(getattr(config, "models", {}))
         model_mapping = {
-            str(key): str(value)
-            for key, value in models.items()
-            if value is not None
+            str(key): str(value) for key, value in models.items() if value is not None
         }
         executor = getattr(self.orchestrator, "executor", None)
         backend = getattr(executor, "_harbor_runner", None) or executor
         return RuntimeProvenance(
             implementation_revision=self.implementation_revision,
             implementation_dirty=self.implementation_dirty,
-            config_hash=_sha256_json(
-                _redact_sensitive_config(_json_value(config))
-            ),
+            config_hash=_sha256_json(_redact_sensitive_config(_json_value(config))),
             graph_implementation_hash=_source_hash(LangChainTaskGraphAgent),
             policy_implementation_hash=_source_hash(LangChainDiffusionPolicyAgent),
             harness_hash=_optional_tree_hash(
@@ -1112,7 +1134,10 @@ def build_sample_runtime(
 ) -> SampleRuntime:
     """Wire a one-shot causal sample runtime from a fresh Orchestrator."""
     run_id = _validate_path_component(run_id, label="run_id")
-    if not implementation_revision or implementation_revision != implementation_revision.strip():
+    if (
+        not implementation_revision
+        or implementation_revision != implementation_revision.strip()
+    ):
         raise ValueError("implementation_revision must be a non-empty stripped string")
     updates = _nested_attr(
         orchestrator,

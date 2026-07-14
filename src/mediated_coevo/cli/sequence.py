@@ -15,8 +15,6 @@ from mediated_coevo.cli.config import _load_config_or_bad_parameter
 from mediated_coevo.cli.experiment import (
     PROJECT_ROOT,
     _normalize_families,
-    _normalize_split,
-    _select_split_pool,
     ensure_harbor_available,
     prepare_llm_credentials_or_exit,
     setup_logging,
@@ -29,6 +27,7 @@ from mediated_coevo.experiment.runtime_factory import (
     build_experiment,
 )
 from mediated_coevo.experiment.sample_models import (
+    PositionJournal,
     SampleResult,
     SampleSpec,
     SequenceSpec,
@@ -36,31 +35,19 @@ from mediated_coevo.experiment.sample_models import (
 from mediated_coevo.experiment.sample_runtime import build_sample_runtime
 from mediated_coevo.orchestration.arms import OrchestrationArm
 
-_ARMS = (
-    OrchestrationArm.EXECUTION_ONLY,
-    OrchestrationArm.RANDOM_POLICY,
-    OrchestrationArm.NO_GRAPH,
-    OrchestrationArm.FULL_ORCHESTRATION,
-)
-
 
 def _select_sequence_tasks(
     repository: SkillFlowRepository,
     families: list[str],
-    split: str,
     seed: int,
 ) -> list[str]:
     candidates: list[str] = []
     for family in families:
         candidates.extend(repository.list_local_task_ids(family=family))
-    candidates = _select_split_pool(
-        sorted(dict.fromkeys(candidates)),
-        seed=seed,
-        split=split,
-    )
+    candidates = sorted(dict.fromkeys(candidates))
     if len(candidates) < 10:
         raise typer.BadParameter(
-            f"selected split has {len(candidates)} tasks; sequence requires 10"
+            f"selected families have {len(candidates)} tasks; sequence requires 10"
         )
     by_family = {
         family: [
@@ -73,7 +60,7 @@ def _select_sequence_tasks(
     missing = [family for family, task_ids in by_family.items() if not task_ids]
     if missing:
         raise typer.BadParameter(
-            f"selected split has no tasks for families: {', '.join(missing)}"
+            f"selected families have no tasks for: {', '.join(missing)}"
         )
     rng = random.Random(seed)
     selected = [rng.choice(by_family[family]) for family in families]
@@ -88,9 +75,12 @@ async def _run_sequence(
     config: Config,
     repository: SkillFlowRepository,
     sequence: SequenceSpec,
+    arm: OrchestrationArm,
     sequence_dir: Path,
     artifact_store_root: Path,
-) -> tuple[SampleResult, ...]:
+    iteration: int,
+    iterations: int,
+) -> SampleResult:
     warmup_experiment = build_experiment(
         project_root=PROJECT_ROOT,
         config=config.model_copy(deep=True),
@@ -110,37 +100,51 @@ async def _run_sequence(
         sequence,
         artifact_store_root=artifact_store_root,
     )
+    console.print(
+        f"[bold]Iteration {iteration}/{iterations}[/] · warmup loaded "
+        f"{sequence.warmup_count}/{len(sequence.tasks)}: "
+        f"{', '.join(sequence.task_ids[: sequence.warmup_count])}"
+    )
 
-    results: list[SampleResult] = []
-    for arm in _ARMS:
-        sample_id = arm.value
-        experiment = build_experiment(
-            project_root=PROJECT_ROOT,
-            config=config.model_copy(deep=True),
-            seed=sequence.policy_seed,
-            condition_name=config.experiment.condition_name,
-            experiment_dir=sequence_dir / "samples" / sample_id,
-            benchmark_repo=repository,
+    sample_id = arm.value
+    experiment = build_experiment(
+        project_root=PROJECT_ROOT,
+        config=config.model_copy(deep=True),
+        seed=sequence.policy_seed,
+        condition_name=config.experiment.condition_name,
+        experiment_dir=sequence_dir / "samples" / sample_id,
+        benchmark_repo=repository,
+    )
+    runtime = build_sample_runtime(
+        orchestrator=experiment.orchestrator,
+        run_id=sample_id,
+        sequence_dir=sequence_dir,
+        implementation_revision="workspace",
+        implementation_dirty=True,
+    )
+
+    def show_progress(journal: PositionJournal) -> None:
+        next_run = journal.position + 2
+        console.print(
+            f"Iteration {iteration}/{iterations} · {arm.value} · "
+            f"run {min(next_run, len(sequence.tasks))}/{len(sequence.tasks)}"
+            f"{' complete' if next_run > len(sequence.tasks) else ''}"
         )
-        runtime = build_sample_runtime(
-            orchestrator=experiment.orchestrator,
-            run_id=sample_id,
-            sequence_dir=sequence_dir,
-            implementation_revision="workspace",
-            implementation_dirty=True,
-        )
-        results.append(
-            await runtime.run(
-                SampleSpec(
-                    sample_id=sample_id,
-                    sequence=sequence,
-                    arm=arm,
-                    warmup_bundle_id=warmup.bundle_id,
-                ),
-                warmup=warmup,
-            )
-        )
-    return tuple(results)
+
+    console.print(
+        f"Iteration {iteration}/{iterations} · {arm.value} · "
+        f"run {sequence.warmup_count + 1}/{len(sequence.tasks)}"
+    )
+    return await runtime.run(
+        SampleSpec(
+            sample_id=sample_id,
+            sequence=sequence,
+            arm=arm,
+            warmup_bundle_id=warmup.bundle_id,
+        ),
+        warmup=warmup,
+        on_position_complete=show_progress,
+    )
 
 
 def sequence(
@@ -151,11 +155,19 @@ def sequence(
             help="Exactly four SkillFlow families. Repeat this option.",
         ),
     ],
-    split: Annotated[
-        str,
-        typer.Option(help="Frozen task split: train, validation, or test."),
-    ] = "test",
-    seed: Annotated[int, typer.Option(help="Task selection and policy seed.")] = 0,
+    seed: Annotated[
+        int,
+        typer.Option(
+            help="Base task-stream and policy seed; each loop adds its zero-based index."
+        ),
+    ] = 0,
+    k: Annotated[
+        int,
+        typer.Option(
+            "-K",
+            help="Number of sequences to run serially.",
+        ),
+    ] = 1,
     config_dir: Annotated[
         Path,
         typer.Option(help="Config directory."),
@@ -170,13 +182,13 @@ def sequence(
     ] = PROJECT_ROOT / "data" / "sequences",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run four frozen arms over one 3-warm-up plus 7-task suffix sequence."""
+    """Repeat one config-selected arm over seeded 10-task sequences."""
     setup_logging(verbose)
+    if k < 1:
+        raise typer.BadParameter("-K must be at least 1")
     families = _normalize_families(family)
     if len(families) != 4:
         raise typer.BadParameter("sequence requires exactly four distinct families")
-    normalized_split = _normalize_split(split)
-    assert normalized_split is not None
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides={
@@ -190,43 +202,52 @@ def sequence(
                 },
                 "baseline_preset": None,
             },
-            "diffusion": {
-                "enabled": True,
-                "policy": "random_k",
-                "graph": "none",
-            },
         },
     )
+    arm = config.experiment.orchestration_arm
     repository = build_benchmark_repo(PROJECT_ROOT, config)
-    task_ids = _select_sequence_tasks(repository, families, normalized_split, seed)
     prepare_llm_credentials_or_exit(config)
     ensure_harbor_available(config)
     provider = BenchmarkTaskProfileProvider(repository)
-    sequence_id = f"sequence-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}"
-    spec = SequenceSpec(
-        sequence_id=sequence_id,
-        tasks=tuple(provider.resolve(task_id) for task_id in task_ids),
-        warmup_count=3,
-        policy_seed=seed,
-        task_set_id=f"{normalized_split}:{','.join(families)}",
+    console.print(
+        f"[bold]Sequence run:[/] {k} iteration(s), 10 tasks each "
+        f"(3 warmup loaded + 7 evaluated), arm {arm.value}, "
+        f"seeds {seed}..{seed + k - 1}"
     )
-    sequence_dir = output_dir / sequence_id
-    results = asyncio.run(
-        _run_sequence(
-            config=config,
-            repository=repository,
-            sequence=spec,
-            sequence_dir=sequence_dir,
-            artifact_store_root=artifact_store_root,
+    run_id = f"sequence-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}"
+    run_dir = output_dir / run_id
+    for loop_index in range(k):
+        sequence_seed = seed + loop_index
+        config.experiment.seed = sequence_seed
+        task_ids = _select_sequence_tasks(repository, families, sequence_seed)
+        sequence_id = f"{run_id}-iter-{loop_index + 1}"
+        spec = SequenceSpec(
+            sequence_id=sequence_id,
+            tasks=tuple(provider.resolve(task_id) for task_id in task_ids),
+            warmup_count=3,
+            policy_seed=sequence_seed,
+            task_set_id=f"families:{','.join(families)}",
         )
-    )
-    console.print(f"[bold green]Sequence complete:[/] {sequence_dir}")
-    for result in results:
+        sequence_dir = run_dir / f"iter-{loop_index + 1}"
+        result = asyncio.run(
+            _run_sequence(
+                config=config,
+                repository=repository,
+                sequence=spec,
+                arm=arm,
+                sequence_dir=sequence_dir,
+                artifact_store_root=artifact_store_root,
+                iteration=loop_index + 1,
+                iterations=k,
+            )
+        )
+        console.print(f"[bold green]Iteration complete:[/] {sequence_dir}")
         console.print(
             f"{result.spec.arm.value}: "
             f"reward={result.rewards.unweighted_mean} "
             f"valid={result.rewards.valid_for_reporting}"
         )
+    console.print(f"[bold green]Sequence complete:[/] {run_dir}")
 
 
 def register_sequence_command(app: typer.Typer) -> None:

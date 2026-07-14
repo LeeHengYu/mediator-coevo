@@ -27,8 +27,9 @@ Package guides describe the boundaries and public contracts:
 - [experiment](src/mediated_coevo/experiment/README.md): causal sample state
   machine, shared warm-up archive, rewards, journals, and loading APIs.
 
-The `sequence` CLI samples a frozen split and runs the four fixed arms. Automated
-heuristic learning and multi-sequence aggregation remain outside this runtime.
+The `sequence` CLI samples one or more seeded 10-task streams from four families
+and repeats the arm selected by `experiment.orchestration_arm`. Automated
+heuristic learning and cross-sequence aggregation remain outside this runtime.
 
 ## How It Works
 
@@ -286,21 +287,26 @@ Pre-run per-task stores are written under:
 data/base_artifacts/<family>/<task>/
 ```
 
-Generate any missing stores, then run one frozen 3-warm-up plus 7-task sequence:
+Generate any missing stores, then run `K` seeded 3-warm-up plus 7-task sequences:
 
 ```bash
 uv run medcoevo base-artifacts --family <family>
 uv run medcoevo sequence \
   --family <family-1> --family <family-2> \
   --family <family-3> --family <family-4> \
-  --split test --seed 0
+  --seed 0 -K 10
 ```
 
 `base-artifacts` skips valid existing stores. After a successful export it
 removes that command-owned experiment workspace; failed workspaces remain under
 `data/experiments` for diagnosis. `sequence` never executes its first three
 tasks: it imports their stores into one shared `WarmupBundle`, then evaluates
-only the seven-task suffix in each arm.
+only the seven-task suffix in the configured arm. `-K` defaults to `1`; loop `i` uses
+`--seed + i` to produce its task-stream permutation and policy seed.
+Set `experiment.orchestration_arm` to `execution_only`, `random_policy`,
+`no_graph`, or `full_orchestration`; every `-K` iteration uses that same arm.
+Outputs share `sequence-<timestamp>-<initial-seed>/`, with one `iter-N/` folder
+per iteration.
 
 Use the CLI for the full flag list:
 

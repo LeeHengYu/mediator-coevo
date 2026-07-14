@@ -10,6 +10,7 @@ from typing import Any, Literal, Self, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mediated_coevo.experiment.conditions import ConditionName
+from mediated_coevo.orchestration.arms import OrchestrationArm
 
 OPENROUTER_MODEL_PREFIX = "openrouter/"
 DEFAULT_SKILLFLOW_DATASET = "zhang-ziao/SkillFlow-Task"
@@ -204,6 +205,7 @@ class ExperimentConfig(BaseModel):
     seed: int
     advisor_buffer_max: int
     condition_name: ConditionName
+    orchestration_arm: OrchestrationArm = OrchestrationArm.FULL_ORCHESTRATION
     skill_updates: SkillUpdateConfig
     skill_validation: SkillValidationConfig = Field(
         default_factory=SkillValidationConfig
