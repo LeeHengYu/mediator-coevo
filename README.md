@@ -6,6 +6,20 @@ The executor backend now targets SkillFlow tasks through Harbor, while the
 planner, mediator, judge, reward tagging, reflection, validation, and diffusion
 concepts remain the same experimental frame.
 
+## Target Architecture
+
+The target online architecture separates task-graph construction, diffusion
+policy, and task execution into explicit responsibilities. The graph agent
+organizes task relationships, the policy agent selects useful prior artifacts,
+and the existing execution pipeline consumes the resulting context without
+owning either orchestration decision.
+
+See the [July 4 design note](docs/july_4_note.md) for the motivating system
+design and the [diffusion package guide](src/mediated_coevo/diffusion/README.md)
+for implementation and compatibility boundaries. The existing CLI and
+historical online skill-evolution runtime remain supported while this separation
+is introduced incrementally.
+
 ## How It Works
 
 Mediated Co-Evolution studies skill files as runtime policies. It uses a
