@@ -251,7 +251,8 @@ class WarmupTaskRecord(_FrozenV1Model):
     task: TaskProfile
     artifact_ids_before: tuple[str, ...]
     context: ContextPack
-    execution: TaskExecutionResult
+    execution: TaskExecutionResult | None = None
+    artifact_store_id: str | None = None
     bank_update: ArtifactBankUpdate
 
     @model_validator(mode="after")
@@ -267,6 +268,14 @@ class WarmupTaskRecord(_FrozenV1Model):
         _validate_identity(self.sequence_id, label="sequence_id")
         if self.context != empty_context_pack():
             raise ValueError("warm-up records require the canonical empty context")
+        if self.execution is None:
+            if self.artifact_store_id != self.task.task_id:
+                raise ValueError(
+                    "stored warm-up record must identify its task artifact store"
+                )
+            return self
+        if self.artifact_store_id is not None:
+            raise ValueError("executed warm-up record cannot name an artifact store")
         if self.execution.metadata.get("phase") != "warmup":
             raise ValueError("warm-up execution metadata phase must equal warmup")
         treatment_keys = ("arm", "treatment_arm", "baseline_preset")
@@ -368,18 +377,19 @@ def _validate_record_transition(
     position: int,
     task: TaskProfile,
     artifact_ids_before: tuple[str, ...],
-    execution: TaskExecutionResult,
+    execution: TaskExecutionResult | None,
     bank_update: ArtifactBankUpdate,
 ) -> None:
     _validate_identity(run_id, label="run_id")
     if len(artifact_ids_before) != len(set(artifact_ids_before)):
         raise ValueError("artifact_ids_before must be unique")
-    if execution.run_id != run_id:
-        raise ValueError("execution run_id must match the task record")
-    if execution.position != position:
-        raise ValueError("execution position must match the task record")
-    if execution.task_id != task.task_id:
-        raise ValueError("execution task_id must match the frozen task profile")
+    if execution is not None:
+        if execution.run_id != run_id:
+            raise ValueError("execution run_id must match the task record")
+        if execution.position != position:
+            raise ValueError("execution position must match the task record")
+        if execution.task_id != task.task_id:
+            raise ValueError("execution task_id must match the frozen task profile")
     if bank_update.run_id != run_id:
         raise ValueError("bank update run_id must match the task record")
     if bank_update.position != position:

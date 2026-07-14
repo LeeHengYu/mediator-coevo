@@ -20,13 +20,14 @@ from mediated_coevo.artifacts.adapters import (
     DiffusionArtifactBankUpdater,
     DiffusionEmitterProjector,
 )
+from mediated_coevo.artifacts.models import ArtifactBankUpdate
 from mediated_coevo.diffusion.emitter import DiffusionEmitter
 from mediated_coevo.diffusion.models import DiffusionArtifact, TaskGraphSnapshot
 from mediated_coevo.diffusion.policy_agent import LangChainDiffusionPolicyAgent
 from mediated_coevo.diffusion.store import DiffusionStore
 from mediated_coevo.diffusion.task_graph_agent import LangChainTaskGraphAgent
 from mediated_coevo.execution.adapters import ExplicitContextOrchestratorExecutionAgent
-from mediated_coevo.execution.models import is_sensitive_key
+from mediated_coevo.execution.models import empty_context_pack, is_sensitive_key
 from mediated_coevo.experiment.sample_archive import (
     ARCHIVE_MANIFEST_FILENAME,
     SAMPLE_RESULT_FILENAME,
@@ -118,28 +119,7 @@ class SampleRuntime:
 
     async def prepare_warmup(self, sequence: SequenceSpec) -> WarmupBundle:
         """Execute and archive the arm-neutral prefix exactly once."""
-        sequence = SequenceSpec.model_validate(sequence)
-        workspace = self._claim(
-            expected_workspace=self.sequence_dir / "warmup" / self.run_id
-        )
-        self._assert_fresh(workspace)
-        self._assert_no_successful_warmup()
-        started_at = datetime.now(UTC)
-        self._started_at = started_at
-
-        try:
-            self._sanitize_config_snapshot(workspace)
-            self._persist_sequence(sequence)
-        except Exception as cause:
-            wrapped_error = self._runtime_error(
-                stage=FailureStage.PERSIST,
-                sequence=sequence,
-                position=0,
-                cause=cause,
-                sample_id=None,
-            )
-            self._persist_failure(workspace, wrapped_error, warmup=True)
-            raise wrapped_error from cause
+        sequence, workspace, started_at = self._begin_warmup(sequence)
 
         async def journal_callback(journal: PositionJournal) -> str:
             return self._write_journal(workspace, journal)
@@ -163,13 +143,161 @@ class SampleRuntime:
             )
             self._persist_failure(workspace, wrapped_error, warmup=True)
             raise wrapped_error from cause
+        return self._finish_warmup(sequence, workspace, execution, started_at)
+
+    async def prepare_warmup_from_stores(
+        self,
+        sequence: SequenceSpec,
+        *,
+        artifact_store_root: Path,
+    ) -> WarmupBundle:
+        """Build the arm-neutral prefix from pre-run task artifact stores."""
+        sequence, workspace, started_at = self._begin_warmup(sequence)
+        try:
+            root = Path(artifact_store_root).resolve()
+            loaded: list[tuple[int, Any, tuple[DiffusionArtifact, ...]]] = []
+            seen_ids: set[str] = set()
+            for position, task in enumerate(sequence.tasks[: sequence.warmup_count]):
+                store_dir = (root / task.task_id).resolve()
+                if not store_dir.is_relative_to(root):
+                    raise ValueError(f"artifact store escapes its root: {task.task_id}")
+                artifacts = DiffusionStore.load_artifact_store(
+                    store_dir,
+                    expected_store_id=task.task_id,
+                )
+                if any(artifact.source_task_id != task.task_id for artifact in artifacts):
+                    raise ValueError(
+                        f"artifact store contains another task's artifacts: {task.task_id}"
+                    )
+                repeated = seen_ids.intersection(
+                    artifact.artifact_id for artifact in artifacts
+                )
+                if repeated:
+                    raise ValueError(
+                        "warm-up artifact stores repeat artifact IDs: "
+                        f"{sorted(repeated)!r}"
+                    )
+                seen_ids.update(artifact.artifact_id for artifact in artifacts)
+                loaded.append((position, task, artifacts))
+
+            records: list[WarmupTaskRecord] = []
+            bank: list[DiffusionArtifact] = []
+            journal_paths: list[str] = []
+            for position, task, artifacts in loaded:
+                before = tuple(artifact.artifact_id for artifact in bank)
+                normalized: list[DiffusionArtifact] = []
+                for artifact in artifacts:
+                    metadata = dict(artifact.metadata)
+                    metadata.update(
+                        {
+                            "preloaded_from_artifact_store": task.task_id,
+                            "original_source_iteration": artifact.source_iteration,
+                            "original_source_run_id": artifact.source_run_id,
+                            "preloaded_artifact_store_frozen": False,
+                        }
+                    )
+                    normalized.append(
+                        artifact.model_copy(
+                            update={
+                                "source_iteration": position,
+                                "source_run_id": self.run_id,
+                                "metadata": metadata,
+                            }
+                        )
+                    )
+                added = tuple(normalized)
+                after = (*before, *(artifact.artifact_id for artifact in added))
+                update = ArtifactBankUpdate(
+                    run_id=self.run_id,
+                    position=position,
+                    task_id=task.task_id,
+                    before_artifact_ids=before,
+                    added_artifacts=added,
+                    after_artifact_ids=after,
+                )
+                record = WarmupTaskRecord(
+                    run_id=self.run_id,
+                    sequence_id=sequence.sequence_id,
+                    position=position,
+                    task=task,
+                    artifact_ids_before=before,
+                    context=empty_context_pack(),
+                    artifact_store_id=task.task_id,
+                    bank_update=update,
+                )
+                for artifact in added:
+                    self.diffusion_store.store_artifact(artifact)
+                bank.extend(added)
+                records.append(record)
+                journal_paths.append(
+                    self._write_journal(
+                        workspace,
+                        PositionJournal(
+                            run_id=self.run_id,
+                            sequence_id=sequence.sequence_id,
+                            position=position,
+                            task_record=record,
+                            bank_artifact_ids=after,
+                        ),
+                    )
+                )
+            execution = WarmupExecution(
+                sequence_id=sequence.sequence_id,
+                warmup_run_id=self.run_id,
+                task_records=tuple(records),
+                final_artifact_bank=tuple(bank),
+                completed_journal_paths=tuple(journal_paths),
+            )
+        except Exception as cause:
+            wrapped_error = self._runtime_error(
+                stage=FailureStage.PERSIST,
+                sequence=sequence,
+                position=0,
+                cause=cause,
+                sample_id=None,
+            )
+            self._persist_failure(workspace, wrapped_error, warmup=True)
+            raise wrapped_error from cause
+        return self._finish_warmup(sequence, workspace, execution, started_at)
+
+    def _begin_warmup(
+        self,
+        sequence: SequenceSpec,
+    ) -> tuple[SequenceSpec, Path, datetime]:
+        sequence = SequenceSpec.model_validate(sequence)
+        workspace = self._claim(
+            expected_workspace=self.sequence_dir / "warmup" / self.run_id
+        )
+        self._assert_fresh(workspace)
+        self._assert_no_successful_warmup()
+        started_at = datetime.now(UTC)
+        self._started_at = started_at
+        try:
+            self._sanitize_config_snapshot(workspace)
+            self._persist_sequence(sequence)
+        except Exception as cause:
+            wrapped_error = self._runtime_error(
+                stage=FailureStage.PERSIST,
+                sequence=sequence,
+                position=0,
+                cause=cause,
+                sample_id=None,
+            )
+            self._persist_failure(workspace, wrapped_error, warmup=True)
+            raise wrapped_error from cause
+        return sequence, workspace, started_at
+
+    def _finish_warmup(
+        self,
+        sequence: SequenceSpec,
+        workspace: Path,
+        execution: WarmupExecution,
+        started_at: datetime,
+    ) -> WarmupBundle:
 
         try:
             provenance = self._provenance(started_at=started_at)
-            manifest = self._manifest(
-                workspace,
-                records=execution.task_records,
-            )
+            manifest = self._manifest(workspace, records=execution.task_records)
             execution = self._reload_warmup_execution(workspace, execution)
             bundle = WarmupBundle.create(
                 sequence_id=sequence.sequence_id,
@@ -647,7 +775,11 @@ class SampleRuntime:
         declared_paths = {
             path
             for record in records
-            for path in record.execution.archive_paths
+            for path in (
+                record.execution.archive_paths
+                if record.execution is not None
+                else ()
+            )
         }
         for removed in removed_paths:
             if any(

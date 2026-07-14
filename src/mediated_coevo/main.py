@@ -10,11 +10,13 @@ from mediated_coevo.cli.graph import register_graph_command
 from mediated_coevo.cli.inspect import register_inspect_command
 from mediated_coevo.cli.matrix import register_matrix_command
 from mediated_coevo.cli.run import register_run_command
+from mediated_coevo.cli.sequence import register_sequence_command
 from mediated_coevo.cli.skillflow import register_skillflow_commands
 
 app = typer.Typer(name="medcoevo", help="Mediated Co-Evolution Experiment Runner")
 
 register_run_command(app)
+register_sequence_command(app)
 register_matrix_command(app)
 register_extract_command(app)
 register_inspect_command(app)

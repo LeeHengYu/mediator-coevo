@@ -55,6 +55,7 @@ from mediated_coevo.experiment.conditions import (
     ExperimentDesignError,
     validate_experiment_design,
 )
+from mediated_coevo.diffusion.store import DiffusionStore
 from mediated_coevo.experiment.runtime_factory import (
     build_benchmark_repo,
     build_experiment_runtime,
@@ -76,7 +77,8 @@ def run_skillflow_experiment(
     state_source: RuntimeStateSource | None = None,
     publish_state_ref: str | None = None,
     remote_harbor_config: GCPVMConfig | None = None,
-) -> None:
+    artifact_store_dir: Path | None = None,
+) -> Path:
     """Run a SkillFlow selection in one evolution loop."""
     random.seed(seed)
     config.experiment.benchmark_selection.tasks = selection.task_ids
@@ -165,12 +167,111 @@ def run_skillflow_experiment(
         config=config,
         history_store=runtime.orchestrator.history_store,
     )
+    if artifact_store_dir is not None:
+        runtime.orchestrator.diffusion_store.save_artifact_store(
+            artifact_store_dir,
+            store_id=selection.task_ids[0],
+        )
+        DiffusionStore.load_artifact_store(
+            artifact_store_dir,
+            expected_store_id=selection.task_ids[0],
+        )
     if publish_state_ref is not None:
         _publish_graph_state_ref(
             publish_state_ref,
             experiment_dir=runtime.experiment_dir,
             split=selection.split,
         )
+    return runtime.experiment_dir
+
+
+def _remove_base_artifact_experiment(experiment_dir: Path, *, data_dir: str) -> None:
+    experiments_root = (PROJECT_ROOT / data_dir / "experiments").resolve()
+    resolved = experiment_dir.resolve()
+    if resolved.parent != experiments_root or "base-artifact-" not in resolved.name:
+        raise ValueError(f"refusing to remove non-base-artifact run: {resolved}")
+    shutil.rmtree(resolved)
+
+
+def base_artifacts(
+    family: Annotated[
+        list[str],
+        typer.Option(
+            "--family",
+            help="SkillFlow family to pre-run. Repeat for multiple families.",
+        ),
+    ],
+    seed: Annotated[int, typer.Option(help="Experiment seed.")] = 0,
+    config_dir: Annotated[
+        Path,
+        typer.Option(help="Config directory"),
+    ] = PROJECT_ROOT / "config",
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Portable artifact store root."),
+    ] = PROJECT_ROOT / "data" / "base_artifacts",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Pre-run each task independently and keep only its artifact store."""
+    setup_logging(verbose)
+    config = _load_config_or_bad_parameter(
+        config_dir,
+        overrides={
+            "experiment": {
+                "num_iterations": 1,
+                "seed": seed,
+                "condition_name": "learned_mediator",
+                "skill_updates": {
+                    "executor": False,
+                    "planner": False,
+                    "mediator": False,
+                },
+                "baseline_preset": None,
+            },
+            "diffusion": {
+                "enabled": True,
+                "policy": "random_k",
+                "graph": "none",
+            },
+        },
+    )
+    repository = build_benchmark_repo(PROJECT_ROOT, config)
+    families = list(dict.fromkeys(name.strip() for name in family if name.strip()))
+    if not families:
+        raise typer.BadParameter("provide --family")
+    for family_name in families:
+        task_ids = repository.list_local_task_ids(family=family_name)
+        if not task_ids:
+            raise typer.BadParameter(
+                f"no local SkillFlow tasks found for family {family_name!r}"
+            )
+        for task_id in task_ids:
+            destination = output_dir / task_id
+            if (destination / "manifest.json").is_file():
+                DiffusionStore.load_artifact_store(
+                    destination,
+                    expected_store_id=task_id,
+                )
+                console.print(f"[dim]Already exists:[/] {destination}")
+                continue
+            experiment_dir = run_skillflow_experiment(
+                config=config.model_copy(deep=True),
+                selection=TaskSelection(
+                    task_ids=[task_id],
+                    families=(family_name,),
+                    task_stream_seed=seed,
+                ),
+                iterations=1,
+                seed=seed,
+                condition_name="learned_mediator",
+                run_id=f"base-artifact-{task_id.replace('/', '-')}",
+                artifact_store_dir=destination,
+            )
+            _remove_base_artifact_experiment(
+                experiment_dir,
+                data_dir=config.paths.data_dir,
+            )
+            console.print(f"[bold green]Saved:[/] {destination}")
 
 
 def _apply_harness_overlay_and_reexec(harness_dir: Path) -> None:
@@ -554,5 +655,6 @@ def publish_graph_state(
 
 def register_run_command(app: typer.Typer) -> None:
     app.command()(run)
+    app.command("base-artifacts")(base_artifacts)
     app.command("publish-harness")(publish_harness)
     app.command("publish-graph-state")(publish_graph_state)

@@ -10,7 +10,7 @@ concepts remain the same experimental frame.
 
 The [July 4 design note](docs/july_4_note.md) is the final target architecture.
 The current code moves toward it in two layers: independently callable
-task-graph and diffusion-policy agents, plus a library-only runtime for one
+task-graph and diffusion-policy agents, plus a runtime for one
 causal warm-up-and-suffix sample. Task execution receives an explicit context
 pack and does not own graph construction or artifact selection.
 
@@ -27,10 +27,8 @@ Package guides describe the boundaries and public contracts:
 - [experiment](src/mediated_coevo/experiment/README.md): causal sample state
   machine, shared warm-up archive, rewards, journals, and loading APIs.
 
-This sample API does not define train/validation/test splits, a CLI, a batch or
-ten-sequence runner, or automated heuristic learning. The existing CLI and
-historical split-oriented and online skill-evolution paths below remain
-supported, but they are separate from the new sample runtime.
+The `sequence` CLI samples a frozen split and runs the four fixed arms. Automated
+heuristic learning and multi-sequence aggregation remain outside this runtime.
 
 ## How It Works
 
@@ -282,16 +280,34 @@ Experiment outputs are written under:
 data/experiments/<timestamp>-<run-id>/
 ```
 
-Saved warmup stores are written under:
+Pre-run per-task stores are written under:
 
 ```text
-data/artifact-stores/<experiment-folder>/
+data/base_artifacts/<family>/<task>/
 ```
+
+Generate any missing stores, then run one frozen 3-warm-up plus 7-task sequence:
+
+```bash
+uv run medcoevo base-artifacts --family <family>
+uv run medcoevo sequence \
+  --family <family-1> --family <family-2> \
+  --family <family-3> --family <family-4> \
+  --split test --seed 0
+```
+
+`base-artifacts` skips valid existing stores. After a successful export it
+removes that command-owned experiment workspace; failed workspaces remain under
+`data/experiments` for diagnosis. `sequence` never executes its first three
+tasks: it imports their stores into one shared `WarmupBundle`, then evaluates
+only the seven-task suffix in each arm.
 
 Use the CLI for the full flag list:
 
 ```bash
 uv run medcoevo run --help
+uv run medcoevo base-artifacts --help
+uv run medcoevo sequence --help
 uv run medcoevo matrix --help
 uv run medcoevo extract --help
 uv run medcoevo inspect --help

@@ -34,7 +34,8 @@ All new sample models are frozen, reject unknown fields, and use
 ## Causal lifecycle
 
 Every warm-up position bypasses graph construction, policy selection, and
-context packing:
+context packing. It may execute live or import the task's already generated
+portable artifact store:
 
 ```text
 resolve frozen task
@@ -95,6 +96,11 @@ warmup_runtime = build_sample_runtime(
     implementation_dirty=git_dirty,
 )
 warmup = await warmup_runtime.prepare_warmup(sequence)
+# Or, on the sequence CLI path, import without task execution.
+warmup = await warmup_runtime.prepare_warmup_from_stores(
+    sequence,
+    artifact_store_root=base_artifact_root,
+)
 
 sample_runtime = build_sample_runtime(
     orchestrator=fresh_arm_orchestrator,
@@ -120,7 +126,9 @@ diffusion state before calling an agent. There is no reset or resume API.
 
 ## Shared warm-up and durable archives
 
-The warm-up executes once per sequence and remains arm-neutral. Its
+The warm-up is constructed once per sequence and remains arm-neutral. The CLI
+imports the first three tasks from `data/base_artifacts`; the live
+`prepare_warmup()` path remains available for callers that need it. Its
 `WarmupBundle` records the prefix transitions, final initial artifact bank,
 archive references, and runtime provenance. `bundle_id` is the SHA-256 of
 canonical semantic content, excluding archive paths and runtime provenance.

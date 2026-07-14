@@ -350,6 +350,8 @@ def external_archive_refs(
     seen: set[tuple[str, str]] = set()
     workspace = workspace.resolve() if workspace is not None else None
     for task_record in records:
+        if task_record.execution is None:
+            continue
         declared_refs = task_record.execution.metadata.get("external_archive_refs", ())
         if isinstance(declared_refs, (list, tuple)):
             for value in declared_refs:
@@ -665,6 +667,8 @@ def _validate_persisted_run_state(
     manifest_paths = {entry.relative_path for entry in manifest.entries}
     sequence_workspace = run_workspace.parents[1]
     for record in task_records:
+        if record.execution is None:
+            continue
         for raw_path in record.execution.archive_paths:
             relative = _normalize_relative_path(raw_path)
             local_path = run_workspace.joinpath(*PurePosixPath(relative).parts)

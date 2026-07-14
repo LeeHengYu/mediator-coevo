@@ -129,6 +129,30 @@ class DiffusionStore:
         return len(artifacts)
 
     @classmethod
+    def load_artifact_store(
+        cls,
+        source: Path,
+        *,
+        expected_store_id: str,
+    ) -> tuple[DiffusionArtifact, ...]:
+        """Load and validate an existing portable artifact store."""
+        manifest = json.loads(
+            (source / cls._MANIFEST_FILE).read_text(encoding="utf-8")
+        )
+        if manifest.get("id") != expected_store_id:
+            raise ValueError(
+                f"artifact store id mismatch: expected {expected_store_id!r}, "
+                f"got {manifest.get('id')!r}"
+            )
+        artifacts = tuple(
+            DiffusionArtifact.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in sorted((source / "artifacts").glob("*.json"))
+        )
+        if not artifacts or manifest.get("artifact_count") != len(artifacts):
+            raise ValueError(f"artifact store count mismatch: {source}")
+        return artifacts
+
+    @classmethod
     def export_artifact_store(
         cls,
         source: Path,

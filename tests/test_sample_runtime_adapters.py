@@ -273,6 +273,57 @@ def _runtime_sequence(*, warmup_count: int = 1) -> SequenceSpec:
 
 
 @pytest.mark.asyncio
+async def test_runtime_builds_warmup_from_portable_task_stores_without_execution(
+    tmp_path,
+):
+    sequence_dir = tmp_path / "sequence"
+    sequence = _runtime_sequence(warmup_count=2)
+    store_root = tmp_path / "base-artifacts"
+    for position, task in enumerate(sequence.tasks[:2]):
+        source = DiffusionStore(tmp_path / f"source-{position}")
+        source.store_artifact(
+            DiffusionArtifact(
+                artifact_id=f"artifact-{position}",
+                source_task_id=task.task_id,
+                source_iteration=0,
+                source_run_id=f"base-run-{position}",
+                artifact_type=DiffusionArtifactType.RUN_OUTCOME,
+                risk_level=DiffusionRiskLevel.LOW,
+                content=f"stored outcome {position}",
+                verifier_reward=1.0,
+            )
+        )
+        source.save_artifact_store(store_root / task.task_id, store_id=task.task_id)
+
+    runtime, orchestrator = _runtime(
+        workspace=sequence_dir / "warmup" / "warmup-run",
+        sequence_dir=sequence_dir,
+        run_id="warmup-run",
+    )
+    bundle = await runtime.prepare_warmup_from_stores(
+        sequence,
+        artifact_store_root=store_root,
+    )
+
+    assert orchestrator.execution_calls == []
+    assert [record.execution for record in bundle.task_records] == [None, None]
+    assert [record.artifact_store_id for record in bundle.task_records] == [
+        "task-0",
+        "task-1",
+    ]
+    assert [artifact.source_iteration for artifact in bundle.final_artifact_bank] == [
+        0,
+        1,
+    ]
+    assert {
+        artifact.source_run_id for artifact in bundle.final_artifact_bank
+    } == {"warmup-run"}
+    assert load_warmup_bundle(
+        sequence_dir / "warmup" / "warmup-run" / "warmup_bundle.json"
+    ) == bundle
+
+
+@pytest.mark.asyncio
 async def test_runtime_e2e_reuses_one_portable_warmup_without_copying_harbor(tmp_path):
     sequence_dir = tmp_path / "sequence"
     sequence = _runtime_sequence()
