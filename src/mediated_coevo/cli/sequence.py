@@ -19,7 +19,16 @@ from mediated_coevo.cli.experiment import (
     prepare_llm_credentials_or_exit,
     setup_logging,
 )
+from mediated_coevo.cli.harness_registry import (
+    _harness_overlay_root,
+    _prepare_harness_workspace,
+    _resolve_harness_options,
+)
 from mediated_coevo.cli.output import console
+from mediated_coevo.cli.run import (
+    _apply_harness_overlay_and_reexec,
+    _restore_scoped_harness_overlay,
+)
 from mediated_coevo.core.config import Config
 from mediated_coevo.execution.adapters import BenchmarkTaskProfileProvider
 from mediated_coevo.experiment.runtime_factory import (
@@ -34,6 +43,12 @@ from mediated_coevo.experiment.sample_models import (
 )
 from mediated_coevo.experiment.sample_runtime import build_sample_runtime
 from mediated_coevo.orchestration.arms import OrchestrationArm
+
+
+_SEQUENCE_HARNESS_FILES = (
+    Path("src/mediated_coevo/diffusion/task_graph_agent.py"),
+    Path("src/mediated_coevo/diffusion/policy_agent.py"),
+)
 
 
 def _select_sequence_tasks(
@@ -180,74 +195,107 @@ def sequence(
         Path,
         typer.Option(help="Sequence archive root."),
     ] = PROJECT_ROOT / "data" / "sequences",
+    harness_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--harness-dir",
+            help="Repo-root overlay containing both sequence agent harnesses.",
+        ),
+    ] = None,
+    harness_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--harness-ref",
+            help="Published harness reference, for example promoted:HL3.",
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Repeat one config-selected arm over seeded 10-task sequences."""
-    setup_logging(verbose)
-    if k < 1:
-        raise typer.BadParameter("-K must be at least 1")
-    families = _normalize_families(family)
-    if len(families) != 4:
-        raise typer.BadParameter("sequence requires exactly four distinct families")
-    config = _load_config_or_bad_parameter(
-        config_dir,
-        overrides={
-            "experiment": {
-                "seed": seed,
-                "condition_name": "learned_mediator",
-                "skill_updates": {
-                    "executor": False,
-                    "planner": False,
-                    "mediator": False,
-                },
-                "baseline_preset": None,
-            },
-        },
-    )
-    arm = config.experiment.orchestration_arm
-    repository = build_benchmark_repo(PROJECT_ROOT, config)
-    prepare_llm_credentials_or_exit(config)
-    ensure_harbor_available(config)
-    provider = BenchmarkTaskProfileProvider(repository)
-    console.print(
-        f"[bold]Sequence run:[/] {k} iteration(s), 10 tasks each "
-        f"(3 warmup loaded + 7 evaluated), arm {arm.value}, "
-        f"seeds {seed}..{seed + k - 1}"
-    )
-    run_id = f"sequence-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}"
-    run_dir = output_dir / run_id
-    for loop_index in range(k):
-        sequence_seed = seed + loop_index
-        config.experiment.seed = sequence_seed
-        task_ids = _select_sequence_tasks(repository, families, sequence_seed)
-        sequence_id = f"{run_id}-iter-{loop_index + 1}"
-        spec = SequenceSpec(
-            sequence_id=sequence_id,
-            tasks=tuple(provider.resolve(task_id) for task_id in task_ids),
-            warmup_count=3,
-            policy_seed=sequence_seed,
-            task_set_id=f"families:{','.join(families)}",
-        )
-        sequence_dir = run_dir / f"iter-{loop_index + 1}"
-        result = asyncio.run(
-            _run_sequence(
-                config=config,
-                repository=repository,
-                sequence=spec,
-                arm=arm,
-                sequence_dir=sequence_dir,
-                artifact_store_root=artifact_store_root,
-                iteration=loop_index + 1,
-                iterations=k,
+    resolved_harness_dir = _resolve_harness_options(harness_dir, harness_ref)
+    if resolved_harness_dir is not None:
+        overlay_root = _harness_overlay_root(resolved_harness_dir)
+        missing = [
+            path.as_posix()
+            for path in _SEQUENCE_HARNESS_FILES
+            if not (overlay_root / path).is_file()
+        ]
+        if missing:
+            raise typer.BadParameter(
+                "sequence harness overlay is missing: " + ", ".join(missing)
             )
+        _apply_harness_overlay_and_reexec(resolved_harness_dir)
+    try:
+        setup_logging(verbose)
+        if k < 1:
+            raise typer.BadParameter("-K must be at least 1")
+        families = _normalize_families(family)
+        if len(families) != 4:
+            raise typer.BadParameter("sequence requires exactly four distinct families")
+        config = _load_config_or_bad_parameter(
+            config_dir,
+            overrides={
+                "experiment": {
+                    "seed": seed,
+                    "condition_name": "learned_mediator",
+                    "skill_updates": {
+                        "executor": False,
+                        "planner": False,
+                        "mediator": False,
+                    },
+                    "baseline_preset": None,
+                },
+            },
         )
-        console.print(f"[bold green]Iteration complete:[/] {sequence_dir}")
+        arm = config.experiment.orchestration_arm
+        repository = build_benchmark_repo(PROJECT_ROOT, config)
+        prepare_llm_credentials_or_exit(config)
+        ensure_harbor_available(config)
+        provider = BenchmarkTaskProfileProvider(repository)
         console.print(
-            f"{result.spec.arm.value}: "
-            f"reward={result.rewards.unweighted_mean} "
-            f"valid={result.rewards.valid_for_reporting}"
+            f"[bold]Sequence run:[/] {k} iteration(s), 10 tasks each "
+            f"(3 warmup loaded + 7 evaluated), arm {arm.value}, "
+            f"seeds {seed}..{seed + k - 1}"
         )
-    console.print(f"[bold green]Sequence complete:[/] {run_dir}")
+        run_id = f"sequence-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}"
+        run_dir = output_dir / run_id
+        if resolved_harness_dir is not None:
+            _prepare_harness_workspace(run_dir, resolved_harness_dir)
+            console.print(f"[bold]Harness overlay:[/] {resolved_harness_dir}")
+        for loop_index in range(k):
+            sequence_seed = seed + loop_index
+            config.experiment.seed = sequence_seed
+            task_ids = _select_sequence_tasks(repository, families, sequence_seed)
+            sequence_id = f"{run_id}-iter-{loop_index + 1}"
+            spec = SequenceSpec(
+                sequence_id=sequence_id,
+                tasks=tuple(provider.resolve(task_id) for task_id in task_ids),
+                warmup_count=3,
+                policy_seed=sequence_seed,
+                task_set_id=f"families:{','.join(families)}",
+            )
+            sequence_dir = run_dir / f"iter-{loop_index + 1}"
+            result = asyncio.run(
+                _run_sequence(
+                    config=config,
+                    repository=repository,
+                    sequence=spec,
+                    arm=arm,
+                    sequence_dir=sequence_dir,
+                    artifact_store_root=artifact_store_root,
+                    iteration=loop_index + 1,
+                    iterations=k,
+                )
+            )
+            console.print(f"[bold green]Iteration complete:[/] {sequence_dir}")
+            console.print(
+                f"{result.spec.arm.value}: "
+                f"reward={result.rewards.unweighted_mean} "
+                f"valid={result.rewards.valid_for_reporting}"
+            )
+        console.print(f"[bold green]Sequence complete:[/] {run_dir}")
+    finally:
+        _restore_scoped_harness_overlay()
 
 
 def register_sequence_command(app: typer.Typer) -> None:

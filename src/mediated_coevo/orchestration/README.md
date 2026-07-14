@@ -61,9 +61,10 @@ arms. Its result is a strict `ContextPack` containing the entire candidate set,
 selection and rendering outcomes, real snapshot identity or `None`, and token
 budget decisions.
 
-The historical `LangChainGraphPolicy`, renderer call path, harness overlay, and
-legacy `run`/`matrix` commands remain compatible. They are not invoked by the
-new sample contracts.
+The historical `LangChainGraphPolicy`, renderer call path, and legacy
+`run`/`matrix` commands remain compatible but are not invoked by the sample
+contracts. A `sequence` overlay works by replacing the two direct-agent modules
+before process re-execution, not by replacing the legacy facade alone.
 
 ## Scope
 

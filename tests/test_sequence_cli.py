@@ -42,7 +42,15 @@ def test_sequence_runs_k_seeded_permutations(
     tmp_path: Path,
 ) -> None:
     repository = _repository()
+    harness = tmp_path / "harness"
+    for path in sequence_module._SEQUENCE_HARNESS_FILES:
+        target = harness / "overlay" / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# harness\n")
     runs: list[tuple[OrchestrationArm, int, int, int, tuple[str, ...], Path]] = []
+    applied: list[Path] = []
+    prepared: list[tuple[Path, Path]] = []
+    restored: list[bool] = []
 
     async def fake_run_sequence(**kwargs: Any) -> Any:
         spec: SequenceSpec = kwargs["sequence"]
@@ -79,6 +87,21 @@ def test_sequence_runs_k_seeded_permutations(
     )
     monkeypatch.setattr(sequence_module, "ensure_harbor_available", lambda config: None)
     monkeypatch.setattr(sequence_module, "_run_sequence", fake_run_sequence)
+    monkeypatch.setattr(
+        sequence_module,
+        "_apply_harness_overlay_and_reexec",
+        applied.append,
+    )
+    monkeypatch.setattr(
+        sequence_module,
+        "_prepare_harness_workspace",
+        lambda run_dir, harness_dir: prepared.append((run_dir, harness_dir)),
+    )
+    monkeypatch.setattr(
+        sequence_module,
+        "_restore_scoped_harness_overlay",
+        lambda: restored.append(True),
+    )
 
     result = CliRunner().invoke(
         app,
@@ -91,6 +114,8 @@ def test_sequence_runs_k_seeded_permutations(
             "3",
             "--output-dir",
             str(tmp_path),
+            "--harness-dir",
+            str(harness),
         ],
     )
 
@@ -107,15 +132,36 @@ def test_sequence_runs_k_seeded_permutations(
     assert [path.name for *_, path in runs] == ["iter-1", "iter-2", "iter-3"]
     assert len({path.parent for *_, path in runs}) == 1
     assert runs[0][-1].parent.name.endswith("-7")
+    assert applied == [harness]
+    assert prepared == [(runs[0][-1].parent, harness)]
+    assert restored == [True]
     output = " ".join(result.stdout.split())
     assert "Sequence run: 3 iteration(s), 10 tasks each" in output
     assert "arm random_policy" in output
+    assert "Harness overlay:" in output
 
     help_result = CliRunner().invoke(app, ["sequence", "--help"])
     assert help_result.exit_code == 0
     assert "-K" in help_result.stdout
     assert "default: 1" in help_result.stdout
     assert "--split" not in help_result.stdout
+
+
+def test_sequence_rejects_legacy_facade_only_harness(tmp_path: Path) -> None:
+    harness = tmp_path / "harness"
+    facade = harness / "overlay/src/mediated_coevo/diffusion/langchain_graph.py"
+    facade.parent.mkdir(parents=True)
+    facade.write_text("# legacy facade\n")
+
+    result = CliRunner().invoke(
+        app,
+        ["sequence", *_FAMILY_ARGS, "--harness-dir", str(harness)],
+    )
+
+    assert result.exit_code == 2
+    assert "sequence harness overlay is missing" in result.stderr
+    assert "task_graph_agent.py" in result.stderr
+    assert "policy_agent.py" in result.stderr
 
 
 def test_sequence_rejects_non_positive_k() -> None:

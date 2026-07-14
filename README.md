@@ -301,12 +301,28 @@ uv run medcoevo sequence \
 removes that command-owned experiment workspace; failed workspaces remain under
 `data/experiments` for diagnosis. `sequence` never executes its first three
 tasks: it imports their stores into one shared `WarmupBundle`, then evaluates
-only the seven-task suffix in the configured arm. `-K` defaults to `1`; loop `i` uses
-`--seed + i` to produce its task-stream permutation and policy seed.
+only the seven-task suffix in the configured arm. `-K` defaults to `1`; loop
+`i` uses `--seed + i` to produce its task-stream permutation and policy seed.
 Set `experiment.orchestration_arm` to `execution_only`, `random_policy`,
 `no_graph`, or `full_orchestration`; every `-K` iteration uses that same arm.
 Outputs share `sequence-<timestamp>-<initial-seed>/`, with one `iter-N/` folder
 per iteration.
+
+An external sequence harness must provide both direct-agent files:
+`src/mediated_coevo/diffusion/task_graph_agent.py` and
+`src/mediated_coevo/diffusion/policy_agent.py`. Apply it directly with
+`--harness-dir <overlay>` or publish and resolve it through the existing
+registry:
+
+```bash
+uv run medcoevo publish-harness \
+  --campaign <campaign> --harness-dir <validated-overlay>
+uv run medcoevo sequence ... --harness-ref promoted:<campaign>
+```
+
+The overlay is applied only for the command process, restored afterward, and
+copied once to `sequence-.../harnesses/seed/`. A legacy overlay containing only
+`langchain_graph.py` is not valid for `sequence`, which uses the split agents.
 
 Use the CLI for the full flag list:
 

@@ -45,10 +45,12 @@ and policy hooks. It also retains the top-level `_run_agent`, graph
 materializer, and subscription materializer patch seams used by compatibility
 tests; the remaining legacy helper names stay importable from the facade.
 
-Historical heuristic-learning harnesses replace this exact file and the CLI
-re-executes after applying an overlay. For that reason, the facade path and its
-legacy interfaces must remain stable even when the standalone implementation is
-refined.
+Historical heuristic-learning harnesses replace this exact file. The legacy
+CLI re-executes after applying such an overlay, so the facade path and its
+interfaces must remain stable even when the standalone implementation is
+refined. The `sequence` CLI instead requires overlays to replace both
+`task_graph_agent.py` and `policy_agent.py`; `langchain_runtime.py` remains
+optional shared infrastructure.
 
 ## Legacy and standalone defaults
 
@@ -73,7 +75,7 @@ sequencing. The sample integration composes these agents through the
 through `LangChainGraphPolicy`.
 
 The [July 4 design](../../../docs/july_4_note.md) remains the final target. The
-current sample runtime has no train/validation/test split, sample CLI, batch or
-ten-sequence aggregator, or automated heuristic-learning loop. The legacy
-split-oriented CLI and harness-overlay path remain separate compatibility
-surfaces.
+sample runtime has no train/validation/test split or automated
+heuristic-learning loop. The `sequence` CLI adds repeated deployment episodes
+and a process-scoped direct-agent overlay without routing through the legacy
+facade.
