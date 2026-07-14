@@ -56,12 +56,13 @@ class DiffusionContextBundle:
 async def render_diffusion_subscriptions(
     *,
     store: DiffusionStore,
-    snapshot: TaskGraphSnapshot,
+    snapshot: TaskGraphSnapshot | None,
     model: str,
     target_task_id: str,
     target_iteration: int,
     target_run_id: str | None,
     subscriptions: list[DiffusionSubscription],
+    graph_policy: str | None = None,
     eligible_count: int | None = None,
     max_context_tokens: int | None = None,
     compact_artifact_content: DiffusionArtifactCompactor | None = None,
@@ -166,7 +167,7 @@ async def render_diffusion_subscriptions(
                 target_task_id=target_task_id,
                 target_iteration=target_iteration,
                 target_run_id=target_run_id,
-                snapshot_id=snapshot.snapshot_id,
+                snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
                 policy_name=subscription.policy_name,
                 relation=subscription.relation,
                 reason="dropped_for_diffusion_budget",
@@ -201,8 +202,12 @@ async def render_diffusion_subscriptions(
 
     return DiffusionContextBundle(
         text=text,
-        snapshot_id=snapshot.snapshot_id,
-        graph_policy=snapshot.graph_policy,
+        snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
+        graph_policy=(
+            snapshot.graph_policy
+            if snapshot is not None
+            else (graph_policy or "none")
+        ),
         eligible_count=(
             eligible_count if eligible_count is not None else len(subscriptions)
         ),
@@ -226,7 +231,7 @@ async def render_diffusion_subscriptions(
 def _append_rendered_record(
     *,
     store: DiffusionStore,
-    snapshot: TaskGraphSnapshot,
+    snapshot: TaskGraphSnapshot | None,
     model: str,
     target_task_id: str,
     target_iteration: int,
@@ -245,7 +250,7 @@ def _append_rendered_record(
             target_task_id=target_task_id,
             target_iteration=target_iteration,
             target_run_id=target_run_id,
-            snapshot_id=snapshot.snapshot_id,
+            snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
             policy_name=subscription.policy_name,
             relation=subscription.relation,
             reason=subscription.reason,
