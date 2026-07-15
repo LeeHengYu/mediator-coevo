@@ -1,0 +1,190 @@
+# Task Instruction
+
+Build the Excel workbook `/root/MetroLink_Pass_Liability_4-25.xlsx` by writing and running a single Python script. Follow these steps precisely:
+
+## Step 1 – Inspect all input files
+
+1. Read and print the full contents of `/root/bus_pass_schedule_input.csv` and `/root/rail_pass_schedule_input.csv`.
+2. Read and print the full contents of `/root/fare_liability_balances.json`.
+3. Read and print the full contents of the three context `.txt` files.
+4. List any other files in `/root/` that might be relevant (e.g., a reference Harbor workbook).
+
+Do NOT proceed to building the workbook until you have read and understood every input file. Print them so you can reason about the structure.
+
+## Step 2 – Understand the reference structure
+
+The task says "Keep the same row/column structure, control rows, and formula rules as the reference Harbor reconciliation task." This means:
+
+### Sheet structure (3 sheets in order)
+1. `Transit Summary` – summary sheet
+2. `Bus Program #4310` – detail sheet for bus passes
+3. `Rail Program #4320` – detail sheet for rail passes
+
+### Detail sheet layout (Bus Program #4310 and Rail Program #4320)
+- Row 1–5: headers/labels (determine from data; typically Row 1 = title, Row 2–4 = column headers or blank, Row 5 = column headers)
+- **Line items start at Row 6** – one row per month or line item from the CSV
+- Columns: Column A = month/description labels; Columns B through O = numeric data (amounts by category). The exact column mapping must come from the CSV headers.
+- After all line-item rows, insert these **control rows** in order:
+  - `Month Totals` – SUM of each numeric column across line-item rows
+  - `Ending Balance` – derived from opening balance + totals (look at fare_liability_balances.json for opening/ending balances)
+  - `Variance` – difference between computed ending balance and GL balance
+  - `GL Balance` – from fare_liability_balances.json
+
+### Transit Summary sheet layout
+- This sheet summarizes the two detail sheets.
+- Key formula cells:
+  - **B7** = links to column O of `Bus Program #4310` (likely the Month Totals or Ending Balance row – determine from context)
+  - **B8** = links to column O of `Bus Program #4310` (another control row)
+  - **B9** = links to column O of `Bus Program #4310` (another control row)
+  - **B12** = links to column O of `Rail Program #4320`
+  - **B13** = links to column O of `Rail Program #4320`
+  - **B14** = links to column O of `Rail Program #4320`
+  - **B16** = `B9 + B14` (combined total)
+- Rows 1–6 likely contain headers/labels; rows 7–9 are Bus summary; rows 10–11 spacer/header; rows 12–14 are Rail summary; row 15 spacer; row 16 combined.
+- Use actual Excel formulas (e.g., `='Bus Program #4310'!O{row}`) so the links are live.
+
+## Step 3 – Map CSV columns to spreadsheet columns
+
+The CSVs likely have columns like: Month, and then various numeric categories. Map them so that:
+- Column A = first CSV column (month/description)
+- Columns B onward = numeric columns from CSV
+- Column O (the 15th column) = the last or total column, which is referenced by the summary sheet.
+
+If the CSV has fewer than 14 numeric columns, adjust so that the rightmost data column is column O (pad with empty columns if needed, or place data starting at column B through whatever column, and ensure column O has the key totals). **Re-read the CSV headers carefully to determine the exact mapping.**
+
+## Step 4 – Build the workbook with openpyxl
+
+Use `openpyxl` to create the workbook. Key rules:
+- All numeric values must be stored as numbers (int or float), NOT as strings.
+- Use Excel formulas (strings starting with `=`) for:
+  - `Month Totals` row: `=SUM(B6:B{last_line_item_row})` etc.
+  - `Ending Balance`: opening balance + month totals (or as appropriate from JSON)
+  - `Variance`: `=Ending_Balance_cell - GL_Balance_cell`
+  - `GL Balance`: numeric value from JSON
+  - Summary sheet B7/B8/B9 referencing `'Bus Program #4310'!O{row}`
+  - Summary sheet B12/B13/B14 referencing `'Rail Program #4320'!O{row}`
+  - B16 = `=B9+B14`
+- Currency formatting: use `#,##0.00` number format where appropriate.
+- Save to `/root/MetroLink_Pass_Liability_4-25.xlsx`.
+
+## Step 5 – Validate
+
+1. Re-open the workbook with openpyxl and verify:
+   - Exactly 3 sheets in the correct order.
+   - Line items start at row 6 on detail sheets.
+   - Control rows exist with correct labels.
+   - Summary formulas in B7, B8, B9, B12, B13, B14, B16 are present and reference column O of detail sheets.
+   - B16 formula is `=B9+B14`.
+   - Numeric cells contain numbers, not strings.
+2. Print the cell values/formulas for all control rows and summary cells.
+
+## Important constraints
+- Do NOT modify any source files.
+- Inspect files FIRST, then build. If the CSV structure or JSON structure is different from what you expect, adapt accordingly.
+- The detail about which control-row values map to which summary cells (B7/B8/B9 and B12/B13/B14) must be determined from the data context. Likely mapping: B7=Month Totals, B8=Ending Balance, B9=Variance (or GL Balance) for Bus; similarly B12/B13/B14 for Rail. Determine the correct mapping from the JSON balances and operational context files.
+- Format numbers with comma separators in Excel (use number_format), not in the Python value itself.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Task-local resources are available under `environment/skills`: expense-tracker, monthly-close.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=noreply@example.com, author_name=Codex Task Generator, category=transit-operations, difficulty=medium, tags=[excel, public-transit, subsidy, reconciliation, program-tracking].
+Verifier config: timeout_sec=900.0.
