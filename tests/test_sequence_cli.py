@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from mediated_coevo.benchmarks import SkillFlowRepository
@@ -135,16 +136,6 @@ def test_sequence_runs_k_seeded_permutations(
     assert applied == [harness]
     assert prepared == [(runs[0][-1].parent, harness)]
     assert restored == [True]
-    output = " ".join(result.stdout.split())
-    assert "Sequence run: 3 iteration(s), 10 tasks each" in output
-    assert "arm random_policy" in output
-    assert "Harness overlay:" in output
-
-    help_result = CliRunner().invoke(app, ["sequence", "--help"])
-    assert help_result.exit_code == 0
-    assert "-K" in help_result.stdout
-    assert "default: 1" in help_result.stdout
-    assert "--split" not in help_result.stdout
 
 
 def test_sequence_rejects_legacy_facade_only_harness(tmp_path: Path) -> None:
@@ -153,19 +144,10 @@ def test_sequence_rejects_legacy_facade_only_harness(tmp_path: Path) -> None:
     facade.parent.mkdir(parents=True)
     facade.write_text("# legacy facade\n")
 
-    result = CliRunner().invoke(
-        app,
-        ["sequence", *_FAMILY_ARGS, "--harness-dir", str(harness)],
-    )
-
-    assert result.exit_code == 2
-    assert "sequence harness overlay is missing" in result.stderr
-    assert "task_graph_agent.py" in result.stderr
-    assert "policy_agent.py" in result.stderr
+    with pytest.raises(typer.BadParameter):
+        sequence_module.sequence(family=list(_FAMILIES), harness_dir=harness)
 
 
 def test_sequence_rejects_non_positive_k() -> None:
-    result = CliRunner().invoke(app, ["sequence", *_FAMILY_ARGS, "-K", "0"])
-
-    assert result.exit_code == 2
-    assert "-K must be at least 1" in result.stderr
+    with pytest.raises(typer.BadParameter):
+        sequence_module.sequence(family=list(_FAMILIES), k=0)

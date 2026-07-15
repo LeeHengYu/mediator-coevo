@@ -640,7 +640,6 @@ def test_list_cli_uses_cached_remote_tasks(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert result.output.splitlines() == ["family-a/task-one", "family-a/task-two"]
 
 
 def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:

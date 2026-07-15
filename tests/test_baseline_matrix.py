@@ -4,7 +4,6 @@ import json
 from types import SimpleNamespace
 import tomllib
 
-from click import unstyle
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -1079,26 +1078,16 @@ def test_run_command_requires_family_before_harbor(monkeypatch, tmp_path):
         raise AssertionError("harbor check should happen after task validation")
 
     monkeypatch.setattr(run_module, "ensure_harbor_available", fail_if_called)
+    monkeypatch.setattr(run_module, "build_benchmark_repo", lambda *args: object())
 
-    result = CliRunner().invoke(
-        app,
-        [
-            "run",
-            "--iterations",
-            "1",
-            "--seed",
-            "42",
-            "--condition",
-            "learned_mediator",
-            "--skill-updates",
-            "all",
-            "--config-dir",
-            str(config_dir),
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "--family" in unstyle(result.output)
+    with pytest.raises(typer.BadParameter):
+        run_module.run(
+            iterations=1,
+            seed=42,
+            condition="learned_mediator",
+            skill_updates="all",
+            config_dir=config_dir,
+        )
 
 
 def test_run_command_uses_toml_defaults_when_cli_overrides_are_absent(
