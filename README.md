@@ -308,21 +308,27 @@ Set `experiment.orchestration_arm` to `execution_only`, `random_policy`,
 Outputs share `sequence-<timestamp>-<initial-seed>/`, with one `iter-N/` folder
 per iteration.
 
-An external sequence harness must provide both direct-agent files:
-`src/mediated_coevo/diffusion/task_graph_agent.py` and
-`src/mediated_coevo/diffusion/policy_agent.py`. Apply it directly with
-`--harness-dir <overlay>` or publish and resolve it through the existing
-registry:
+An external sequence harness is a cumulative sparse overlay against the
+repository baseline. It must replace at least one direct-agent file:
+`src/mediated_coevo/diffusion/task_graph_agent.py` or
+`src/mediated_coevo/diffusion/policy_agent.py`. The HL agent owns numbered
+updates under `data/experiments/<campaign>/update_XXXX/overlay/`; publishing
+registers an existing update without copying it:
 
 ```bash
 uv run medcoevo publish-harness \
-  --campaign <campaign> --harness-dir <validated-overlay>
+  --campaign <campaign> \
+  --harness-dir data/experiments/<campaign>/update_XXXX \
+  --source-sequence data/sequences/<sequence-run>
 uv run medcoevo sequence ... --harness-ref promoted:<campaign>
 ```
 
-The overlay is applied only for the command process, restored afterward, and
-copied once to `sequence-.../harnesses/seed/`. A legacy overlay containing only
-`langchain_graph.py` is not valid for `sequence`, which uses the split agents.
+`promoted:<campaign>` resolves the latest registered update;
+`promoted:<campaign>@update_XXXX` pins an exact version. The overlay is applied
+only for the command process and restored afterward. Sequence output remains
+under `data/sequences/` and records only `harnesses/active_harness.json`; the
+canonical overlay stays in the campaign registry. A legacy overlay containing
+only `langchain_graph.py` is not valid for `sequence`.
 
 Use the CLI for the full flag list:
 
@@ -356,8 +362,9 @@ Pick the experiment family:
   split of the selected family pool.
 - `--seed`: determine experiment randomness and the stable train/validation/test
   pool assignment.
-- `--harness-dir` or `--harness-ref promoted:<campaign>`: apply a learned
-  repo-root overlay. Harness references resolve through
+- `--harness-dir`, `--harness-ref promoted:<campaign>`, or
+  `--harness-ref promoted:<campaign>@update_XXXX`: apply a learned repo-root
+  overlay. Harness references resolve through
   `data/experiments/<campaign>/channels/promoted_harness.json`.
 - `--state-dir` or `--state-ref latest-graph:<campaign>`: explicitly load
   runtime graph state. State is not imported implicitly from `--harness-dir`.
@@ -652,10 +659,11 @@ Important files:
   and readable diffs for post-run regression analysis.
 - `history/`: feedback history entries, rejected proposal batches, and rejected
   reflection candidates.
-- `harnesses/`: learned repo-root harness overlays. When `--harness-dir` is
-  used, the source harness is copied to `harnesses/seed/` and recorded in
-  `harnesses/active_harness.json`. Bundled `state/` files are provenance until
-  loaded with `--state-dir` or `--state-ref`.
+- `harnesses/`: harness provenance. Regular `run` commands retain a source copy
+  in `harnesses/seed/`; `sequence` keeps only `active_harness.json` because its
+  canonical numbered overlay remains under `data/experiments/<campaign>/`.
+  Bundled `state/` files are provenance until loaded with `--state-dir` or
+  `--state-ref`.
 - `state/active_state.json`: explicit runtime state selected by `--state-dir` or
   `--state-ref`.
 - `skills/`: run-local skill copy.

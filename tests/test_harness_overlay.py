@@ -146,6 +146,30 @@ def test_prepare_harness_workspace_does_not_activate_bundled_state(tmp_path):
     assert not (experiment / "diffusion/graph_snapshots/snapshot.json").exists()
 
 
+def test_prepare_sequence_harness_records_ref_without_copy(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness_registry, "PROJECT_ROOT", tmp_path)
+    harness = tmp_path / "data/experiments/HL5/update_0002"
+    policy = harness / "overlay/src/mediated_coevo/diffusion/policy_agent.py"
+    policy.parent.mkdir(parents=True)
+    policy.write_text("VALUE = 2\n")
+    sequence = tmp_path / "data/sequences/sequence-1"
+
+    _prepare_harness_workspace(
+        sequence,
+        harness,
+        harness_ref="promoted:HL5",
+        archive_snapshot=False,
+    )
+
+    metadata = json.loads((sequence / "harnesses/active_harness.json").read_text())
+    assert metadata["source"] == "data/experiments/HL5/update_0002"
+    assert metadata["requested_ref"] == "promoted:HL5"
+    assert metadata["resolved_ref"] == "promoted:HL5@update_0002"
+    assert metadata["update_id"] == "update_0002"
+    assert metadata["overlay_digest"].startswith("sha256:")
+    assert not (sequence / "harnesses/seed").exists()
+
+
 def test_copy_explicit_state_carries_graph_but_resets_artifact_store(tmp_path):
     harness = tmp_path / "harness"
     source = DiffusionStore(harness / "state/diffusion")
@@ -243,24 +267,82 @@ def test_publish_promoted_harness_writes_channel_and_promotion_record(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(harness_registry, "PROJECT_ROOT", tmp_path)
-    harness = tmp_path / "data/experiments/run/harnesses/update_0002"
+    harness = tmp_path / "data/experiments/HL3/update_0002"
     (harness / "overlay/src/pkg").mkdir(parents=True)
     (harness / "overlay/src/pkg/module.py").write_text("VALUE = 2\n")
+    source_sequence = tmp_path / "data/sequences/sequence-1"
+    source_sequence.mkdir(parents=True)
 
     channel_path = _publish_promoted_harness(
         campaign="HL3",
         harness_dir=harness,
         validation_run="validation-run",
         state_dir=None,
+        source_sequence=source_sequence,
     )
 
     channel = json.loads(channel_path.read_text())
     assert channel["channel"] == "promoted_harness"
-    assert channel["harness_dir"] == str(harness)
+    assert channel["latest_update"] == "update_0002"
+    assert channel["harness_dir"] == "data/experiments/HL3/update_0002"
     assert channel["applied_files"] == ["src/pkg/module.py"]
+    assert channel["source_sequence"] == "data/sequences/sequence-1"
+    assert channel["versions"]["update_0002"]["overlay_digest"].startswith(
+        "sha256:"
+    )
     record = json.loads(Path(channel["promotion_record"]).read_text())
     assert record["decision"] == "promoted"
+    assert record["update_id"] == "update_0002"
     assert record["validation_run"] == "validation-run"
+
+
+def test_publish_harness_keeps_versions_and_resolves_latest_or_pinned(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(harness_registry, "PROJECT_ROOT", tmp_path)
+    campaign = tmp_path / "data/experiments/HL5"
+    first = campaign / "update_0001"
+    second = campaign / "update_0002"
+    for harness, value in ((first, 1), (second, 2)):
+        policy = harness / "overlay/src/pkg/policy.py"
+        policy.parent.mkdir(parents=True)
+        policy.write_text(f"VALUE = {value}\n")
+        _publish_promoted_harness(
+            campaign="HL5",
+            harness_dir=harness,
+            validation_run=None,
+            state_dir=None,
+        )
+
+    channel = json.loads(
+        (campaign / "channels/promoted_harness.json").read_text()
+    )
+    assert list(channel["versions"]) == ["update_0001", "update_0002"]
+    assert _resolve_harness_ref("promoted:HL5") == second
+    assert _resolve_harness_ref("promoted:HL5@update_0001") == first
+
+
+def test_publish_harness_rejects_changed_existing_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness_registry, "PROJECT_ROOT", tmp_path)
+    harness = tmp_path / "data/experiments/HL5/update_0001"
+    policy = harness / "overlay/src/pkg/policy.py"
+    policy.parent.mkdir(parents=True)
+    policy.write_text("VALUE = 1\n")
+    _publish_promoted_harness(
+        campaign="HL5",
+        harness_dir=harness,
+        validation_run=None,
+        state_dir=None,
+    )
+    policy.write_text("VALUE = 2\n")
+
+    with pytest.raises(typer.BadParameter, match="immutable"):
+        _publish_promoted_harness(
+            campaign="HL5",
+            harness_dir=harness,
+            validation_run=None,
+            state_dir=None,
+        )
 
 
 def test_publish_graph_state_ref_bundles_training_state_and_skips_artifacts(

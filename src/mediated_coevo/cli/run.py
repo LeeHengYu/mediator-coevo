@@ -74,6 +74,7 @@ def run_skillflow_experiment(
     condition_name: ConditionName,
     run_id: str | None,
     harness_dir: Path | None = None,
+    harness_ref: str | None = None,
     state_source: RuntimeStateSource | None = None,
     publish_state_ref: str | None = None,
     remote_harbor_config: GCPVMConfig | None = None,
@@ -107,7 +108,11 @@ def run_skillflow_experiment(
         PROJECT_ROOT / config.paths.skills_dir,
         experiment_dir / "skills",
     )
-    _prepare_harness_workspace(experiment_dir, harness_dir)
+    _prepare_harness_workspace(
+        experiment_dir,
+        harness_dir,
+        harness_ref=harness_ref,
+    )
     _copy_explicit_state(experiment_dir, state_source)
     with open(experiment_dir / "config.toml", "wb") as f:
         tomli_w.dump(config.model_dump(exclude_none=True), f)
@@ -297,6 +302,7 @@ def _apply_harness_overlay_and_reexec(harness_dir: Path) -> None:
 
 def _restore_scoped_harness_overlay() -> None:
     backup_value = os.environ.pop(_HARNESS_BACKUP_ENV, None)
+    os.environ.pop(_HARNESS_APPLIED_ENV, None)
     if backup_value is None:
         return
     _restore_harness_overlay_backup(PROJECT_ROOT, Path(backup_value))
@@ -447,8 +453,8 @@ def run(
         typer.Option(
             "--harness-ref",
             help=(
-                "Promotion-registry harness reference to apply, for example "
-                "promoted:HL3."
+                "Harness registry reference, for example promoted:HL5 or "
+                "promoted:HL5@update_0002."
             ),
         ),
     ] = None,
@@ -505,7 +511,11 @@ def run(
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run a SkillFlow co-evolution experiment."""
-    resolved_harness_dir = _resolve_harness_options(harness_dir, harness_ref)
+    resolved_harness_dir = _resolve_harness_options(
+        harness_dir,
+        harness_ref,
+        applied_dir=os.environ.get(_HARNESS_APPLIED_ENV),
+    )
     state_source = _resolve_state_options(state_dir, state_ref)
     if resolved_harness_dir is not None:
         _apply_harness_overlay_and_reexec(resolved_harness_dir)
@@ -576,6 +586,7 @@ def run(
             condition_name=config.experiment.condition_name,
             run_id=run_id,
             harness_dir=resolved_harness_dir,
+            harness_ref=harness_ref,
             state_source=state_source,
             publish_state_ref=publish_state_ref,
             remote_harbor_config=remote_harbor_config,
@@ -596,9 +607,16 @@ def publish_harness(
         Path,
         typer.Option(
             "--harness-dir",
-            help="Validated harness snapshot to publish as promoted.",
+            help="Agent-owned data/experiments/<campaign>/update_XXXX directory.",
         ),
     ],
+    source_sequence: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-sequence",
+            help="Sequence run whose logs informed this harness update.",
+        ),
+    ] = None,
     validation_run: Annotated[
         str | None,
         typer.Option(
@@ -617,12 +635,13 @@ def publish_harness(
         ),
     ] = None,
 ) -> None:
-    """Publish a validation-gated harness snapshot to a campaign registry."""
+    """Register an agent-owned harness update as the campaign's latest version."""
     channel_path = _publish_promoted_harness(
         campaign=campaign,
         harness_dir=harness_dir,
         validation_run=validation_run,
         state_dir=state_dir,
+        source_sequence=source_sequence,
     )
     console.print(f"[bold]Published promoted harness:[/] {channel_path}")
 

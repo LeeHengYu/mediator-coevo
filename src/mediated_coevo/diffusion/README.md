@@ -48,9 +48,15 @@ tests; the remaining legacy helper names stay importable from the facade.
 Historical heuristic-learning harnesses replace this exact file. The legacy
 CLI re-executes after applying such an overlay, so the facade path and its
 interfaces must remain stable even when the standalone implementation is
-refined. The `sequence` CLI instead requires overlays to replace both
-`task_graph_agent.py` and `policy_agent.py`; `langchain_runtime.py` remains
-optional shared infrastructure.
+refined. The `sequence` CLI instead accepts a cumulative sparse overlay that
+replaces at least one of `task_graph_agent.py` or `policy_agent.py`;
+`langchain_runtime.py` remains optional shared infrastructure.
+
+The offline HL agent owns numbered overlays under
+`data/experiments/<campaign>/update_XXXX/overlay/`. `publish-harness` registers
+an existing directory without copying it. `promoted:<campaign>` resolves the
+latest update and `promoted:<campaign>@update_XXXX` pins one version. Sequence
+runs keep only the resolved reference and digest under `data/sequences/`.
 
 ## Legacy and standalone defaults
 

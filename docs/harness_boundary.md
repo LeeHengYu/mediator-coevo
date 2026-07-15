@@ -133,8 +133,9 @@ therefore not a sequence harness.
 - `config/default.toml` mixes possible strategy parameters with global
   experiment and execution controls.
 - The overlay loader accepts arbitrary `src/`, `config/`, and `tests/` files.
-- `sequence` requires two agent files but permits arbitrary additional files;
-  this is neither a complete-snapshot nor a well-bounded delta-overlay policy.
+- `sequence` requires at least one direct-agent file but permits arbitrary
+  additional files, so the accepted overlay is sparse but not yet confined to
+  the target harness package.
 
 These mixed surfaces should be separated before automated harness updates are
 allowed.
@@ -160,26 +161,26 @@ The intended ownership is:
 - `render.py`: context format and compaction strategy;
 - `config.py`: harness-local parameters only.
 
-A promoted overlay should then have this shape:
+A learned update is maintained by the offline HL agent as a cumulative sparse
+overlay against the repository baseline:
 
 ```text
-<harness>/
-  manifest.toml
-  overlay/
-    src/mediated_coevo/diffusion/harness/
-      graph.py
-      policy.py
-      tools.py
-      render.py
-      config.py
-    tests/harness/
-      ...
+data/experiments/<campaign>/update_XXXX/
+  overlay/src/mediated_coevo/diffusion/harness/
+    graph.py
+    policy.py
+    tools.py
+    render.py
+    config.py
 ```
 
-`manifest.toml` should declare the harness API version and exact files. Overlay
-validation and publishing should reject undeclared files and paths outside the
-dedicated harness package and its tests.
+Each update contains every harness file that differs from the repository
+baseline, not merely the delta from the preceding update. The agent creates and
+maintains these directories; `publish-harness` only records their digest and
+moves the campaign's latest pointer. `promoted:<campaign>@update_XXXX` resolves
+an exact historical version, while `promoted:<campaign>` resolves the latest.
 
 When no overlay is selected, `sequence` should use the repository copy of this
 same harness package. When an overlay is selected, all `K` iterations should
-use that frozen snapshot.
+use that frozen snapshot. Sequence logs stay under `data/sequences/` and record
+the resolved harness reference without copying the canonical overlay.

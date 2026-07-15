@@ -63,8 +63,10 @@ budget decisions.
 
 The historical `LangChainGraphPolicy`, renderer call path, and legacy
 `run`/`matrix` commands remain compatible but are not invoked by the sample
-contracts. A `sequence` overlay works by replacing the two direct-agent modules
-before process re-execution, not by replacing the legacy facade alone.
+contracts. A `sequence` overlay cumulatively replaces at least one direct-agent
+module before process re-execution, not the legacy facade alone. A registry
+reference resolves once, and the same update remains frozen for every `-K`
+iteration in that command.
 
 ## Scope
 

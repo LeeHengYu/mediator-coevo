@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from mediated_coevo.cli.harness_registry import (
 )
 from mediated_coevo.cli.output import console
 from mediated_coevo.cli.run import (
+    _HARNESS_APPLIED_ENV,
     _apply_harness_overlay_and_reexec,
     _restore_scoped_harness_overlay,
 )
@@ -199,30 +201,33 @@ def sequence(
         Path | None,
         typer.Option(
             "--harness-dir",
-            help="Repo-root overlay containing both sequence agent harnesses.",
+            help="Repo-root overlay containing at least one sequence agent harness.",
         ),
     ] = None,
     harness_ref: Annotated[
         str | None,
         typer.Option(
             "--harness-ref",
-            help="Published harness reference, for example promoted:HL3.",
+            help=(
+                "Harness reference, for example promoted:HL5 or "
+                "promoted:HL5@update_0002."
+            ),
         ),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Repeat one config-selected arm over seeded 10-task sequences."""
-    resolved_harness_dir = _resolve_harness_options(harness_dir, harness_ref)
+    resolved_harness_dir = _resolve_harness_options(
+        harness_dir,
+        harness_ref,
+        applied_dir=os.environ.get(_HARNESS_APPLIED_ENV),
+    )
     if resolved_harness_dir is not None:
         overlay_root = _harness_overlay_root(resolved_harness_dir)
-        missing = [
-            path.as_posix()
-            for path in _SEQUENCE_HARNESS_FILES
-            if not (overlay_root / path).is_file()
-        ]
-        if missing:
+        if not any((overlay_root / path).is_file() for path in _SEQUENCE_HARNESS_FILES):
             raise typer.BadParameter(
-                "sequence harness overlay is missing: " + ", ".join(missing)
+                "sequence harness overlay must contain task_graph_agent.py or "
+                "policy_agent.py"
             )
         _apply_harness_overlay_and_reexec(resolved_harness_dir)
     try:
@@ -260,7 +265,12 @@ def sequence(
         run_id = f"sequence-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}"
         run_dir = output_dir / run_id
         if resolved_harness_dir is not None:
-            _prepare_harness_workspace(run_dir, resolved_harness_dir)
+            _prepare_harness_workspace(
+                run_dir,
+                resolved_harness_dir,
+                harness_ref=harness_ref,
+                archive_snapshot=False,
+            )
             console.print(f"[bold]Harness overlay:[/] {resolved_harness_dir}")
         for loop_index in range(k):
             sequence_seed = seed + loop_index

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tomllib
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ _BUNDLES_DIR = "bundles"
 _GRAPH_STATE_CHANNEL = "graph_state.json"
 _PROMOTED_HARNESS_CHANNEL = "promoted_harness.json"
 _LEGACY_PROMOTED_HARNESS_FILE = "latest_promoted_harness.txt"
+_HARNESS_UPDATE_RE = re.compile(r"update_\d{4,}")
 
 
 @dataclass(frozen=True)
@@ -146,27 +148,41 @@ def _harness_overlay_root(harness_dir: Path) -> Path:
 def _prepare_harness_workspace(
     experiment_dir: Path,
     harness_dir: Path | None,
+    *,
+    harness_ref: str | None = None,
+    archive_snapshot: bool = True,
 ) -> None:
     harnesses_dir = experiment_dir / "harnesses"
     harnesses_dir.mkdir(parents=True, exist_ok=True)
     (harnesses_dir / "README.md").write_text(
         "# Harnesses\n\n"
-        "Use this folder for learned repo-root harness overlays. Put new "
-        "validated harness snapshots in subdirectories; manifest files are "
-        "metadata, and every other path is treated as repo-root overlay content.\n"
+        "active_harness.json records the resolved learned harness. Sequence runs "
+        "keep the canonical overlay in the campaign registry instead of copying it.\n"
     )
     if harness_dir is None:
         return
 
     resolved = harness_dir.expanduser().resolve()
     overlay_root = _harness_overlay_root(resolved)
-    seed_dir = harnesses_dir / "seed"
-    shutil.copytree(resolved, seed_dir)
+    overlay_files = _overlay_file_paths(overlay_root)
     metadata = {
-        "source": str(resolved),
-        "overlay_root": str(overlay_root),
-        "applied_files": _overlay_file_paths(overlay_root),
+        "source": _portable_project_path(resolved),
+        "overlay_root": _portable_project_path(overlay_root),
+        "applied_files": overlay_files,
+        "overlay_digest": _overlay_digest(overlay_root, overlay_files),
     }
+    update_id = resolved.name if _HARNESS_UPDATE_RE.fullmatch(resolved.name) else None
+    if update_id is not None:
+        metadata["update_id"] = update_id
+    if harness_ref is not None:
+        campaign, _ = _parse_harness_ref(harness_ref)
+        metadata["requested_ref"] = harness_ref
+        if update_id is not None:
+            metadata["resolved_ref"] = f"promoted:{campaign}@{update_id}"
+    if archive_snapshot:
+        seed_dir = harnesses_dir / "seed"
+        shutil.copytree(resolved, seed_dir)
+        metadata["archived_snapshot"] = "harnesses/seed"
     state_root = resolved / "state"
     if state_root.is_dir():
         metadata["bundled_state_files"] = _state_file_paths(state_root)
@@ -273,9 +289,13 @@ def _state_file_paths(state_root: Path) -> list[str]:
 def _resolve_harness_options(
     harness_dir: Path | None,
     harness_ref: str | None,
+    *,
+    applied_dir: str | None = None,
 ) -> Path | None:
     if harness_dir is not None and harness_ref is not None:
         raise typer.BadParameter("use either --harness-dir or --harness-ref, not both")
+    if applied_dir is not None:
+        return Path(applied_dir).expanduser().resolve()
     if harness_ref is not None:
         return _resolve_harness_ref(harness_ref)
     return harness_dir
@@ -295,26 +315,65 @@ def _resolve_state_options(
 
 
 def _resolve_harness_ref(ref: str) -> Path:
-    channel, campaign = _parse_ref(ref)
-    if channel != "promoted":
-        raise typer.BadParameter(
-            "--harness-ref supports promoted:<campaign> references"
-        )
+    campaign, requested_update = _parse_harness_ref(ref)
     campaign_root = _campaign_root(campaign)
     channel_path = campaign_root / _CHANNELS_DIR / _PROMOTED_HARNESS_CHANNEL
     if channel_path.is_file():
         payload = _read_json_mapping(channel_path)
-        harness_value = payload.get("harness_dir")
+        entry: dict[str, object] = payload
+        versions = payload.get("versions")
+        if requested_update is not None:
+            if not isinstance(versions, dict):
+                raise typer.BadParameter(
+                    f"promoted harness version not found: {ref}"
+                )
+            version = versions.get(requested_update)
+            if not isinstance(version, dict):
+                raise typer.BadParameter(
+                    f"promoted harness version not found: {ref}"
+                )
+            entry = version
+        elif isinstance(versions, dict):
+            latest_update = payload.get("latest_update")
+            latest = versions.get(latest_update) if isinstance(latest_update, str) else None
+            if isinstance(latest, dict):
+                entry = latest
+        harness_value = entry.get("harness_dir")
         if not isinstance(harness_value, str) or not harness_value:
             raise typer.BadParameter(
                 f"promoted harness channel missing harness_dir: {channel_path}"
             )
-        return Path(harness_value).expanduser().resolve()
+        resolved = _resolve_registry_path(harness_value)
+        expected_digest = entry.get("overlay_digest")
+        if isinstance(expected_digest, str):
+            overlay_root = _harness_overlay_root(resolved)
+            actual_digest = _overlay_digest(
+                overlay_root, _overlay_file_paths(overlay_root)
+            )
+            if expected_digest not in {actual_digest, actual_digest.removeprefix("sha256:")}:
+                raise typer.BadParameter(
+                    f"promoted harness contents changed after publication: {resolved}"
+                )
+        return resolved
 
     legacy_path = campaign_root / _LEGACY_PROMOTED_HARNESS_FILE
-    if legacy_path.is_file():
+    if requested_update is None and legacy_path.is_file():
         return Path(legacy_path.read_text().strip()).expanduser().resolve()
     raise typer.BadParameter(f"promoted harness channel not found: {channel_path}")
+
+
+def _parse_harness_ref(ref: str) -> tuple[str, str | None]:
+    channel, campaign_spec = _parse_ref(ref)
+    if channel != "promoted":
+        raise typer.BadParameter(
+            "--harness-ref supports promoted:<campaign> or "
+            "promoted:<campaign>@update_XXXX references"
+        )
+    campaign, separator, update_id = campaign_spec.partition("@")
+    if separator and not _HARNESS_UPDATE_RE.fullmatch(update_id):
+        raise typer.BadParameter(f"invalid harness update reference: {ref}")
+    _campaign_root(campaign)
+    return campaign, update_id or None
 
 
 def _resolve_state_ref(ref: str) -> RuntimeStateSource:
@@ -523,25 +582,81 @@ def _publish_promoted_harness(
     harness_dir: Path,
     validation_run: str | None,
     state_dir: Path | None,
+    source_sequence: Path | None = None,
 ) -> Path:
-    campaign_root = _campaign_root(campaign)
+    campaign_root = _campaign_root(campaign).resolve()
     resolved_harness = harness_dir.expanduser().resolve()
+    update_id = resolved_harness.name
+    if (
+        resolved_harness.parent != campaign_root
+        or not _HARNESS_UPDATE_RE.fullmatch(update_id)
+    ):
+        raise typer.BadParameter(
+            "harness updates must use "
+            f"{campaign_root}/update_XXXX/overlay/**"
+        )
     overlay_root = _harness_overlay_root(resolved_harness)
     channel_path = campaign_root / _CHANNELS_DIR / _PROMOTED_HARNESS_CHANNEL
     channel_path.parent.mkdir(parents=True, exist_ok=True)
     overlay_files = _overlay_file_paths(overlay_root)
+    overlay_digest = _overlay_digest(overlay_root, overlay_files)
+    source_sequence_value = (
+        _portable_project_path(source_sequence.expanduser().resolve())
+        if source_sequence is not None
+        else None
+    )
+    existing = _read_json_mapping(channel_path) if channel_path.is_file() else {}
+    raw_versions = existing.get("versions")
+    versions: dict[str, object] = dict(raw_versions) if isinstance(raw_versions, dict) else {}
+    if not versions:
+        previous_harness = existing.get("harness_dir")
+        if isinstance(previous_harness, str):
+            previous_id = _resolve_registry_path(previous_harness).name
+            if _HARNESS_UPDATE_RE.fullmatch(previous_id):
+                versions[previous_id] = {
+                    key: existing[key]
+                    for key in (
+                        "harness_dir",
+                        "overlay_root",
+                        "applied_files",
+                        "overlay_digest",
+                        "validation_run",
+                        "source_sequence",
+                        "updated_at",
+                    )
+                    if key in existing
+                }
+    previous = versions.get(update_id)
+    if isinstance(previous, dict):
+        previous_digest = previous.get("overlay_digest")
+        if previous_digest != overlay_digest:
+            raise typer.BadParameter(
+                f"published harness update is immutable: {update_id}"
+            )
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    version: dict[str, object] = {
+        "harness_dir": _portable_project_path(resolved_harness),
+        "overlay_root": _portable_project_path(overlay_root),
+        "applied_files": overlay_files,
+        "overlay_digest": overlay_digest,
+        "validation_run": validation_run,
+        "source_sequence": source_sequence_value,
+        "updated_at": updated_at,
+    }
+    versions[update_id] = version
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "campaign": campaign,
         "channel": "promoted_harness",
-        "harness_dir": str(resolved_harness),
-        "overlay_root": str(overlay_root),
+        "latest_update": update_id,
+        "versions": versions,
+        "harness_dir": version["harness_dir"],
+        "overlay_root": version["overlay_root"],
         "applied_files": overlay_files,
-        "overlay_digest": _files_digest(
-            overlay_root, [Path(path) for path in overlay_files]
-        ),
+        "overlay_digest": overlay_digest,
         "validation_run": validation_run,
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "source_sequence": source_sequence_value,
+        "updated_at": updated_at,
     }
     if state_dir is not None:
         state_source = _runtime_state_source_from_path(state_dir, ref=None)
@@ -557,6 +672,7 @@ def _publish_promoted_harness(
     record_payload = {
         **payload,
         "decision": "promoted",
+        "update_id": update_id,
         "promotion_record": str(record_path),
     }
     _atomic_write_json(record_path, record_payload)
@@ -598,6 +714,23 @@ def _files_digest(root: Path, files: list[Path]) -> str:
         digest.update(source.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _overlay_digest(overlay_root: Path, files: list[str]) -> str:
+    return f"sha256:{_files_digest(overlay_root, [Path(path) for path in files])}"
+
+
+def _portable_project_path(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _resolve_registry_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:

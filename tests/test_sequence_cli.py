@@ -44,13 +44,12 @@ def test_sequence_runs_k_seeded_permutations(
 ) -> None:
     repository = _repository()
     harness = tmp_path / "harness"
-    for path in sequence_module._SEQUENCE_HARNESS_FILES:
-        target = harness / "overlay" / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("# harness\n")
+    target = harness / "overlay" / sequence_module._SEQUENCE_HARNESS_FILES[1]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# harness\n")
     runs: list[tuple[OrchestrationArm, int, int, int, tuple[str, ...], Path]] = []
     applied: list[Path] = []
-    prepared: list[tuple[Path, Path]] = []
+    prepared: list[tuple[Path, Path, dict[str, Any]]] = []
     restored: list[bool] = []
 
     async def fake_run_sequence(**kwargs: Any) -> Any:
@@ -96,7 +95,9 @@ def test_sequence_runs_k_seeded_permutations(
     monkeypatch.setattr(
         sequence_module,
         "_prepare_harness_workspace",
-        lambda run_dir, harness_dir: prepared.append((run_dir, harness_dir)),
+        lambda run_dir, harness_dir, **kwargs: prepared.append(
+            (run_dir, harness_dir, kwargs)
+        ),
     )
     monkeypatch.setattr(
         sequence_module,
@@ -134,7 +135,13 @@ def test_sequence_runs_k_seeded_permutations(
     assert len({path.parent for *_, path in runs}) == 1
     assert runs[0][-1].parent.name.endswith("-7")
     assert applied == [harness]
-    assert prepared == [(runs[0][-1].parent, harness)]
+    assert prepared == [
+        (
+            runs[0][-1].parent,
+            harness,
+            {"harness_ref": None, "archive_snapshot": False},
+        )
+    ]
     assert restored == [True]
 
 
