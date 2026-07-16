@@ -1,0 +1,270 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Perform the following steps in order.
+
+## 1 – Inspect all input files
+
+```bash
+cat /root/therapy_catalog.json
+cat /root/bag_supply_cost.csv
+cat /root/delivery_payment.csv
+cat /root/patient_overrides.csv
+```
+
+Read every file carefully before writing any code.
+
+## 2 – Write and run a single Python script
+
+Create `/root/solve.py` that does everything below, then run it with `python3 /root/solve.py`.
+
+### 2.1 Load data
+- Load `therapy_catalog.json` (list of therapy objects).
+- Load `bag_supply_cost.csv`, `delivery_payment.csv`, `patient_overrides.csv` with the csv module (or pandas – your choice).
+
+### 2.2 Filter in-scope therapies
+- Keep only catalog entries where `include_in_review` is `true` (boolean True, or string "true"/"True" – handle both).
+- Build a lookup: `therapy_code` → catalog entry.
+- Also build a reverse-alias map: for every in-scope therapy, map its `therapy_name` AND every element of its `aliases` list (if present) to its `therapy_code`.
+
+### 2.3 Resolve delivery payments
+- For each row in `delivery_payment.csv`, look up `therapy_label` in the reverse-alias map.
+- Skip rows that don'"'"'t match any in-scope therapy.
+- Store `payment_per_delivery_per_patient_usd` (float) keyed by `therapy_code`.
+- If multiple rows resolve to the same therapy_code, that is unexpected; keep the last one but print a warning.
+
+### 2.4 Resolve active patients
+- Filter `patient_overrides.csv` to rows where `status` == `approved` (case-insensitive compare to be safe).
+- Among approved rows, keep only those whose `therapy_code` is in scope.
+- Group by `therapy_code`; within each group keep the row with the highest `revision` (parse as int).
+- Store `active_patients` (int) keyed by `therapy_code`.
+
+### 2.5 Compute per-therapy financials
+
+Constants:
+- `deliveries_7 = 52`, `deliveries_14 = 26`
+- `days_7 = 7`, `days_14 = 14`
+
+For each in-scope therapy (by `therapy_code` sorted ascending):
+
+```
+drug_cost_per_1000 = catalog.drug_cost_per_1000_mg_usd   (float)
+dose_mg = catalog.dose_mg_per_day                         (float)
+bag_ml = catalog.bag_size_ml                              (int)
+bag_cost = lookup from bag_supply_cost.csv by bag_size_ml (float)
+payment = from delivery_payment resolved above            (float)
+patients = from patient_overrides resolved above          (int)
+
+annual_drug_cost_7  = drug_cost_per_1000 * patients * dose_mg * 7  * 52 / 1000
+annual_drug_cost_14 = drug_cost_per_1000 * patients * dose_mg * 14 * 26 / 1000
+
+annual_supply_cost_7  = bag_cost * patients * 52
+annual_supply_cost_14 = bag_cost * patients * 26
+
+annual_revenue_7  = payment * patients * 52
+annual_revenue_14 = payment * patients * 26
+
+annual_margin_7  = annual_revenue_7  - annual_drug_cost_7  - annual_supply_cost_7
+annual_margin_14 = annual_revenue_14 - annual_drug_cost_14 - annual_supply_cost_14
+
+difference = annual_margin_14 - annual_margin_7
+```
+
+Round every currency value to 2 decimal places with `round(x, 2)`.
+
+### 2.6 Compute totals and decision
+
+```
+total_margin_7  = sum of all annual_margin_7
+total_margin_14 = sum of all annual_margin_14
+total_diff      = total_margin_14 - total_margin_7
+abs_diff        = abs(total_diff)
+```
+
+Round each to 2 decimals.
+
+Decision rule:
+- If `abs_diff < 15000` → `"move_to_14_day"`
+- Otherwise → `"keep_7_day"`
+
+Justification: a short sentence stating the absolute difference and the threshold.
+
+### 2.7 Write `/root/infusion_batch_analysis.json`
+
+Use `json.dump` with `indent=2`. Ensure:
+- All currency fields are **floats**, not strings.
+- The `assumptions` block has exactly these keys and values:
+  - `deliveries_per_year_7_day`: 52
+  - `deliveries_per_year_14_day`: 26
+  - `days_per_delivery_7_day`: 7
+  - `days_per_delivery_14_day`: 14
+  - `switch_threshold_usd`: 15000
+  - `patient_override_rule`: `"highest approved revision per therapy_code"`
+- `therapies` array sorted by `therapy_code` ascending.
+- Every field from the schema is present in every therapy object.
+- `totals` has exactly the four keys shown in the schema.
+- `recommendation` has `decision` and `justification`.
+
+### 2.8 Write `/root/infusion_batch_summary.md`
+
+4–8 non-empty lines. Must include:
+- Total 7-day margin formatted as USD (e.g., `$123,456.78`)
+- Total 14-day margin formatted as USD
+- Absolute difference formatted as USD
+- The exact decision slug (`move_to_14_day` or `keep_7_day`)
+
+Example structure:
+```
+# Infusion Batch Analysis Summary
+
+Total 7-day annual margin: $X
+Total 14-day annual margin: $Y
+Absolute margin difference: $Z
+Recommendation: <slug>
+```
+
+## 3 – Validate outputs
+
+After the script runs:
+```bash
+python3 -c "
+import json, sys
+with open('"'"'/root/infusion_batch_analysis.json'"'"') as f:
+    d = json.load(f)
+assert '"'"'assumptions'"'"' in d
+assert '"'"'therapies'"'"' in d and len(d['"'"'therapies'"'"']) > 0
+assert '"'"'totals'"'"' in d
+assert '"'"'recommendation'"'"' in d
+for k in ['"'"'deliveries_per_year_7_day'"'"','"'"'deliveries_per_year_14_day'"'"','"'"'days_per_delivery_7_day'"'"','"'"'days_per_delivery_14_day'"'"','"'"'switch_threshold_usd'"'"','"'"'patient_override_rule'"'"']:
+    assert k in d['"'"'assumptions'"'"'], f'"'"'Missing assumption key {k}'"'"'
+for t in d['"'"'therapies'"'"']:
+    for k in ['"'"'therapy_code'"'"','"'"'therapy_name'"'"','"'"'active_patients'"'"','"'"'annual_margin_7_day_usd'"'"','"'"'annual_margin_14_day_usd'"'"','"'"'annual_margin_difference_14_minus_7_usd'"'"']:
+        assert k in t, f'"'"'Missing therapy key {k}'"'"'
+    assert isinstance(t['"'"'annual_margin_7_day_usd'"'"'], (int,float)), f'"'"'Not numeric: {t[\"annual_margin_7_day_usd\"]}'"'"'
+codes = [t['"'"'therapy_code'"'"'] for t in d['"'"'therapies'"'"']]
+assert codes == sorted(codes), '"'"'Therapies not sorted by therapy_code'"'"'
+for k in ['"'"'total_annual_margin_7_day_usd'"'"','"'"'total_annual_margin_14_day_usd'"'"','"'"'total_annual_margin_difference_14_minus_7_usd'"'"','"'"'absolute_total_margin_difference_usd'"'"']:
+    assert k in d['"'"'totals'"'"'], f'"'"'Missing totals key {k}'"'"'
+assert d['"'"'recommendation'"'"']['"'"'decision'"'"'] in ('"'"'move_to_14_day'"'"','"'"'keep_7_day'"'"')
+print('"'"'JSON validation passed'"'"')
+"
+```
+
+```bash
+wc -l /root/infusion_batch_summary.md
+grep -c '"'"'move_to_14_day\|keep_7_day'"'"' /root/infusion_batch_summary.md
+```
+
+If any validation fails, inspect the error, fix the script, and re-run until both output files are correct.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=gpt54@example.com, author_name=GPT-5.4, category=financial-analysis, difficulty=medium, tags=[home-infusion, json, csv, alias-resolution, decision-analysis].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/sequences/sequence-20260715-225048-3732208000/iter-1/samples/full_orchestration/jobs/2026-07-15__22-51-52/run-2db05d3c__JNQm7x4/agent/trajectory.json

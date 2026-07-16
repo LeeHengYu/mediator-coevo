@@ -1,0 +1,178 @@
+# Task Instruction
+
+## Task: Update HWPX Supplier Contact Sheet
+
+### Objective
+Replace all `{{...}}` placeholders in `supplier_contact_template.hwpx` with values from `supplier_contact.json`, then save the result to `/root/supplier_contact_ready.hwpx`.
+
+### Step-by-step Plan
+
+#### 1. Inspect the workspace
+- `ls /root/` and find `supplier_contact_template.hwpx` and `supplier_contact.json`.
+- Read `supplier_contact.json` fully to understand every key-value pair.
+
+#### 2. Understand the HWPX format
+- A `.hwpx` file is a ZIP archive (like OOXML). Unzip it to a temporary directory:
+  ```
+  mkdir -p /tmp/hwpx_work
+  cp /root/supplier_contact_template.hwpx /tmp/hwpx_work/template.zip
+  cd /tmp/hwpx_work && unzip template.zip -d extracted
+  ```
+- List all extracted files. The main content is typically in `Contents/section0.xml` (or similar). There may also be header/footer XML files.
+
+#### 3. Find ALL placeholders across ALL XML files
+- Search every file in the extracted archive for `{{` patterns:
+  ```
+  grep -rn '{{' /tmp/hwpx_work/extracted/
+  ```
+- **CRITICAL**: HWPX (Hancom) may split a single `{{placeholder}}` across multiple `<hp:run>` or `<hp:t>` elements. For example, `{{company_name}}` might appear as `<hp:t>{{company</hp:t>` in one run and `<hp:t>_name}}</hp:t>` in another. You MUST detect and handle this.
+- To check for split placeholders: search for `{{` that doesn't have a matching `}}` in the same `<hp:t>` tag, and for `}}` that doesn't have a matching `{{` in the same tag.
+
+#### 4. Perform replacements carefully
+Write a Python script that:
+
+a. Loads the JSON file and gets all key-value pairs.
+
+b. For each XML file in the extracted archive:
+   - Read the raw XML content.
+   - **First approach (simple)**: Try direct string replacement of `{{key}}` → `value` for each key.
+   - **Second approach (split-tag handling)**: If after simple replacement any `{{` or `}}` fragments remain, reconstruct the paragraph-level text by concatenating all `<hp:t>` texts within each `<hp:p>` (paragraph), perform the replacement on the concatenated text, then redistribute the replaced text back. The safest redistribution strategy: put all the paragraph text into the first `<hp:t>` element and clear (or remove) subsequent `<hp:t>` elements within runs that were part of the placeholder.
+   - **Important from cross-task failure**: When a placeholder spans multiple `<hp:run>` elements, after merging text into one `<hp:t>`, remove or empty the other `<hp:run>` elements that contained placeholder fragments to avoid stale/duplicate text.
+
+c. **Remove stale layout-cache elements**: After modifying any paragraph's text, remove `<hp:linesegarray>` (or `<hp:lineSegArray>`) elements and their children from that paragraph. These are layout cache elements that cause overlapping characters if left stale. Use XML parsing (lxml or ElementTree) for this step to be safe. Search for any element whose local name matches `linesegarray` (case-insensitive) or `lineSegArray` within modified paragraphs and remove them.
+
+d. Verify: After all replacements, scan every XML file for any remaining `{{` or `}}`. If any remain, report them and fix them.
+
+#### 5. Repackage the HWPX file
+- Re-zip the extracted directory back into a `.hwpx` file:
+  ```python
+  import zipfile, os
+  with zipfile.ZipFile('/root/supplier_contact_ready.hwpx', 'w', zipfile.ZIP_DEFLATED) as zf:
+      for root, dirs, files in os.walk('/tmp/hwpx_work/extracted'):
+          for f in files:
+              full = os.path.join(root, f)
+              arcname = os.path.relpath(full, '/tmp/hwpx_work/extracted')
+              zf.write(full, arcname)
+  ```
+- Preserve the original archive structure exactly (same directory layout and filenames).
+
+#### 6. Validate the output
+- Unzip `/root/supplier_contact_ready.hwpx` to a new temp dir.
+- `grep -rn '{{' <new_temp_dir>/` — must return nothing.
+- Verify that Korean field labels from the original template are still present (grep for a few known Korean strings).
+- Verify the static note line is unchanged.
+- Verify that JSON values appear in the XML content.
+- Check that no `linesegarray`/`lineSegArray` elements remain in paragraphs that were modified.
+
+### Key Pitfalls to Avoid
+1. **Split placeholders across XML tags** — the #1 failure mode from cross-task evidence. Always check for and handle this.
+2. **Stale layout cache** — must remove `<hp:linesegarray>` from edited paragraphs.
+3. **Encoding** — read/write XML files as UTF-8.
+4. **ZIP structure** — preserve exact archive member paths; do not add extra directory prefixes.
+5. **Korean labels** — do NOT replace or modify any Korean text that isn't inside `{{...}}`.
+6. **Static note line** — identify it and ensure it's untouched.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

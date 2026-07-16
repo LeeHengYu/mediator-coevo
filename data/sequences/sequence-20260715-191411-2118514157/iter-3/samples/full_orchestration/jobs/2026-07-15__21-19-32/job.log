@@ -1,0 +1,208 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Complete the following task to fill in a training feedback HWPX document from JSON data.
+
+## Goal
+Fill in the training feedback sheet `training_feedback_template.hwpx` using the values in `training_feedback.json`, then save the result to `/root/training_feedback_ready.hwpx`.
+
+## Step-by-step Plan
+
+### 1. Explore the workspace
+```bash
+find /root -maxdepth 2 -type f | head -60
+ls -la /root/
+```
+Identify where `training_feedback_template.hwpx` and `training_feedback.json` are located. Also look for any `test_output.py` or verifier script.
+
+### 2. Read the JSON data
+```bash
+cat <path_to>/training_feedback.json
+```
+Note every key-value pair. You will need to map each key to a `{{key}}` placeholder in the HWPX template.
+
+### 3. Understand the HWPX structure
+A `.hwpx` file is a ZIP archive containing XML files. Unzip the template to inspect its contents:
+```bash
+mkdir -p /tmp/hwpx_work
+cp <path_to>/training_feedback_template.hwpx /tmp/hwpx_work/template.hwpx
+cd /tmp/hwpx_work
+unzip template.hwpx -d template_extracted
+find template_extracted -type f
+```
+The main content is typically in `Contents/section0.xml` (or similar). There may also be content in other section XML files.
+
+### 4. Inspect all XML files for placeholders
+Search for every `{{...}}` placeholder across ALL files in the extracted archive:
+```bash
+grep -r '"'"'{{'"'"' template_extracted/
+```
+Record every placeholder found and which file it'"'"'s in. Every single one must be replaced.
+
+### 5. Read the JSON and prepare substitutions
+Write a Python script that:
+1. Reads `training_feedback.json`.
+2. Extracts the template HWPX (ZIP) into a temporary directory.
+3. Walks through ALL files in the extracted archive.
+4. For each XML (or any text) file, reads its content and performs substitutions.
+5. Applies these specific transformation rules:
+   - **`참석자수`**: Convert to digits only. E.g., if JSON has `"참석자수": "25명"`, write `25`. If it'"'"'s already a number, just use the digits.
+   - **`만족도`**: Rewrite as `X.X점 (5.0점 만점)` style, where X.X is the numeric score from the JSON. E.g., if JSON has `"만족도": 4.5` or `"만족도": "4.5"`, write `4.5점 (5.0점 만점)`.
+   - **Overall opinion**: Find the placeholder for the overall opinion/comment. After substituting the JSON value, append ` 후속 심화반 검토 요망.` to the end of that sentence (with a space before it if needed).
+   - **All other placeholders**: Replace `{{key}}` with the corresponding JSON value as-is.
+6. **Critical HWPX concern — stale layout caches**: For any paragraph (`<hp:p>` or similar) whose text you modify, remove any `<hp:linesegarray>` or `<lineseg>` or similar layout-cache child elements. These are pre-computed glyph positions that will cause overlapping characters if left stale. Inspect the XML structure to identify the exact element names used for layout caching.
+7. Repackages the modified files back into a valid ZIP with `.hwpx` extension at `/root/training_feedback_ready.hwpx`.
+
+### 6. Important details for the Python script
+
+**Placeholder handling in XML**: Placeholders like `{{교육명}}` might be split across multiple XML text runs (e.g., `<hp:t>{{교육</hp:t><hp:t>명}}</hp:t>`). Your script MUST handle this. Strategy:
+- For each paragraph element, concatenate all text runs to find placeholders, perform substitutions on the concatenated text, then write the result back (possibly into the first text run, clearing the others, or by reconstructing the runs).
+- Alternatively, read the entire XML as a string and do regex-based replacement — but be careful about XML tags splitting placeholders. A safer approach: use regex on the raw XML string that can match `\{\{` even with intervening XML tags, e.g., `\{\{([^}]*?)\}\}` won'"'"'t work if tags split it. Better: first strip XML tags from runs within each paragraph to detect placeholders, then reconstruct.
+- **Recommended robust approach**: Read the entire XML file as a raw string. Use a regex pattern that matches `{{` followed by any characters (including XML tags) up to `}}`, extract the key by stripping XML tags from the match interior, then replace the entire match with the substitution value. Pattern: `\{\{((?:(?!\}\}).)*?)\}\}` but XML-tag-aware.
+- Actually, the simplest robust approach: Read the XML as string. Remove all XML tags between `{{` and `}}` to "heal" split placeholders first (e.g., replace `{{<[^>]*>` patterns), then do simple `{{key}}` replacement. Be very careful not to corrupt other XML structure.
+
+**ZIP repackaging**: Use Python'"'"'s `zipfile` module. Preserve the directory structure. Use `ZIP_DEFLATED` compression. Make sure to write the `mimetype` file first if it exists (uncompressed, as per ODF/HWPX conventions — check if the original has this pattern).
+
+### 7. Validate the output
+After creating the output file:
+```bash
+# Verify it'"'"'s a valid ZIP
+unzip -t /root/training_feedback_ready.hwpx
+
+# Verify no placeholders remain
+unzip -p /root/training_feedback_ready.hwpx | grep -c '"'"'{{'"'"'
+# Should output 0
+
+# Check specific substitutions were applied
+unzip -p /root/training_feedback_ready.hwpx | grep '"'"'후속 심화반 검토 요망'"'"'
+unzip -p /root/training_feedback_ready.hwpx | grep '"'"'점 (5.0점 만점)'"'"'
+```
+
+### 8. Run the verifier
+If there'"'"'s a test script (e.g., `test_output.py` or similar), run it:
+```bash
+cd <task_directory>
+python -m pytest test_output.py -v
+```
+If tests fail, read the failure messages carefully, fix the output, and re-run.
+
+### 9. Key constraints to remember
+- ALL `{{...}}` placeholders must be replaced — search across ALL files in the archive, not just section0.xml.
+- Korean labels and the static note line must remain unchanged.
+- The `참석자수` value must be digits only (strip any non-digit characters like '"'"'명'"'"').
+- The `만족도` must follow exactly `X.X점 (5.0점 만점)` format.
+- The overall opinion must end with `후속 심화반 검토 요망.` appended after the JSON comment.
+- Remove stale layout-cache elements (`<linesegarray>`, `<lineseg>`, or similar) from any modified paragraph.
+- Output must be at exactly `/root/training_feedback_ready.hwpx`.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured
+Wrote Claude Code trajectory to /Users/hylee_mac/Documents/Project/mediator-coevo/data/sequences/sequence-20260715-191411-2118514157/iter-3/samples/full_orchestration/jobs/2026-07-15__21-19-32/run-e53dc5dd__7ep7tBV/agent/trajectory.json
