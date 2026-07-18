@@ -1,0 +1,216 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Complete the following task to prepare a warehouse safety audit brief from a HWPX template.
+
+## Context
+
+HWPX files are ZIP-based packages containing XML content files (similar to DOCX). The main content is typically in `Contents/section0.xml` (or similar). The template `safety_audit_template.hwpx` contains `{{...}}` placeholders that must be replaced with data from JSON files.
+
+## Steps
+
+### 1. Inspect the workspace and data files
+```bash
+cd /root
+ls -la
+cat audit_overview.json
+cat corrective_actions.json
+```
+
+### 2. Examine the HWPX template structure
+```bash
+# HWPX is a ZIP file
+cp safety_audit_template.hwpx safety_audit_template.zip
+mkdir -p hwpx_extracted
+cd hwpx_extracted
+unzip ../safety_audit_template.zip
+find . -type f
+```
+
+### 3. Inspect all XML content files
+Look at every XML file in the extracted package, especially files under `Contents/` (like `section0.xml`, `content.hpf`, etc.). Read each one carefully to find:
+- All `{{...}}` placeholder patterns
+- The structure of the summary/overview section
+- The audit table with value cells
+- The three corrective-action lines
+- All occurrences of risk tier placeholders
+- All occurrences of inspection date placeholders
+- Any layout-cache elements (look for tags like `<hp:linesegarray>`, `<hp:lineSegArray>`, `<hp:LineSeg>`, `<lineseg>`, or similar cached layout tags)
+
+```bash
+# Read all XML files
+for f in $(find . -name '"'"'*.xml'"'"' -o -name '"'"'*.hpf'"'"'); do echo "=== $f ==="; cat "$f"; echo; done
+```
+
+### 4. Identify all placeholders and plan replacements
+List every `{{...}}` placeholder found. Map each to the corresponding field in `audit_overview.json` or `corrective_actions.json`.
+
+### 5. Write a Python script to perform all modifications
+Create a Python script that:
+
+a. **Reads both JSON files** to get all field values.
+
+b. **Extracts the HWPX ZIP** to a temporary directory.
+
+c. **Processes each XML content file** (especially section XML files):
+   - Replace ALL `{{...}}` placeholders with corresponding data values
+   - For the inspection date: convert from `YYYY-MM-DD` format to `YYYY.MM.DD` format (replace hyphens with dots) **everywhere it appears** in the document
+   - For the risk tier: find every occurrence and append the severity note using the mapping: `High -> 즉시조치`, `Medium -> 계획보완`, `Low -> 모니터링`. Format: after replacing the risk tier placeholder, append ` (즉시조치)` or equivalent. If the risk tier appears multiple times (both in summary and table), update ALL occurrences.
+   - Fill the three corrective-action lines **in the same order** they appear in `corrective_actions.json`
+   - **Remove layout-cache elements** from any paragraph (`<hp:p>` or similar) whose text content was modified. These are typically `<hp:linesegarray>...</hp:linesegarray>` or `<hp:lineSegArray>...</hp:lineSegArray>` elements. Use XML parsing (lxml or ElementTree with namespace handling) to properly remove these elements.
+
+d. **Verify no `{{` or `}}` remains** in any XML file.
+
+e. **Repackage** the modified files into a valid ZIP/HWPX at `/root/safety_audit_brief_final.hwpx`, preserving the original directory structure, `mimetype` entry (if present, stored uncompressed as first entry), and all other package conventions.
+
+### 6. Run the script
+```bash
+python3 /root/fill_template.py
+```
+
+### 7. Validate the output
+```bash
+# Check it'"'"'s a valid ZIP
+unzip -t /root/safety_audit_brief_final.hwpx
+
+# Check no placeholders remain
+mkdir -p /root/verify
+cd /root/verify
+unzip /root/safety_audit_brief_final.hwpx
+for f in $(find . -name '"'"'*.xml'"'"' -o -name '"'"'*.hpf'"'"'); do
+  if grep -l '"'"'{{'"'"' "$f" 2>/dev/null; then
+    echo "FAIL: placeholder found in $f"
+    grep '"'"'{{'"'"' "$f"
+  fi
+done
+
+# Verify date format is YYYY.MM.DD (dots not hyphens)
+for f in $(find . -name '"'"'*.xml'"'"'); do
+  echo "=== $f ==="
+  cat "$f"
+done
+
+# Confirm layout cache elements removed from modified paragraphs
+# (grep for linesegarray or lineSegArray - should not appear in modified paragraphs)
+```
+
+## Critical Requirements
+- **Namespace handling**: HWPX XML uses namespaces (e.g., `http://www.hancom.co.kr/hwpml/2016/...`). Use proper namespace-aware XML parsing. When searching for elements, use the full namespace URI or wildcard namespace matching.
+- **Layout cache removal**: Any `<hp:linesegarray>` (or variant capitalization/namespace) inside a paragraph whose run text was changed MUST be removed entirely. This prevents overlapping characters when the document is opened.
+- **Preserve structure**: Keep all section titles, row labels, and document structure intact. Only replace placeholder values and remove stale caches.
+- **Corrective actions order**: Must match the order in `corrective_actions.json`.
+- **Date format**: ALL occurrences of the date must use `YYYY.MM.DD` (dots), not `YYYY-MM-DD` (hyphens).
+- **Risk tier + severity note**: Every occurrence of the risk tier in the document must have the severity note appended (e.g., `High (즉시조치)`).
+- **ZIP packaging**: Use `zipfile` module. If the original has a `mimetype` file, write it first with `ZIP_STORED` (no compression). All other files use `ZIP_DEFLATED`.
+- **No leftover placeholders**: Zero `{{...}}` patterns may remain anywhere in the output package.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured

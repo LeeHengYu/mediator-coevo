@@ -1,0 +1,185 @@
+# Task Instruction
+
+Complete the project proposal document by filling placeholders from JSON data and saving the result as a valid .hwpx package.
+
+## Step-by-step Instructions
+
+### 1. Inspect the input files
+- Read `/root/project_proposal.json` to understand all available key-value pairs.
+- List the contents of `/root/project_proposal_template.hwpx` as a ZIP archive to identify all member files.
+- Extract and read `Contents/section0.xml` (and any other XML content files) to find all `{{...}}` placeholders and understand the document structure.
+- Also check other XML files in the archive for any placeholders (e.g., `Contents/section1.xml` if it exists, or header/footer XMLs).
+
+### 2. Build the replacement logic
+Write a Python script that does the following:
+
+#### a. Load the JSON data
+```python
+import json
+with open('/root/project_proposal.json', 'r', encoding='utf-8') as f:
+    data = json.load(f)
+```
+
+#### b. Process the .hwpx ZIP
+- Open the template .hwpx as a ZIP archive.
+- For each file in the archive, read its contents.
+- For XML files (especially under `Contents/`), perform placeholder replacement.
+
+#### c. Replace `{{...}}` placeholders
+- For each `{{key}}` pattern found in the XML text, look up the corresponding key in the JSON data and replace it.
+- **Budget normalization**: If the value contains commas and a currency symbol (like ₩ or $), remove the commas but keep the currency symbol. For example, `₩1,000,000,000` becomes `₩1000000000`.
+- Make sure to handle nested JSON structures if present (e.g., flatten or navigate appropriately).
+
+#### d. Append month spans to phase lines
+- For lines containing `단계1`, `단계2`, `단계3` (phase 1, 2, 3), parse the date range already present in that line.
+- Calculate the month span between the start and end dates.
+- Append the span in the format ` (N개월)` after the phase content on that line.
+- The expected results based on the task description: 단계1 → (3개월), 단계2 → (3개월), 단계3 → (1개월).
+- To calculate: parse the dates (likely in YYYY.MM.DD or YYYY-MM-DD format), compute the difference in months, and append.
+
+#### e. Remove layout-cache elements from modified paragraphs
+- After modifying any `<hp:p>` paragraph element's text content, remove child elements that serve as layout cache. These include:
+  - `<hp:lineSegArray>` and its children
+  - `<hp:lineseg>` elements
+  - Any other layout-cache elements within the modified `<hp:p>` tags
+- Use an XML parser (like `lxml.etree` or `xml.etree.ElementTree`) for this step to ensure correctness.
+- Be careful with XML namespaces — inspect the actual namespace URIs used in the document.
+
+#### f. Verify no placeholders remain
+- After all replacements, scan the entire output for any remaining `{{...}}` patterns. If any are found, report them as errors.
+
+#### g. Repackage the .hwpx
+- Write all files (modified and unmodified) into a new ZIP archive at `/root/project_proposal_ready.hwpx`.
+- Preserve the original ZIP structure, compression methods, and file ordering.
+- If there's a `mimetype` file, ensure it's stored first and uncompressed (as per OCF/OPF conventions).
+
+### 3. Execute and validate
+- Run the script.
+- After execution, verify the output:
+  - Confirm `/root/project_proposal_ready.hwpx` exists and is a valid ZIP.
+  - Extract and inspect the XML content files to confirm:
+    - No `{{...}}` placeholders remain.
+    - Budget value has no commas but retains currency symbol.
+    - Phase lines have the `(N개월)` suffix appended.
+    - Korean labels and static note lines are unchanged.
+    - Layout-cache elements are removed from modified paragraphs.
+  - Run any available test/verifier script (check for `test_output.py` or similar in the task directory).
+
+### 4. Important details
+- The .hwpx format uses XML with namespaces. When parsing, handle namespaces properly. Inspect the root element to find namespace URIs.
+- Text in HWPX XML is often split across multiple `<hp:t>` elements within `<hp:run>` elements inside `<hp:p>`. A placeholder like `{{project_name}}` might be split across multiple `<hp:t>` tags. You may need to:
+  - First concatenate text across `<hp:t>` elements within a run or paragraph to detect placeholders.
+  - Then reconstruct the elements with the replaced text (possibly merging split runs).
+  - OR do string-level regex replacement on the raw XML text if the placeholders are not split (check first).
+- Start by examining the raw XML to determine if placeholders are split across tags or contained within single tags. Choose your replacement strategy accordingly.
+- For the month calculation: count months between two dates. If start is 2025-03-01 and end is 2025-05-31, that's 3 months. Use `(end_month - start_month)` or similar logic, accounting for year boundaries.
+
+### 5. Run the verifier
+- Look for test files: `ls /root/` and check the task directory for any `test_*.py` files.
+- Run: `cd /root && python -m pytest test_output.py -v` (or whatever test file exists).
+- If tests fail, read the failure output carefully, fix the issue, and re-run.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=catpaw@example.com, author_name=CatPaw Task Engineer, category=document-editing, difficulty=medium, tags=[hwpx, xml-editing, document-processing, latent-method-reuse].
+Verifier config: timeout_sec=600.0.

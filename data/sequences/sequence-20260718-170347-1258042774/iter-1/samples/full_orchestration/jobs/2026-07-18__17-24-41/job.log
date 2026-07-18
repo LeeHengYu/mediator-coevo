@@ -1,0 +1,260 @@
+Running command: if command -v apk &> /dev/null; then  apk add --no-cache curl bash nodejs npm; elif command -v apt-get &> /dev/null; then  apt-get update && apt-get install -y curl; elif command -v yum &> /dev/null; then  yum install -y curl; else  echo "Warning: No known package manager found, assuming curl is available" >&2; fi
+Command outputs captured
+Running command: set -euo pipefail; if command -v apk &> /dev/null; then  npm install -g @anthropic-ai/claude-code; else  curl -fsSL https://claude.ai/install.sh | bash -s --; fi && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/bin:$PATH" && claude --version
+Command outputs captured
+Running command: mkdir -p $CLAUDE_CONFIG_DIR/debug $CLAUDE_CONFIG_DIR/projects/-app $CLAUDE_CONFIG_DIR/shell-snapshots $CLAUDE_CONFIG_DIR/statsig $CLAUDE_CONFIG_DIR/todos $CLAUDE_CONFIG_DIR/skills && if [ -d ~/.claude/skills ]; then cp -r ~/.claude/skills/. $CLAUDE_CONFIG_DIR/skills/ 2>/dev/null || true; fi
+Command outputs captured
+Running command: export PATH="$HOME/.local/bin:$PATH"; claude --verbose --output-format=stream-json --permission-mode=bypassPermissions --print -- '# Task Instruction
+
+Build the output workbook `/root/additional_shipments_needed_updated_july_2025.xlsx` by following these steps exactly.
+
+## Step 0 – Inspect the source workbook
+
+```python
+import openpyxl, os
+wb = openpyxl.load_workbook('"'"'/root/Inventory_and_Shipments_Latest.xlsx'"'"', data_only=True)
+for name in wb.sheetnames:
+    ws = wb[name]
+    print(f'"'"'\n=== {name} === (rows={ws.max_row}, cols={ws.max_column})'"'"')
+    for r in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 15), values_only=False):
+        print([(c.coordinate, c.value) for c in r])
+```
+
+Run this first and read the output carefully. Identify:
+- `Current Inventory` sheet: where AsOfDate lives (expected B1), PlanningHorizonEnd (expected D1), header row for SKUs, columns for SKU name, current cases, daily rate.
+- `Incoming Shipments` sheet: columns for SKU, Delivery Date, Number of Cases Left.
+- `Ratio` sheet: columns for SKU and Cases_Per_Pallet.
+
+Adapt column references below if the actual layout differs from expectations.
+
+## Step 1 – Parse source data into Python structures
+
+Using openpyxl (already loaded):
+
+1. From `Current Inventory`:
+   - `as_of_date` = value in B1 (convert to `datetime.date` if it'"'"'s a datetime).
+   - `planning_horizon_end` = value in D1 (likewise).
+   - `remaining_days` = `(planning_horizon_end - as_of_date).days`  (expect 27 for Jul 4→Jul 31).
+   - Find the header row for SKU data (likely row 2 or row 3). Look for a cell containing "SKU" or similar. Read each subsequent row to build a list of dicts: `{sku, current_cases, daily_rate}` preserving row order.
+
+2. From `Incoming Shipments`:
+   - Find header row. Build a list of dicts: `{sku, delivery_date, cases_left}`.
+   - Group by SKU.
+
+3. From `Ratio`:
+   - Build a dict `{sku: cases_per_pallet}`.
+
+## Step 2 – Compute per-SKU results
+
+For each SKU (in source order):
+
+```
+current_cases = <from inventory>
+daily_rate = <from inventory>
+cases_per_pallet = ratio_dict[sku]  # must exist
+
+# Inbound cases
+shipments_for_sku = [s for s in shipments if s['"'"'sku'"'"'] == sku and s['"'"'delivery_date'"'"'] <= planning_horizon_end]
+inbound_cases = sum(s['"'"'cases_left'"'"'] for s in shipments_for_sku)
+
+# DOH
+if daily_rate > 0:
+    current_doh = current_cases / daily_rate
+    projected_oos_date = as_of_date + timedelta(days=int(current_doh))   # floor
+    delivered_doh = (current_cases + inbound_cases) / daily_rate
+else:
+    current_doh = None
+    projected_oos_date = None
+    delivered_doh = None
+
+remaining_july_demand = daily_rate * remaining_days
+additional_cases_needed = max(0, remaining_july_demand - current_cases - inbound_cases)
+
+if additional_cases_needed > 0:
+    import math
+    raw_pallets = additional_cases_needed / cases_per_pallet
+    pallets_required = math.ceil(raw_pallets)
+    rounding_applied = (pallets_required != raw_pallets)   # True if ceil changed value
+else:
+    pallets_required = 0
+    rounding_applied = False
+
+# Earliest scheduled inbound date
+all_shipments_for_sku = [s for s in all_shipments if s['"'"'sku'"'"'] == sku]
+if all_shipments_for_sku:
+    earliest_inbound = min(s['"'"'delivery_date'"'"'] for s in all_shipments_for_sku)
+else:
+    earliest_inbound = None
+
+# Required_Delivery_Date
+if pallets_required == 0:
+    required_delivery_date = None
+else:
+    if earliest_inbound is not None and earliest_inbound <= projected_oos_date:
+        required_delivery_date = as_of_date + timedelta(days=int(delivered_doh))  # floor
+    else:
+        required_delivery_date = projected_oos_date
+
+# Earlier_Delivery_Required
+if pallets_required > 0 and (earliest_inbound is None or required_delivery_date < earliest_inbound):
+    earlier_delivery_required = True
+else:
+    earlier_delivery_required = False
+```
+
+Store all computed fields per SKU.
+
+## Step 3 – Write the output workbook
+
+Use openpyxl to create a new workbook.
+
+### Sheet 1: `SKU_Results`
+
+- Delete the default sheet or rename it.
+- Create sheet named `SKU_Results` (must be first/index 0).
+
+Fixed metadata:
+- A1="Field", B1="Value"
+- A2="AsOfDate", B2=as_of_date formatted as "YYYY-MM-DD" string
+- A3="PlanningHorizonEnd", B3=planning_horizon_end formatted as "YYYY-MM-DD" string
+- A4="RemainingDaysInJuly", B4=remaining_days (integer)
+
+Header in row 6 (A6:N6) with exactly these strings:
+`Product_SKU`, `Current_Cases`, `Daily_Rate_Cases_Per_Day`, `Current_DOH`, `Projected_OOS_Date`, `Inbound_Cases_By_July31`, `Delivered_DOH_To_July31`, `Remaining_July_Demand_Cases`, `Additional_Cases_Needed`, `Pallets_Required_Rounded_Up`, `Required_Delivery_Date`, `Rounding_Applied`, `Earlier_Delivery_Required`, `Earliest_Scheduled_Inbound_Date`
+
+Data rows starting at row 7, one per SKU in source order.
+
+**Critical formatting rules:**
+- Columns E (Projected_OOS_Date), K (Required_Delivery_Date), N (Earliest_Scheduled_Inbound_Date): write as ISO date strings "YYYY-MM-DD" (use `date.isoformat()`). Write `None` as leaving the cell empty (don'"'"'t write the string "None").
+- `Current_DOH`, `Delivered_DOH_To_July31`: write as float or leave blank.
+- `Rounding_Applied`, `Earlier_Delivery_Required`: write Python `True`/`False` booleans.
+- All case/rate/pallet numbers: write as numeric (int or float), not strings.
+
+### Sheet 2: `Additional_Shipments_Needed`
+
+- Create as second sheet (index 1).
+- Header in row 1: `Product_SKU`, `Required_Delivery_Date`, `Pallets_Required_Rounded_Up`, `Additional_Cases_Needed`, `Rounding_Applied`, `Earlier_Delivery_Required`
+- Include only SKUs where `pallets_required > 0`, same order as SKU_Results.
+- Same formatting rules (dates as ISO strings, booleans as booleans, numbers as numbers).
+
+## Step 4 – Save and verify
+
+Save to `/root/additional_shipments_needed_updated_july_2025.xlsx`.
+
+Then reload and verify:
+1. Sheet names are exactly `['"'"'SKU_Results'"'"', '"'"'Additional_Shipments_Needed'"'"']`.
+2. A1="Field", B2 is a date string matching YYYY-MM-DD pattern.
+3. Row 6 headers match exactly.
+4. Date columns contain strings (not datetime objects).
+5. Boolean columns contain actual booleans.
+6. Numeric columns contain numbers.
+7. Sheet 2 has only rows with Pallets > 0.
+8. Print a summary of all SKU rows for visual inspection.
+
+Do NOT modify any source files. The only output file is the xlsx at the specified path.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Task-local resources are available under `environment/skills`: Inventory Turnover Analyzer, bc-calculated-fields-manufacturing, inventory-manager, shelf-life-management, stochastic-inventory-models.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@example.com, author_name=Codex, category=supply-chain, difficulty=medium, tags=[inventory, excel, replenishment, logistics, forecasting].
+Verifier config: timeout_sec=900.0.' 2>&1 </dev/null | tee /logs/agent/claude-code.txt
+Command outputs captured

@@ -1,0 +1,175 @@
+# Task Instruction
+
+Implement a Python script at /root/solve.py that reads /root/MealKits_Inventory_and_Inbound_Latest.xlsx and produces /root/freshness_replenishment_plan_november_2025.xlsx with exactly two sheets: Freshness_Results and Additional_Freshness_Needed.
+
+Step-by-step:
+
+1. **Inspect source workbook first.** Before writing any logic, read and print:
+   - The first 5 rows of 'Current Inventory' (to find AsOfDate in B1, PlanningHorizonEnd in D1, and the data layout including column names)
+   - The first 5 rows of 'Incoming Deliveries' (to find column names for entity ID, quantity, delivery date)
+   - The first 5 rows of 'Shelf_Life' (to find entity ID, shelf life days, boxes-per-pallet conversion ratio)
+   Print all column names and dtypes. This is critical — do NOT assume column names.
+
+2. **Parse metadata:**
+   - AsOfDate = value from Current Inventory cell B1 (row index 0, col index 1). Convert to date.
+   - PlanningHorizonEnd = value from Current Inventory cell D1 (row index 0, col index 3). Convert to date.
+   - RemainingDaysInNovember = (PlanningHorizonEnd - AsOfDate).days
+
+3. **Parse Current Inventory data.** Identify the header row (likely row 2 or row 1 — inspect output from step 1). Extract columns for: Meal_Kit_ID, Current_Boxes, Daily_Order_Rate_Boxes. Preserve source order.
+
+4. **Parse Shelf_Life.** Build a dict mapping Meal_Kit_ID → {shelf_life_days, boxes_per_pallet (conversion ratio)}.
+
+5. **Compute Boxes_Expiring_By_Nov30** for each entity:
+   - An item expires if AsOfDate + shelf_life_days <= PlanningHorizonEnd.
+   - If expiring: Boxes_Expiring_By_Nov30 = Current_Boxes. Otherwise 0.
+   - (If the source data has a production/receipt date per item, use that instead of AsOfDate. Inspect carefully.)
+
+6. **Compute per-entity fields in order:**
+   - Usable_Current_Boxes = max(0, Current_Boxes - Boxes_Expiring_By_Nov30)
+   - Current_DOH = Usable_Current_Boxes / Daily_Order_Rate_Boxes if rate > 0, else None
+   - Projected_OOS_Date = AsOfDate + timedelta(days=floor(Current_DOH)) if rate > 0, else None. Format as YYYY-MM-DD string.
+   - Inbound_Boxes_By_Nov30 = sum of inbound quantity for that entity where delivery_date <= PlanningHorizonEnd
+   - Delivered_DOH_To_Nov30 = (Usable_Current_Boxes + Inbound_Boxes_By_Nov30) / Daily_Order_Rate_Boxes if rate > 0, else None
+   - Remaining_November_Demand_Boxes = Daily_Order_Rate_Boxes * RemainingDaysInNovember
+   - Additional_Boxes_Needed = max(0, Remaining_November_Demand_Boxes - Usable_Current_Boxes - Inbound_Boxes_By_Nov30)
+   - Pallets_Required_Rounded_Up = math.ceil(Additional_Boxes_Needed / boxes_per_pallet) if Additional_Boxes_Needed > 0, else 0
+   - Rounding_Applied = True if Additional_Boxes_Needed > 0 and (Additional_Boxes_Needed % boxes_per_pallet != 0) else False
+   - Earliest_Scheduled_Inbound_Date = min delivery date for that entity from Incoming Deliveries (any date, not just <=Nov30), else None. Format as YYYY-MM-DD string.
+   - Required_Delivery_Date:
+     - None if Pallets_Required_Rounded_Up == 0
+     - else if Earliest_Scheduled_Inbound_Date is not None and Earliest_Scheduled_Inbound_Date <= Projected_OOS_Date: AsOfDate + timedelta(days=floor(Delivered_DOH_To_Nov30)), formatted YYYY-MM-DD
+     - else: Projected_OOS_Date (already YYYY-MM-DD string)
+   - Earlier_Delivery_Required = True if Pallets_Required_Rounded_Up > 0 and (Earliest_Scheduled_Inbound_Date is None or Required_Delivery_Date < Earliest_Scheduled_Inbound_Date); else False
+     - For date comparison, compare as date objects, not strings.
+
+7. **Write Sheet 1: Freshness_Results**
+   - Row 1: A1='Field', B1='Value'
+   - Row 2: A2='AsOfDate', B2=AsOfDate as YYYY-MM-DD string
+   - Row 3: A3='PlanningHorizonEnd', B3=PlanningHorizonEnd as YYYY-MM-DD string
+   - Row 4: A4='RemainingDaysInNovember', B4=integer
+   - Row 5: blank
+   - Row 6: header row with exactly these 16 columns in order: Meal_Kit_ID, Current_Boxes, Boxes_Expiring_By_Nov30, Usable_Current_Boxes, Daily_Order_Rate_Boxes, Current_DOH, Projected_OOS_Date, Inbound_Boxes_By_Nov30, Delivered_DOH_To_Nov30, Remaining_November_Demand_Boxes, Additional_Boxes_Needed, Pallets_Required_Rounded_Up, Required_Delivery_Date, Rounding_Applied, Earlier_Delivery_Required, Earliest_Scheduled_Inbound_Date
+   - Data rows starting at row 7, one per entity in source order.
+   - Boolean fields (Rounding_Applied, Earlier_Delivery_Required) must be Python bool True/False written to Excel.
+   - Numeric fields must be numeric (int or float), not strings.
+   - Date columns (Projected_OOS_Date, Required_Delivery_Date, Earliest_Scheduled_Inbound_Date) must be ISO YYYY-MM-DD strings (or None/blank).
+
+8. **Write Sheet 2: Additional_Freshness_Needed**
+   - Header at row 1: Meal_Kit_ID, Required_Delivery_Date, Pallets_Required_Rounded_Up, Additional_Boxes_Needed, Rounding_Applied, Earlier_Delivery_Required
+   - Only rows where Pallets_Required_Rounded_Up > 0, same order as Sheet 1.
+
+9. **Use openpyxl** to write the workbook (so metadata rows and data rows can coexist without pandas index issues). Or use pandas with careful startrow management.
+
+10. **Validate after writing:**
+    - Re-read the output file and print Sheet 1 rows 1-10 and all of Sheet 2 to confirm structure, types, and values.
+    - Confirm no extra sheets exist.
+    - Confirm boolean fields are actual booleans, not strings.
+
+Run the script: `cd /root && python solve.py`
+
+If the inspection in step 1 reveals unexpected column names or data layouts, adapt accordingly — the source data structure takes priority over assumed names. Print diagnostic output at each major step.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Task-local resources are available under `environment/skills`: inventory-manager, shelf-life-management.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=codex@example.com, author_name=Codex, category=fresh-food-operations, difficulty=medium, tags=[excel, shelf-life, freshness, replenishment, operations].
+Verifier config: timeout_sec=900.0.

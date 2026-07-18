@@ -1,0 +1,211 @@
+# Task Instruction
+
+Execute the following steps in order to produce `/root/vaxcrate_analysis.json` and `/root/vaxcrate_summary.md`.
+
+## Step 0 – Inspect all input files and any test/verifier scripts
+
+```bash
+cat /root/campaign_manifest.json
+cat /root/crate_cost.csv
+cat /root/billing.csv
+cat /root/location_overrides.csv
+cat /root/suspensions.csv
+find /root -name '*.py' -path '*/test*' | head -20
+```
+If any test file exists (e.g. `/tests/test_outputs.py`), read it fully so you know the exact verifier contract.
+
+## Step 1 – Write a single Python script `/root/solve.py` that does everything
+
+The script must:
+
+1. **Load inputs**
+   - `campaign_manifest.json` → list of campaign objects.
+   - `crate_cost.csv`, `billing.csv`, `location_overrides.csv`, `suspensions.csv` → pandas DataFrames (or csv.DictReader).
+
+2. **Filter campaigns**
+   - Keep only campaigns with `analysis_flag == "review"`.
+   - Remove any whose `campaign_id` appears in `suspensions.csv` with `suspension_status == "hold"`.
+
+3. **Resolve billing**
+   - For each retained campaign, find rows in `billing.csv` where `campaign_label` matches either `campaign_name` or any element in `alias_labels` (from manifest).
+   - Keep only rows with `status == "active"`.
+   - If multiple active rows map to the same campaign, keep the one with the latest (lexicographically greatest) `cycle_tag`.
+   - Extract `payment_per_dispatch_per_clinic_usd` from that row.
+
+4. **Resolve active clinics**
+   - From `location_overrides.csv`, keep rows where `state == "approved"`, `revision` is not blank/empty, and `active_clinics` is not blank/empty.
+   - Convert `revision` to numeric.
+   - For each `campaign_id`, keep the row with the highest `revision`.
+   - If no valid override row exists for a campaign, fall back to `default_active_clinics` from the manifest.
+
+5. **Look up crate cost**
+   - Match `crate_tier` (from manifest) to `crate_cost_usd` in `crate_cost.csv`.
+
+6. **Compute per-campaign numbers** (use Python `round(value, 2)` for every currency output):
+   - 6-day model: days_per_dispatch=6, dispatches_per_year=60
+   - 12-day model: days_per_dispatch=12, dispatches_per_year=30
+   - `annual_revenue = payment_per_dispatch_per_clinic_usd * active_clinics * dispatches_per_year`
+   - `annual_drug_cost = drug_cost_per_1000_doses_usd * active_clinics * doses_per_day * days_per_dispatch * dispatches_per_year / 1000`
+   - `annual_crate_cost = crate_cost_usd * dispatches_per_year`  (NOTE: verify from test if crate cost is per dispatch or per dispatch×clinics; the formula says `crate_cost_usd` from CSV matched by tier — if the test expects `crate_cost_usd * dispatches_per_year` use that; if it expects `crate_cost_usd * active_clinics * dispatches_per_year` use that. Check the test assertions to decide. If no test clarifies, use `crate_cost_usd * dispatches_per_year` since the instructions say "crate cost uses crate_cost_usd from crate_cost.csv" with no mention of clinics.)
+   - `annual_margin = annual_revenue - annual_drug_cost - annual_crate_cost`
+   - `difference = margin_12 - margin_6`
+
+7. **Totals**
+   - Sum all per-campaign margins for 6-day and 12-day.
+   - `total_difference = total_margin_12 - total_margin_6`
+   - `absolute_total_margin_difference_usd = round(abs(total_difference), 2)`
+
+8. **Decision**
+   - If `abs(total_difference) < 11000` → `"move_to_12_day"`
+   - Otherwise → `"keep_6_day"`
+
+9. **Build JSON** exactly matching the schema from the instructions. Critical: nest `decision` and `justification` inside a `"recommendation"` object — do NOT put them at root level.
+
+10. **Sort** the `campaigns` array by `campaign_id` ascending.
+
+11. **Write** `/root/vaxcrate_analysis.json` with `json.dump(..., indent=2)`.
+
+12. **Write** `/root/vaxcrate_summary.md` with 4–8 non-empty lines containing:
+    - Total 6-day margin (USD)
+    - Total 12-day margin (USD)
+    - Absolute difference (USD)
+    - The exact slug `move_to_12_day` or `keep_6_day`
+
+## Step 2 – Run the script
+
+```bash
+cd /root && python solve.py
+```
+
+## Step 3 – Validate outputs
+
+```bash
+cat /root/vaxcrate_analysis.json | python -m json.tool
+cat /root/vaxcrate_summary.md
+```
+
+Confirm:
+- JSON parses cleanly.
+- Top-level keys are exactly: `assumptions`, `campaigns`, `totals`, `recommendation`.
+- `recommendation` contains `decision` and `justification`.
+- `campaigns` is sorted by `campaign_id`.
+- All currency values are rounded to 2 decimals.
+- Summary has 4–8 non-empty lines and includes the required figures and slug.
+
+## Step 4 – Run tests if present
+
+```bash
+cd /root && python -m pytest tests/ -v 2>&1 | head -80
+```
+
+If any test fails, read the error, fix `solve.py`, and re-run. Pay special attention to:
+- Schema key mismatches (the cross-task failure artifact warns about this).
+- Whether `annual_crate_cost` should multiply by `active_clinics` or not — adjust based on test expectations.
+- Numeric precision issues.
+
+Iterate until all tests pass or you are confident the outputs match the contract.
+
+# Executor Policy
+
+---
+name: executor
+description: Portable executor policy for workflow, verification, resource use, and failure handling across task runtimes.
+---
+
+## Executor Policy
+
+Use this skill as execution policy, not as domain-specific task knowledge. When
+task-local curated skills or resources are available, prefer them for domain
+details and use this policy for workflow control.
+
+## Task Execution
+
+1. Read the task instruction, task resources, and verifier contract before editing.
+2. Identify the scoring mechanism and the smallest command that can reproduce the
+   failure or verify the expected behavior.
+3. Inspect existing files and task-local resources before making changes.
+4. Make the smallest source change that satisfies the task and verifier contract.
+5. Keep a compact record of the concrete evidence behind the change: observed
+   failure, files inspected, edit made, and verifier result.
+6. Run targeted verification before broad verification when practical.
+
+## File Editing
+
+1. Read the actual current file contents immediately before making any edit.
+   Never rely on memory, prior snapshots, or assumed content.
+2. Prefer direct in-place edits over patch or diff application when the exact
+   current context is uncertain.
+3. If using a patch or diff, confirm that every context line exists verbatim in
+   the file before applying it.
+4. If a patch hunk fails to apply, re-read the affected file region and perform
+   the edit directly instead of retrying the same patch.
+5. After any edit, re-read the affected region to confirm the change landed.
+
+## Build and Test Fixes
+
+When a task requires fixing a broken build, failing test, or generated artifact:
+
+1. Run the relevant build, test, or verifier command first to capture the
+   baseline failure.
+2. Identify the specific error message, file, line, or expected output before
+   editing.
+3. Apply the smallest fix, then re-run the same targeted command.
+4. Treat newly introduced failures as separate sub-tasks and resolve them in
+   order.
+5. Do not mark the task complete until the verifier-relevant command succeeds or
+   the remaining failure is clearly outside the task boundary.
+
+## Artifact-Contract Handling
+
+Do not treat artifacts as ordinary text files. Treat them as contract-bearing
+interfaces between input data, generated output, verifier checks, and downstream
+consumers.
+
+When a task requires reading, modifying, or generating an artifact such as JSON,
+DOT, reports, configs, generated source, schemas, datasets, or parsed outputs:
+
+1. Identify the artifact contract first: format, schema, required fields,
+   identifiers, references, ordering, examples, verifier assertions, and
+   consuming code.
+2. Inspect representative source artifacts directly before deciding how to
+   transform or preserve them.
+3. Determine whether the task calls for preservation, transformation, repair,
+   generation, or validation.
+4. Preserve required literals, identifiers, references, ordering, and
+   representative content unless the contract explicitly requires a change.
+5. Do not invent, drop, rename, normalize, collapse, expand, or repair artifact
+   elements unless the verifier or consumer contract requires that behavior.
+6. Prefer structured parsers, serializers, validators, or existing consumer code
+   over ad hoc string manipulation when they are available.
+7. After producing the artifact, run targeted checks for parseability, required
+   keys or IDs, reference consistency, expected counts, preserved content, and
+   format-specific validity.
+8. If targeted checks regress or become unusable after a change, stop expanding
+   the solution. Re-inspect the source contract and narrow the edit before trying
+   a broader repair.
+
+A plausible-looking artifact is not sufficient evidence. The artifact is only
+correct when it satisfies the task contract under the verifier or consuming
+code.
+
+## Constraints
+
+- Do not bypass, remove, or weaken tests, verifier scripts, fixtures, or expected
+  output checks.
+- Do not treat this policy as overriding task-specific instructions or verifier
+  requirements.
+- On tool or environment errors, retry once when the retry is safe, then report
+  the failure with the command and error output.
+- On ambiguous instructions, make a conservative assumption and continue.
+
+# Task Resources
+
+Inspect the task files, environment, tests, and expected outputs directly.
+
+# Verifier Contract
+
+Success is judged by the SkillFlow verifier for this task.
+Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or expected-output checks.
+Run the provided tests or verifier command when practical before finalizing.
+Task metadata: author_email=gpt54@example.com, author_name=GPT-5.4, category=financial-analysis, difficulty=medium, tags=[vaccination, json, csv, distractor-handling, decision-analysis].
+Verifier config: timeout_sec=900.0.
