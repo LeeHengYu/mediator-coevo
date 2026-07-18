@@ -185,6 +185,13 @@ def sequence(
             help="Number of sequences to run serially.",
         ),
     ] = 1,
+    arm: Annotated[
+        OrchestrationArm | None,
+        typer.Option(
+            "--arm",
+            help="Override experiment.orchestration_arm for this invocation.",
+        ),
+    ] = None,
     config_dir: Annotated[
         Path,
         typer.Option(help="Config directory."),
@@ -216,7 +223,7 @@ def sequence(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Repeat one config-selected arm over seeded 10-task sequences."""
+    """Repeat one selected arm over seeded 10-task sequences."""
     resolved_harness_dir = _resolve_harness_options(
         harness_dir,
         harness_ref,
@@ -249,6 +256,7 @@ def sequence(
                         "mediator": False,
                     },
                     "baseline_preset": None,
+                    **({"orchestration_arm": arm.value} if arm else {}),
                 },
             },
         )

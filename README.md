@@ -305,8 +305,18 @@ only the seven-task suffix in the configured arm. `-K` defaults to `1`; loop
 `i` uses `--seed + i` to produce its task-stream permutation and policy seed.
 Set `experiment.orchestration_arm` to `execution_only`, `random_policy`,
 `no_graph`, or `full_orchestration`; every `-K` iteration uses that same arm.
-Outputs share `sequence-<timestamp>-<initial-seed>/`, with one `iter-N/` folder
-per iteration.
+`--arm` overrides that setting for one invocation. To compare the learned
+harness against random-K and no diffusion, keep the family order, seed, and
+`-K` fixed across three commands:
+
+```bash
+uv run medcoevo sequence ... --seed 0 -K 10 --arm full_orchestration
+uv run medcoevo sequence ... --seed 0 -K 10 --arm random_policy
+uv run medcoevo sequence ... --seed 0 -K 10 --arm execution_only
+```
+
+Within each invocation, outputs share `sequence-<timestamp>-<initial-seed>/`,
+with one `iter-N/` folder per iteration.
 
 An external sequence harness is a cumulative sparse overlay against the
 repository baseline. It must replace at least one direct-agent file:

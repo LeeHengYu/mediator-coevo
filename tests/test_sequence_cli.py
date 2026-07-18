@@ -38,9 +38,23 @@ def _repository() -> SkillFlowRepository:
     return repository
 
 
+@pytest.mark.parametrize(
+    ("arm_args", "configured_arm", "expected_arm"),
+    [
+        ([], OrchestrationArm.RANDOM_POLICY, OrchestrationArm.RANDOM_POLICY),
+        (
+            ["--arm", "execution_only"],
+            OrchestrationArm.RANDOM_POLICY,
+            OrchestrationArm.EXECUTION_ONLY,
+        ),
+    ],
+)
 def test_sequence_runs_k_seeded_permutations(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    arm_args: list[str],
+    configured_arm: OrchestrationArm,
+    expected_arm: OrchestrationArm,
 ) -> None:
     repository = _repository()
     harness = tmp_path / "harness"
@@ -69,16 +83,21 @@ def test_sequence_runs_k_seeded_permutations(
             rewards=SimpleNamespace(unweighted_mean=1.0, valid_for_reporting=True),
         )
 
-    monkeypatch.setattr(
-        sequence_module,
-        "_load_config_or_bad_parameter",
-        lambda *args, **kwargs: SimpleNamespace(
+    def load_config(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        selected_arm = OrchestrationArm(
+            kwargs["overrides"]["experiment"].get(
+                "orchestration_arm",
+                configured_arm.value,
+            )
+        )
+        return SimpleNamespace(
             experiment=SimpleNamespace(
                 seed=0,
-                orchestration_arm=OrchestrationArm.RANDOM_POLICY,
+                orchestration_arm=selected_arm,
             )
-        ),
-    )
+        )
+
+    monkeypatch.setattr(sequence_module, "_load_config_or_bad_parameter", load_config)
     monkeypatch.setattr(
         sequence_module, "build_benchmark_repo", lambda *args: repository
     )
@@ -114,6 +133,7 @@ def test_sequence_runs_k_seeded_permutations(
             "7",
             "-K",
             "3",
+            *arm_args,
             "--output-dir",
             str(tmp_path),
             "--harness-dir",
@@ -125,9 +145,9 @@ def test_sequence_runs_k_seeded_permutations(
     assert [
         (arm, seed, iteration, total) for arm, seed, iteration, total, _, _ in runs
     ] == [
-        (OrchestrationArm.RANDOM_POLICY, 7, 1, 3),
-        (OrchestrationArm.RANDOM_POLICY, 8, 2, 3),
-        (OrchestrationArm.RANDOM_POLICY, 9, 3, 3),
+        (expected_arm, 7, 1, 3),
+        (expected_arm, 8, 2, 3),
+        (expected_arm, 9, 3, 3),
     ]
     assert len({task_ids for *_, task_ids, _ in runs}) == 3
     assert len({frozenset(task_ids) for *_, task_ids, _ in runs}) == 1
