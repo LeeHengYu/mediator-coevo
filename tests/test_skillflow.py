@@ -1034,7 +1034,7 @@ def test_declared_prebuilt_image_is_rebuilt_when_harbor_cleanup_removed_it(
                 "--agent-env",
                 "ANTHROPIC_API_KEY=",
                 "--agent-env",
-                "ANTHROPIC_AUTH_TOKEN=${OPENROUTER_API_KEY}",
+                "ANTHROPIC_AUTH_TOKEN=sk-test-openrouter",
                 "--agent-env",
                 "ANTHROPIC_BASE_URL=https://openrouter.ai/api",
                 "--agent-env",
@@ -1097,6 +1097,7 @@ async def test_harbor_runner_raises_for_missing_prebuilt(
         "mediated_coevo.benchmarks.skillflow.asyncio.create_subprocess_exec",
         fake_create_subprocess_exec,
     )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-openrouter")
 
     runner = HarborRunner(
         jobs_dir=jobs_dir,
@@ -1199,6 +1200,47 @@ def test_claude_code_openrouter_agent_env_preserves_explicit_model_aliases() -> 
     assert agent_env["ANTHROPIC_MODEL"] == "custom/model"
     assert agent_env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "custom/model"
     assert agent_env["CLAUDE_CODE_SUBAGENT_MODEL"] == "custom/model"
+
+
+def test_expand_agent_env_placeholders_only_resolves_full_env_values() -> None:
+    expanded = skillflow_benchmark.expand_agent_env_placeholders(
+        {
+            "ANTHROPIC_AUTH_TOKEN": "${OPENROUTER_API_KEY}",
+            "LITERAL": "prefix-${OPENROUTER_API_KEY}",
+            "MISSING": "${MISSING_KEY}",
+        },
+        environ={"OPENROUTER_API_KEY": "sk-test-openrouter"},
+    )
+
+    assert expanded == {
+        "ANTHROPIC_AUTH_TOKEN": "sk-test-openrouter",
+        "LITERAL": "prefix-${OPENROUTER_API_KEY}",
+        "MISSING": "",
+    }
+
+
+def test_redact_harbor_command_for_log_hides_agent_env_secrets() -> None:
+    command = [
+        "harbor",
+        "run",
+        "--agent-env",
+        "ANTHROPIC_AUTH_TOKEN=sk-test-openrouter",
+        "--agent-env",
+        "ANTHROPIC_BASE_URL=https://openrouter.ai/api",
+        "--agent-env",
+        "EMPTY_TOKEN=",
+    ]
+
+    assert skillflow_benchmark.redact_harbor_command_for_log(command) == [
+        "harbor",
+        "run",
+        "--agent-env",
+        "ANTHROPIC_AUTH_TOKEN=<redacted>",
+        "--agent-env",
+        "ANTHROPIC_BASE_URL=https://openrouter.ai/api",
+        "--agent-env",
+        "EMPTY_TOKEN=",
+    ]
 
 
 def _write_task(task_dir: Path, *, family: str) -> None:

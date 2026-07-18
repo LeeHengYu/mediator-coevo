@@ -84,6 +84,47 @@ def harbor_agent_env_for_model(
     return env
 
 
+_ENV_PLACEHOLDER_RE = re.compile(r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}$")
+_SECRET_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+
+
+def expand_agent_env_placeholders(
+    agent_env: Mapping[str, str],
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve full-value ${ENV_NAME} placeholders for Harbor agent env."""
+    source = os.environ if environ is None else environ
+    expanded: dict[str, str] = {}
+    for key, value in agent_env.items():
+        match = _ENV_PLACEHOLDER_RE.fullmatch(value)
+        expanded[key] = source.get(match.group("name"), "") if match else value
+    return expanded
+
+
+def redact_agent_env_arg(arg: str) -> str:
+    """Redact secret-like KEY=value Harbor command arguments for logging."""
+    if "=" not in arg:
+        return arg
+    key, value = arg.split("=", 1)
+    if value and any(part in key.upper() for part in _SECRET_ENV_PARTS):
+        return f"{key}=<redacted>"
+    return arg
+
+
+def redact_harbor_command_for_log(command: Iterable[str]) -> list[str]:
+    """Return a log-safe Harbor command with secret --agent-env values hidden."""
+    redacted: list[str] = []
+    redact_next = False
+    for arg in command:
+        if redact_next:
+            redacted.append(redact_agent_env_arg(arg))
+            redact_next = False
+            continue
+        redacted.append(arg)
+        redact_next = arg == "--agent-env"
+    return redacted
+
+
 @dataclass(frozen=True, slots=True)
 class SkillFlowSyncConfig:
     """Hugging Face task-data synchronization settings."""
@@ -502,6 +543,7 @@ class HarborRunner:
             agent_env=self.agent_env,
             model=model,
         )
+        agent_env = expand_agent_env_placeholders(agent_env)
         for key, value in sorted(agent_env.items()):
             command.extend(["--agent-env", f"{key}={value}"])
         if self.agent_setup_timeout_multiplier is not None:
@@ -511,7 +553,10 @@ class HarborRunner:
                     str(self.agent_setup_timeout_multiplier),
                 ]
             )
-        logger.info("Running SkillFlow Harbor task: %s", " ".join(command))
+        logger.info(
+            "Running SkillFlow Harbor task: %s",
+            " ".join(redact_harbor_command_for_log(command)),
+        )
         env = os.environ.copy()
         env.pop("OPENAI_API_KEY", None)
 
