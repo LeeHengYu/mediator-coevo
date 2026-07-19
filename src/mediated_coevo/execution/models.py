@@ -23,8 +23,8 @@ SchemaVersion = Literal[1]
 SamplePhaseName = Literal["warmup", "orchestrated"]
 ExecutionArmName = Literal[
     "execution_only",
-    "random_policy",
-    "no_graph",
+    "graph_only",
+    "diffusion_only",
     "full_orchestration",
 ]
 
@@ -68,6 +68,7 @@ def is_sensitive_key(value: object) -> bool:
 
 def redact_sensitive_text(value: str) -> str:
     """Remove common credential assignments from persisted free-form text."""
+
     def redact_quoted(match: re.Match[str]) -> str:
         if not is_sensitive_key(match.group("key")):
             return match.group(0)
@@ -114,9 +115,7 @@ def redact_sensitive_data(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             key: (
-                "[redacted]"
-                if is_sensitive_key(key)
-                else redact_sensitive_data(item)
+                "[redacted]" if is_sensitive_key(key) else redact_sensitive_data(item)
             )
             for key, item in value.items()
         }
@@ -506,7 +505,9 @@ class ContextPack(BaseModel):
         if exceeds_budget and not self.budget_violation:
             raise ValueError("context exceeding its token budget must flag a violation")
         if self.budget_violation and not (dropped or exceeds_budget):
-            raise ValueError("budget_violation requires a dropped or over-budget context")
+            raise ValueError(
+                "budget_violation requires a dropped or over-budget context"
+            )
 
         for key, expected in (
             ("eligible_count", len(self.eligible_artifact_ids)),
@@ -533,9 +534,9 @@ class ContextPack(BaseModel):
                 bool(self.metadata),
             )
         ):
-            raise ValueError("policy 'none' is reserved for the canonical empty context")
-        if self.policy_name == "random_uniform" and self.snapshot_id is not None:
-            raise ValueError("random policy context cannot claim a graph snapshot")
+            raise ValueError(
+                "policy 'none' is reserved for the canonical empty context"
+            )
         return self
 
 
@@ -570,7 +571,9 @@ class TaskExecutionRequest(BaseModel):
             if self.arm is not None:
                 raise ValueError("warm-up execution must not carry a treatment arm")
             if self.context != empty_context_pack():
-                raise ValueError("warm-up execution requires the canonical empty context")
+                raise ValueError(
+                    "warm-up execution requires the canonical empty context"
+                )
         elif self.arm is None:
             raise ValueError("orchestrated execution requires a treatment arm")
         if self.arm == "execution_only" and self.context != empty_context_pack():

@@ -28,8 +28,9 @@ Package guides describe the boundaries and public contracts:
   machine, shared warm-up archive, rewards, journals, and loading APIs.
 
 The `sequence` CLI samples one or more seeded 10-task streams from four families
-and repeats the arm selected by `experiment.orchestration_arm`. Automated
-heuristic learning and cross-sequence aggregation remain outside this runtime.
+and composes each suffix from independent `--graph-agent` and
+`--diffusion-agent` flags. Both flags default to off. Automated heuristic
+learning and cross-sequence aggregation remain outside this runtime.
 
 ## How It Works
 
@@ -301,19 +302,25 @@ uv run medcoevo sequence \
 removes that command-owned experiment workspace; failed workspaces remain under
 `data/experiments` for diagnosis. `sequence` never executes its first three
 tasks: it imports their stores into one shared `WarmupBundle`, then evaluates
-only the seven-task suffix in the configured arm. `-K` defaults to `1`; loop
+only the seven-task suffix in the selected setting. `-K` defaults to `1`; loop
 `i` uses `--seed + i` to produce its task-stream permutation and policy seed.
-Set `experiment.orchestration_arm` to `execution_only`, `random_policy`,
-`no_graph`, or `full_orchestration`; every `-K` iteration uses that same arm.
-`--arm` overrides that setting for one invocation. To compare the learned
-harness against random-K and no diffusion, keep the family order, seed, and
-`-K` fixed across three commands:
+`--graph-agent/--no-graph-agent` and
+`--diffusion-agent/--no-diffusion-agent` independently select the four fixed
+settings; both default to off. Keep the family order, seed, and `-K` fixed when
+comparing them:
 
 ```bash
-uv run medcoevo sequence ... --seed 0 -K 10 --arm full_orchestration
-uv run medcoevo sequence ... --seed 0 -K 10 --arm random_policy
-uv run medcoevo sequence ... --seed 0 -K 10 --arm execution_only
+uv run medcoevo sequence ... --seed 0 -K 10
+uv run medcoevo sequence ... --seed 0 -K 10 --graph-agent
+uv run medcoevo sequence ... --seed 0 -K 10 --diffusion-agent
+uv run medcoevo sequence ... --seed 0 -K 10 --graph-agent --diffusion-agent
 ```
+
+Graph-only mode uses deterministic random selection over same-node and incoming
+graph-neighbor artifacts, capped by `diffusion.random_policy_max_artifacts`
+(default `2`). Learned diffusion uses `diffusion.max_artifacts` (default `3`)
+and receives the same complete causal artifact pool with or without a graph;
+the graph is advisory evidence rather than a hard candidate filter.
 
 Within each invocation, outputs share `sequence-<timestamp>-<initial-seed>/`,
 with one `iter-N/` folder per iteration.

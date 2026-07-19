@@ -15,6 +15,8 @@ from mediated_coevo.diffusion.models import (
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
+    TaskGraphEdgeRecord,
+    TaskGraphSnapshot,
 )
 from mediated_coevo.diffusion.policy import (
     REUSE_SUCCESS_CHANNEL,
@@ -104,9 +106,39 @@ async def test_renderer_audits_policy_context_without_a_graph_snapshot(tmp_path)
 
 
 @dataclass
-class _UnusedGraphAgent:
+class _RuntimeGraphAgent:
+    store: DiffusionStore
+
     async def update(self, request: GraphAgentRequest) -> GraphAgentResponse:
-        raise AssertionError(f"graph agent must not be called at {request.position}")
+        current_task_id = request.task.task_id
+        source_task_ids = sorted(
+            {artifact.source_task_id for artifact in request.artifacts}
+        )
+        task_nodes = {
+            task_id: {"task_ids": [task_id]}
+            for task_id in (*source_task_ids, current_task_id)
+        }
+        snapshot = TaskGraphSnapshot(
+            run_id=request.run_id,
+            iteration=request.position,
+            task_ids=list(task_nodes),
+            edge_records=[
+                TaskGraphEdgeRecord(
+                    source_task_id=source_task_id,
+                    target_task_id=current_task_id,
+                    relation="test_prior",
+                    weight=1.0,
+                )
+                for source_task_id in source_task_ids
+            ],
+            graph_policy="test_graph",
+            metadata={
+                "current_node_id": current_task_id,
+                "task_nodes": task_nodes,
+            },
+        )
+        self.store.store_graph_snapshot(snapshot)
+        return GraphAgentResponse(snapshot=snapshot, raw_decision={})
 
 
 @dataclass
@@ -232,7 +264,7 @@ class _RuntimeOrchestrator:
 def _runtime_runner(orchestrator: _RuntimeOrchestrator) -> SampleRunner:
     store = orchestrator.diffusion_store
     return SampleRunner(
-        graph_agent=_UnusedGraphAgent(),
+        graph_agent=_RuntimeGraphAgent(store),
         diffusion_policy_agent=_UnusedDiffusionPolicyAgent(),
         random_policy_agent=RandomPolicyAgent(max_artifacts=1),
         context_packer=DiffusionContextPacker(store=store, model="fake-model"),
@@ -356,7 +388,7 @@ async def test_runtime_e2e_reuses_one_portable_warmup_without_copying_harbor(tmp
     spec = SampleSpec(
         sample_id="sample-random",
         sequence=sequence,
-        arm=OrchestrationArm.RANDOM_POLICY,
+        arm=OrchestrationArm.GRAPH_ONLY,
         warmup_bundle_id=bundle.bundle_id,
     )
     sample_runtime, sample_orchestrator = _runtime(
@@ -388,6 +420,10 @@ async def test_runtime_e2e_reuses_one_portable_warmup_without_copying_harbor(tmp
     assert completed_positions == [1, 2]
     assert all(
         context.policy_name == "random_uniform"
+        for _, context in sample_orchestrator.execution_calls
+    )
+    assert all(
+        context.snapshot_id is not None
         for _, context in sample_orchestrator.execution_calls
     )
     assert str((sequence_dir / "samples" / spec.sample_id).resolve()) not in (
@@ -1406,6 +1442,7 @@ def test_build_sample_runtime_wires_direct_agents_without_invocation(tmp_path):
         "LangChainDiffusionPolicyAdapter"
     )
     assert type(runtime.runner._random_policy_agent).__name__ == "RandomPolicyAgent"
+    assert runtime.runner._random_policy_agent.max_artifacts == 2
 
 
 def test_build_sample_runtime_rejects_legacy_baseline_overlay(tmp_path):

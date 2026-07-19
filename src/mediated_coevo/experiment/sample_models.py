@@ -285,10 +285,7 @@ class WarmupTaskRecord(_FrozenV1Model):
         ):
             raise ValueError("warm-up execution metadata must be arm-neutral")
         if any(
-            any(
-                _mapping_contains_key(artifact.metadata, key)
-                for key in treatment_keys
-            )
+            any(_mapping_contains_key(artifact.metadata, key) for key in treatment_keys)
             for artifact in self.bank_update.added_artifacts
         ):
             raise ValueError("warm-up artifact metadata must be arm-neutral")
@@ -328,9 +325,7 @@ class SampleTaskRecord(_FrozenV1Model):
         )
         _validate_identity(self.sequence_id, label="sequence_id")
         if self.execution.metadata.get("phase") != "orchestrated":
-            raise ValueError(
-                "sample execution metadata phase must equal orchestrated"
-            )
+            raise ValueError("sample execution metadata phase must equal orchestrated")
         if self.execution.metadata.get("arm") != self.arm.value:
             raise ValueError("sample execution metadata arm must match its record")
         if self.arm is OrchestrationArm.EXECUTION_ONLY:
@@ -340,16 +335,24 @@ class SampleTaskRecord(_FrozenV1Model):
                 raise ValueError("execution_only requires the canonical empty context")
             if self.graph_snapshot_id_after is not None:
                 raise ValueError("execution_only cannot carry graph identity")
-        elif self.arm is OrchestrationArm.RANDOM_POLICY:
+        elif self.arm is OrchestrationArm.GRAPH_ONLY:
+            if self.graph_call is None or self.policy_call is None:
+                raise ValueError("graph_only requires graph and random-policy calls")
+            if self.graph_snapshot_id_after is None:
+                raise ValueError("graph_only requires a graph snapshot ID")
+            if self.context.snapshot_id != self.graph_snapshot_id_after:
+                raise ValueError(
+                    "graph_only context must use the current graph snapshot"
+                )
+            if self.context.policy_name != "random_uniform":
+                raise ValueError("graph_only requires random-uniform context")
+        elif self.arm is OrchestrationArm.DIFFUSION_ONLY:
             if self.graph_call is not None or self.policy_call is None:
-                raise ValueError("random_policy requires policy-only orchestration")
+                raise ValueError(
+                    "diffusion_only requires a policy call without a graph call"
+                )
             if self.graph_snapshot_id_after is not None or self.context.snapshot_id:
-                raise ValueError("random_policy cannot carry graph identity")
-        elif self.arm is OrchestrationArm.NO_GRAPH:
-            if self.graph_call is not None or self.policy_call is None:
-                raise ValueError("no_graph requires a policy call without a graph call")
-            if self.graph_snapshot_id_after is not None or self.context.snapshot_id:
-                raise ValueError("no_graph cannot carry graph identity")
+                raise ValueError("diffusion_only cannot carry graph identity")
         else:
             if self.graph_call is None or self.policy_call is None:
                 raise ValueError("full_orchestration requires graph and policy calls")
@@ -637,7 +640,9 @@ class ExternalArchiveRef(_FrozenV1Model):
             raise ValueError("external archive uri must use portable path syntax")
         parsed = urlsplit(value)
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("external archive uri must not contain credentials or query")
+            raise ValueError(
+                "external archive uri must not contain credentials or query"
+            )
         if not parsed.scheme:
             if not PurePosixPath(value).is_absolute():
                 raise ValueError(
@@ -646,7 +651,9 @@ class ExternalArchiveRef(_FrozenV1Model):
             return value
         if parsed.scheme == "file":
             if parsed.netloc or not PurePosixPath(unquote(parsed.path)).is_absolute():
-                raise ValueError("file external archive uri must contain an absolute path")
+                raise ValueError(
+                    "file external archive uri must contain an absolute path"
+                )
             return value
         if not parsed.netloc or not parsed.hostname:
             raise ValueError("remote external archive uri must include an authority")
@@ -944,9 +951,7 @@ def _validate_final_artifact_objects(
     final_artifact_bank: tuple[DiffusionArtifact, ...],
     label: str,
 ) -> None:
-    final_by_id = {
-        artifact.artifact_id: artifact for artifact in final_artifact_bank
-    }
+    final_by_id = {artifact.artifact_id: artifact for artifact in final_artifact_bank}
     for record in task_records:
         for artifact in record.bank_update.added_artifacts:
             if final_by_id.get(artifact.artifact_id) != artifact:
@@ -1021,9 +1026,12 @@ def _validate_sample_output(
         final_artifact_bank=final_artifact_bank,
         label="sample",
     )
-    if spec.arm is OrchestrationArm.FULL_ORCHESTRATION:
+    if spec.arm in {
+        OrchestrationArm.GRAPH_ONLY,
+        OrchestrationArm.FULL_ORCHESTRATION,
+    }:
         if final_graph is None:
-            raise ValueError("full_orchestration requires a final graph")
+            raise ValueError(f"{spec.arm.value} requires a final graph")
         if final_graph.run_id != spec.sample_id:
             raise ValueError("final graph belongs to another sample")
         final_record = task_records[-1]
@@ -1032,7 +1040,7 @@ def _validate_sample_output(
         if final_graph.snapshot_id != final_record.graph_snapshot_id_after:
             raise ValueError("final graph must match the last task record")
     elif final_graph is not None:
-        raise ValueError("only full_orchestration may produce a final graph")
+        raise ValueError("only graph-enabled settings may produce a final graph")
 
 
 class SampleExecution(_FrozenV1Model):

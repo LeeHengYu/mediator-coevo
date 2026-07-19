@@ -14,6 +14,7 @@ from mediated_coevo.artifacts.protocols import (
     ArtifactProjector,
 )
 from mediated_coevo.diffusion.models import DiffusionArtifact, TaskGraphSnapshot
+from mediated_coevo.diffusion.policy_agent import graph_prior_candidates
 from mediated_coevo.execution.models import (
     ContextPack,
     SamplePhaseName,
@@ -220,9 +221,7 @@ class SampleRunner:
             next_position=sequence.warmup_count,
             artifacts=(
                 tuple(
-                    DiffusionArtifact.model_validate(
-                        artifact.model_dump(mode="python")
-                    )
+                    DiffusionArtifact.model_validate(artifact.model_dump(mode="python"))
                     for artifact in warmup.final_artifact_bank
                 )
                 if warmup is not None
@@ -374,7 +373,7 @@ class SampleRunner:
         next_graph: TaskGraphSnapshot | None = None
         context = empty_context_pack()
 
-        if plan.use_graph_agent:
+        if plan.graph_agent_enabled:
             graph_request = GraphAgentRequest(
                 run_id=spec.sample_id,
                 position=position,
@@ -392,13 +391,24 @@ class SampleRunner:
             graph_request = None
 
         if plan.policy_component != "none":
+            policy_artifacts = eligible
+            if plan.policy_component == "random_uniform":
+                assert next_graph is not None
+                policy_artifacts = tuple(
+                    candidate[0]
+                    for candidate in graph_prior_candidates(
+                        current_task_id=task.task_id,
+                        snapshot=next_graph,
+                        artifacts=eligible,
+                    )
+                )
             policy_request = PolicyAgentRequest(
                 run_id=spec.sample_id,
                 position=position,
                 policy_seed=spec.sequence.policy_seed,
                 task=task,
                 graph=next_graph,
-                artifacts=eligible,
+                artifacts=policy_artifacts,
             )
             policy_agent = (
                 self._random_policy_agent
@@ -418,7 +428,7 @@ class SampleRunner:
                     task=task,
                     graph=next_graph,
                     policy=policy_response,
-                    eligible=eligible,
+                    eligible=policy_artifacts,
                 )
         else:
             policy_request = None
@@ -622,9 +632,7 @@ class SampleRunner:
                 policy.model_dump(mode="python")
             )
             packer_eligible = tuple(
-                DiffusionArtifact.model_validate(
-                    artifact.model_dump(mode="python")
-                )
+                DiffusionArtifact.model_validate(artifact.model_dump(mode="python"))
                 for artifact in eligible
             )
             packed_context = await self._context_packer.pack(
@@ -762,15 +770,11 @@ class SampleRunner:
     ) -> ArtifactBankUpdate:
         try:
             current_bank = tuple(
-                DiffusionArtifact.model_validate(
-                    artifact.model_dump(mode="python")
-                )
+                DiffusionArtifact.model_validate(artifact.model_dump(mode="python"))
                 for artifact in state.artifacts
             )
             projected_copy = tuple(
-                DiffusionArtifact.model_validate(
-                    artifact.model_dump(mode="python")
-                )
+                DiffusionArtifact.model_validate(artifact.model_dump(mode="python"))
                 for artifact in projected
             )
             returned = self._artifact_bank_updater.prepare(
@@ -781,9 +785,7 @@ class SampleRunner:
                 current_bank=current_bank,
                 projected_artifacts=projected_copy,
             )
-            return ArtifactBankUpdate.model_validate(
-                returned.model_dump(mode="python")
-            )
+            return ArtifactBankUpdate.model_validate(returned.model_dump(mode="python"))
         except Exception as exc:
             raise self._error(
                 stage=FailureStage.PERSIST,

@@ -44,7 +44,10 @@ from mediated_coevo.experiment.sample_models import (
     SequenceSpec,
 )
 from mediated_coevo.experiment.sample_runtime import build_sample_runtime
-from mediated_coevo.orchestration.arms import OrchestrationArm
+from mediated_coevo.orchestration.arms import (
+    OrchestrationArm,
+    arm_for_flags,
+)
 
 
 _SEQUENCE_HARNESS_FILES = (
@@ -185,13 +188,20 @@ def sequence(
             help="Number of sequences to run serially.",
         ),
     ] = 1,
-    arm: Annotated[
-        OrchestrationArm | None,
+    graph_agent: Annotated[
+        bool,
         typer.Option(
-            "--arm",
-            help="Override experiment.orchestration_arm for this invocation.",
+            "--graph-agent/--no-graph-agent",
+            help="Enable the task-graph agent for suffix tasks.",
         ),
-    ] = None,
+    ] = False,
+    diffusion_agent: Annotated[
+        bool,
+        typer.Option(
+            "--diffusion-agent/--no-diffusion-agent",
+            help="Enable the learned diffusion-policy agent for suffix tasks.",
+        ),
+    ] = False,
     config_dir: Annotated[
         Path,
         typer.Option(help="Config directory."),
@@ -223,7 +233,7 @@ def sequence(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Repeat one selected arm over seeded 10-task sequences."""
+    """Repeat one agent setting over seeded 10-task sequences."""
     resolved_harness_dir = _resolve_harness_options(
         harness_dir,
         harness_ref,
@@ -256,18 +266,22 @@ def sequence(
                         "mediator": False,
                     },
                     "baseline_preset": None,
-                    **({"orchestration_arm": arm.value} if arm else {}),
                 },
             },
         )
-        arm = config.experiment.orchestration_arm
+        arm = arm_for_flags(
+            graph_agent_enabled=graph_agent,
+            diffusion_agent_enabled=diffusion_agent,
+        )
         repository = build_benchmark_repo(PROJECT_ROOT, config)
         prepare_llm_credentials_or_exit(config)
         ensure_harbor_available(config)
         provider = BenchmarkTaskProfileProvider(repository)
         console.print(
             f"[bold]Sequence run:[/] {k} iteration(s), 10 tasks each "
-            f"(3 warmup loaded + 7 evaluated), arm {arm.value}, "
+            f"(3 warmup loaded + 7 evaluated), setting {arm.value} "
+            f"(graph={'on' if graph_agent else 'off'}, "
+            f"diffusion={'on' if diffusion_agent else 'off'}), "
             f"seeds {seed}..{seed + k - 1}"
         )
         run_id = f"sequence-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}"

@@ -93,6 +93,33 @@ def _validate_graph_response(
     expected_key = f"{request.position}:{request.task.task_id}"
     if not isinstance(assignments, dict) or expected_key not in assignments:
         raise ValueError("graph snapshot does not assign the current task occurrence")
+    current_node_id = snapshot.metadata.get("current_node_id")
+    if (
+        not isinstance(current_node_id, str)
+        or assignments[expected_key] != current_node_id
+    ):
+        raise ValueError("graph snapshot current node differs from its task assignment")
+    task_nodes = snapshot.metadata.get("task_nodes")
+    if not isinstance(task_nodes, dict):
+        raise ValueError("graph snapshot does not materialize task nodes")
+    current_node = task_nodes.get(current_node_id)
+    if not isinstance(
+        current_node, dict
+    ) or request.task.task_id not in current_node.get("task_ids", []):
+        raise ValueError(
+            "graph snapshot current node does not contain the current task"
+        )
+    materialized_task_ids = {
+        str(task_id)
+        for node in task_nodes.values()
+        if isinstance(node, dict)
+        for task_id in node.get("task_ids", [])
+    }
+    missing_sources = {
+        artifact.source_task_id for artifact in request.artifacts
+    } - materialized_task_ids
+    if missing_sources:
+        raise ValueError("graph snapshot omits causal artifact source tasks")
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,12 +169,14 @@ def _validate_policy_response(
     for subscription in response.subscriptions:
         artifact = eligible.get(subscription.artifact.artifact_id)
         if artifact is None or artifact != subscription.artifact:
-            raise ValueError("policy selected an artifact outside the causal candidate pool")
+            raise ValueError(
+                "policy selected an artifact outside the causal candidate pool"
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class RandomPolicyAgent:
-    """Deterministic uniform selection over the exact causal candidate pool."""
+    """Deterministic uniform selection over a graph-prior candidate pool."""
 
     max_artifacts: int
 
@@ -156,7 +185,9 @@ class RandomPolicyAgent:
             raise ValueError("max_artifacts must be non-negative")
 
     async def select(self, request: PolicyAgentRequest) -> PolicyAgentResponse:
-        """Select up to the learned policy's total cap without reward quotas."""
+        """Select up to the random-policy cap without reward quotas."""
+        if request.graph is None:
+            raise ValueError("random policy requires a graph snapshot")
         candidates = sorted(
             request.artifacts,
             key=lambda artifact: artifact.artifact_id,
@@ -175,8 +206,8 @@ class RandomPolicyAgent:
             DiffusionSubscription(
                 artifact=artifact,
                 policy_name="random_uniform",
-                relation="random_uniform",
-                reason="selected uniformly from the complete causal candidate pool",
+                relation="graph_random_uniform",
+                reason="selected uniformly from graph-prior causal artifacts",
                 context_channel=(
                     AVOID_RECHECK_CHANNEL
                     if is_avoid_recheck_artifact(artifact)
@@ -196,12 +227,15 @@ class RandomPolicyAgent:
                 ),
                 "selection_seed": route_seed,
                 "artifact_cap": self.max_artifacts,
-                "graph_used": False,
+                "graph_used": True,
+                "candidate_scope": "graph_priors",
             },
             metadata={
                 "sampling": "deterministic_uniform_without_replacement",
                 "selection_seed": route_seed,
                 "artifact_cap": self.max_artifacts,
+                "graph_used": True,
+                "candidate_scope": "graph_priors",
             },
         )
 

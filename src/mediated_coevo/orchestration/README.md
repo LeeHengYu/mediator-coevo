@@ -14,8 +14,8 @@ occurrence, run and position identity, and the exact causal artifact tuple.
 Responses retain the raw agent decision as JSON alongside validated graph or
 subscription state.
 
-`OrchestrationArm`, `ArmPlan`, and `plan_for_arm()` are the only component
-composition switch used by the sample runner. The concrete adapters are
+`OrchestrationArm`, `ArmPlan`, `arm_for_flags()`, and `plan_for_arm()` define the
+two-boolean component composition used by the sample runner. The concrete adapters are
 `LangChainTaskGraphAdapter`, `LangChainDiffusionPolicyAdapter`,
 `RandomPolicyAgent`, and `DiffusionContextPacker`.
 
@@ -26,8 +26,8 @@ composition switch used by the sample runner. The concrete adapters are
 | Arm | Graph agent | Policy | Context packer |
 |---|---:|---|---:|
 | `execution_only` | no | none | no |
-| `random_policy` | no | deterministic uniform | yes |
-| `no_graph` | no | diffusion policy with `graph=None` | yes |
+| `graph_only` | yes | graph-constrained deterministic uniform | yes |
+| `diffusion_only` | no | diffusion policy with `graph=None` | yes |
 | `full_orchestration` | yes | diffusion policy | yes |
 
 Warm-up bypasses all four plans and always executes with an empty context. All
@@ -41,11 +41,17 @@ definition: the bank produced only by positions strictly before the current
 one. Selection and packing happen before execution; artifacts from the current
 task are projected and appended only after execution succeeds.
 
-`RandomPolicyAgent` samples uniformly without replacement from the exact causal
-candidate tuple and uses the learned policy's single total artifact cap. Its
-seed is derived only from the declared policy seed, position, sorted candidate
-IDs, cap, and a fixed namespace. It does not reuse the legacy Random-K
-success/failure quotas.
+When a graph is present, `RandomPolicyAgent` restricts the causal tuple to
+artifacts from the current graph node and incoming neighbor nodes, then samples
+uniformly without replacement. It selects nothing when that graph-prior pool is
+empty and does not fall back to the complete bank. Its separate cap is
+`diffusion.random_policy_max_artifacts` (default `2`). The seed is derived only
+from the declared policy seed, position, sorted filtered candidate IDs, cap, and
+a fixed namespace. It does not reuse the legacy Random-K success/failure quotas.
+
+The learned diffusion policy always receives the complete causal artifact tuple.
+With graph enabled it additionally receives the current snapshot; the graph is
+advisory evidence and does not hard-filter the learned policy's candidates.
 
 ## Direct split-agent adapters
 

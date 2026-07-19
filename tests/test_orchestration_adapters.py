@@ -22,7 +22,10 @@ from mediated_coevo.diffusion import (
 )
 from mediated_coevo.diffusion.emitter import DiffusionEmitter
 from mediated_coevo.diffusion.policy import DiffusionSubscription
-from mediated_coevo.diffusion.policy_agent import LangChainDiffusionPolicyAgent
+from mediated_coevo.diffusion.policy_agent import (
+    LangChainDiffusionPolicyAgent,
+    graph_prior_candidates,
+)
 from mediated_coevo.diffusion.task_graph_agent import LangChainTaskGraphAgent
 from mediated_coevo.execution import (
     BenchmarkTaskProfileProvider,
@@ -43,6 +46,7 @@ from mediated_coevo.orchestration import (
     GraphAgentRequest,
     OrchestrationArm,
     PolicyAgentRequest,
+    arm_for_flags,
     plan_for_arm,
 )
 from mediated_coevo.orchestration.contracts import (
@@ -119,7 +123,7 @@ def test_task_profiles_and_persisted_text_do_not_expose_credentials():
         {
             "api_key": "super-secret",
             "stdout": (
-                'Authorization: Bearer bearer-secret '
+                "Authorization: Bearer bearer-secret "
                 'password="password-secret" '
                 '"client_secret": "json-secret"'
             ),
@@ -222,6 +226,8 @@ def test_orchestration_contracts_detach_and_sanitize_legacy_models():
     assert "metadata-secret" not in encoded
     policy_response.subscriptions[0].artifact.content = "mutated"
     assert artifact.content == "outcome for task-a"
+
+
 class _GraphAgent(LangChainTaskGraphAgent):
     async def decide(
         self,
@@ -266,6 +272,21 @@ class _UnsafeSnapshotIdGraphAgent(_GraphAgent):
                 }
             },
         )
+
+
+class _InvalidRoutingGraphAgent(_GraphAgent):
+    def materialize_snapshot(self, **kwargs: Any) -> TaskGraphSnapshot:
+        snapshot = super().materialize_snapshot(**kwargs)
+        snapshot.metadata["current_node_id"] = "unassigned-node"
+        return snapshot
+
+
+class _MissingSourceGraphAgent(_GraphAgent):
+    def materialize_snapshot(self, **kwargs: Any) -> TaskGraphSnapshot:
+        snapshot = super().materialize_snapshot(**kwargs)
+        source_task_id = kwargs["artifacts"][0].source_task_id
+        del snapshot.metadata["task_nodes"][source_task_id]
+        return snapshot
 
 
 class _PolicyAgent(LangChainDiffusionPolicyAgent):
@@ -343,6 +364,30 @@ async def test_graph_adapter_materializes_warmup_nodes_and_validates_before_stor
     assert unsafe_store.query_graph_snapshots(recent=None) == []
     assert not (tmp_path / "escape.json").exists()
 
+    invalid_routing_store = DiffusionStore(tmp_path / "invalid-routing")
+    invalid_routing = LangChainTaskGraphAdapter(
+        _InvalidRoutingGraphAgent(
+            model="openrouter/test/model",
+            run_id="sample-1",
+        ),
+        store=invalid_routing_store,
+    )
+    with pytest.raises(ValueError, match="differs from its task assignment"):
+        await invalid_routing.update(request)
+    assert invalid_routing_store.query_graph_snapshots(recent=None) == []
+
+    missing_source_store = DiffusionStore(tmp_path / "missing-source")
+    missing_source = LangChainTaskGraphAdapter(
+        _MissingSourceGraphAgent(
+            model="openrouter/test/model",
+            run_id="sample-1",
+        ),
+        store=missing_source_store,
+    )
+    with pytest.raises(ValueError, match="omits causal artifact source tasks"):
+        await missing_source.update(request)
+    assert missing_source_store.query_graph_snapshots(recent=None) == []
+
 
 @pytest.mark.asyncio
 async def test_policy_adapter_supports_graph_none_and_preserves_empty_selection():
@@ -377,40 +422,111 @@ async def test_policy_adapter_supports_graph_none_and_preserves_empty_selection(
 
 
 @pytest.mark.asyncio
-async def test_random_policy_is_uniform_reproducible_and_uses_one_total_cap():
-    artifacts = tuple(
-        _artifact(
-            f"artifact-{index}",
-            task_id=f"task-{index}",
-            position=index,
-            reward=(1.0 if index == 0 else 0.0 if index == 1 else None),
+async def test_random_policy_requires_graph():
+    request = PolicyAgentRequest(
+        run_id="sample-1",
+        position=1,
+        policy_seed=31,
+        task=TaskProfile(task_id="task-1", instruction="next"),
+        graph=None,
+        artifacts=(_artifact("artifact-0", task_id="task-0", position=0),),
+    )
+
+    with pytest.raises(ValueError, match="requires a graph snapshot"):
+        await RandomPolicyAgent(max_artifacts=1).select(request)
+
+
+@pytest.mark.asyncio
+async def test_random_policy_follows_graph_priors_without_full_pool_fallback():
+    artifacts = (
+        _artifact("artifact-a1", task_id="task-a", position=0),
+        _artifact("artifact-a2", task_id="task-a", position=1),
+        _artifact("artifact-same", task_id="task-same", position=2),
+        _artifact("artifact-outside", task_id="task-outside", position=3),
+    )
+    graph = TaskGraphSnapshot(
+        run_id="sample-1",
+        iteration=4,
+        graph_policy="langchain_graph",
+        edge_records=[
+            {
+                "source_task_id": "node-a",
+                "target_task_id": "node-current",
+                "relation": "transfer_prior",
+                "weight": 0.7,
+            }
+        ],
+        metadata={
+            "current_node_id": "node-current",
+            "task_nodes": {
+                "node-a": {"task_ids": ["task-a"]},
+                "node-current": {"task_ids": ["task-same", "task-current"]},
+                "node-outside": {"task_ids": ["task-outside"]},
+            },
+        },
+    )
+    candidates = tuple(
+        candidate[0]
+        for candidate in graph_prior_candidates(
+            current_task_id="task-current",
+            snapshot=graph,
+            artifacts=artifacts,
         )
-        for index in range(6)
     )
     request = PolicyAgentRequest(
         run_id="sample-1",
-        position=6,
+        position=4,
         policy_seed=31,
-        task=TaskProfile(task_id="task-6", instruction="next"),
-        graph=None,
-        artifacts=artifacts,
+        task=TaskProfile(task_id="task-current", instruction="next"),
+        graph=graph,
+        artifacts=candidates,
     )
-    policy = RandomPolicyAgent(max_artifacts=3)
 
-    first = await policy.select(request)
-    second = await policy.select(request)
+    policy = RandomPolicyAgent(max_artifacts=2)
+    selected = await policy.select(request)
+    repeated = await policy.select(request)
 
-    assert first == second
-    assert len(first.subscriptions) == 3
-    assert first.policy_name == "random_uniform"
-    assert first.raw_decision["candidate_artifact_ids"] == tuple(
-        artifact.artifact_id for artifact in artifacts
+    assert selected == repeated
+    assert selected.raw_decision["candidate_artifact_ids"] == (
+        "artifact-a1",
+        "artifact-a2",
+        "artifact-same",
     )
-    assert first.raw_decision["artifact_cap"] == 3
-    assert first.raw_decision["graph_used"] is False
+    assert len(selected.subscriptions) == 2
+    assert selected.raw_decision["graph_used"] is True
+    assert selected.raw_decision["candidate_scope"] == "graph_priors"
+    assert all(
+        subscription.relation == "graph_random_uniform"
+        for subscription in selected.subscriptions
+    )
 
-    moved = await policy.select(request.model_copy(update={"position": 7}))
-    assert moved.raw_decision["selection_seed"] != first.raw_decision["selection_seed"]
+    moved = await policy.select(request.model_copy(update={"position": 5}))
+    assert (
+        moved.raw_decision["selection_seed"] != selected.raw_decision["selection_seed"]
+    )
+
+    empty_graph = graph.model_copy(
+        update={
+            "edge_records": [],
+            "metadata": {
+                "current_node_id": "node-current",
+                "task_nodes": {"node-current": {"task_ids": ["task-current"]}},
+            },
+        }
+    )
+    empty_candidates = tuple(
+        candidate[0]
+        for candidate in graph_prior_candidates(
+            current_task_id="task-current",
+            snapshot=empty_graph,
+            artifacts=artifacts,
+        )
+    )
+    empty = await policy.select(
+        request.model_copy(update={"graph": empty_graph, "artifacts": empty_candidates})
+    )
+    assert empty.subscriptions == ()
+    assert empty.raw_decision["candidate_artifact_ids"] == ()
 
 
 @pytest.mark.asyncio
@@ -419,15 +535,18 @@ async def test_context_packer_supports_no_graph_and_records_exact_budget_state(
 ):
     artifact = _artifact("artifact-0", task_id="task-0", position=0)
     task = TaskProfile(task_id="task-1", instruction="next")
-    request = PolicyAgentRequest(
-        run_id="sample-1",
-        position=1,
-        policy_seed=7,
-        task=task,
-        graph=None,
-        artifacts=(artifact,),
+    policy = PolicyAgentResponse(
+        policy_name="langchain_graph",
+        subscriptions=(
+            DiffusionSubscription(
+                artifact=artifact,
+                policy_name="langchain_graph",
+                relation="test_selection",
+                reason="selected for packer test",
+            ),
+        ),
+        raw_decision={"selected_artifact_ids": (artifact.artifact_id,)},
     )
-    policy = await RandomPolicyAgent(max_artifacts=1).select(request)
     packer = DiffusionContextPacker(
         store=DiffusionStore(tmp_path / "diffusion"),
         model="openrouter/test/model",
@@ -444,7 +563,7 @@ async def test_context_packer_supports_no_graph_and_records_exact_budget_state(
     )
 
     assert context.snapshot_id is None
-    assert context.policy_name == "random_uniform"
+    assert context.policy_name == "langchain_graph"
     assert context.selected_artifact_ids == ("artifact-0",)
     assert context.rendered_artifact_ids == ("artifact-0",)
     assert context.source_task_ids == ("task-0",)
@@ -718,7 +837,7 @@ async def test_execution_adapter_forwards_complete_context_and_warmup_is_arm_neu
         run_id="sample-1",
         position=1,
         phase="orchestrated",
-        arm="no_graph",
+        arm="diffusion_only",
         task=TaskProfile(task_id="task-1", instruction="execute"),
         context=context,
     )
@@ -763,7 +882,7 @@ async def test_execution_adapter_redacts_and_cannot_override_canonical_metadata(
         run_id="sample-1",
         position=1,
         phase="orchestrated",
-        arm="no_graph",
+        arm="diffusion_only",
         task=TaskProfile(task_id="task-1", instruction="execute"),
         context=empty_context_pack().model_copy(
             update={"policy_name": "langchain_graph"}
@@ -773,7 +892,7 @@ async def test_execution_adapter_redacts_and_cannot_override_canonical_metadata(
     result = await ExplicitContextOrchestratorExecutionAgent(backend).execute(request)
 
     assert result.metadata["phase"] == "orchestrated"
-    assert result.metadata["arm"] == "no_graph"
+    assert result.metadata["arm"] == "diffusion_only"
     assert result.metadata["context_policy"] == "langchain_graph"
     assert "provenance-secret" not in result.model_dump_json()
     assert "nested-secret" not in result.model_dump_json()
@@ -815,12 +934,29 @@ def test_arm_plans_are_the_fixed_four_treatments():
     assert plan_for_arm(OrchestrationArm.EXECUTION_ONLY).model_dump(
         exclude={"schema_version", "arm"}
     ) == {
-        "use_graph_agent": False,
+        "graph_agent_enabled": False,
+        "diffusion_agent_enabled": False,
         "policy_component": "none",
         "pack_context": False,
     }
-    assert plan_for_arm(OrchestrationArm.RANDOM_POLICY).policy_component == (
-        "random_uniform"
+    assert (
+        plan_for_arm(OrchestrationArm.GRAPH_ONLY).policy_component == "random_uniform"
     )
-    assert plan_for_arm(OrchestrationArm.NO_GRAPH).use_graph_agent is False
-    assert plan_for_arm(OrchestrationArm.FULL_ORCHESTRATION).use_graph_agent is True
+    assert plan_for_arm(OrchestrationArm.DIFFUSION_ONLY).graph_agent_enabled is False
+    assert plan_for_arm(OrchestrationArm.FULL_ORCHESTRATION).graph_agent_enabled is True
+    assert (
+        arm_for_flags(graph_agent_enabled=False, diffusion_agent_enabled=False)
+        is OrchestrationArm.EXECUTION_ONLY
+    )
+    assert (
+        arm_for_flags(graph_agent_enabled=True, diffusion_agent_enabled=False)
+        is OrchestrationArm.GRAPH_ONLY
+    )
+    assert (
+        arm_for_flags(graph_agent_enabled=False, diffusion_agent_enabled=True)
+        is OrchestrationArm.DIFFUSION_ONLY
+    )
+    assert (
+        arm_for_flags(graph_agent_enabled=True, diffusion_agent_enabled=True)
+        is OrchestrationArm.FULL_ORCHESTRATION
+    )

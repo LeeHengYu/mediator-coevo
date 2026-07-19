@@ -1175,7 +1175,9 @@ def build_sample_runtime(
             fallback_strategy="none",
         )
     )
-    random_policy = RandomPolicyAgent(max_artifacts=artifact_cap)
+    random_policy = RandomPolicyAgent(
+        max_artifacts=int(config.diffusion.random_policy_max_artifacts)
+    )
     packer = DiffusionContextPacker(
         store=store,
         model=orchestrator.planner.llm_client.model,

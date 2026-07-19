@@ -12,6 +12,7 @@ from mediated_coevo.diffusion.models import (
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
+    TaskGraphEdgeRecord,
     TaskGraphSnapshot,
 )
 from mediated_coevo.diffusion.policy import DiffusionSubscription
@@ -63,15 +64,37 @@ class _GraphAgent:
                 task_ids.append(artifact.source_task_id)
         if request.task.task_id not in task_ids:
             task_ids.append(request.task.task_id)
+        current_node_id = request.task.task_id
+        source_task_ids = tuple(
+            dict.fromkeys(artifact.source_task_id for artifact in request.artifacts)
+        )
         return GraphAgentResponse(
             snapshot=TaskGraphSnapshot(
                 run_id="wrong-run" if self.wrong_run else request.run_id,
                 iteration=request.position,
                 task_ids=task_ids,
                 graph_policy="fake_graph",
-                metadata={"current_node_id": request.task.task_id},
+                edge_records=(
+                    [
+                        TaskGraphEdgeRecord(
+                            source_task_id=source_task_ids[0],
+                            target_task_id=current_node_id,
+                            relation="fake_transfer_prior",
+                            weight=1.0,
+                        )
+                    ]
+                    if source_task_ids
+                    else []
+                ),
+                metadata={
+                    "current_node_id": current_node_id,
+                    "task_nodes": {
+                        task_id: {"task_ids": [task_id]}
+                        for task_id in (*source_task_ids, current_node_id)
+                    },
+                },
             ),
-            raw_decision={"node_id": request.task.task_id},
+            raw_decision={"node_id": current_node_id},
         )
 
 
@@ -119,6 +142,7 @@ class _ContextPacker:
     wrong_candidates: bool = False
     mutate_inputs: bool = False
     calls: list[tuple[TaskProfile, PolicyAgentResponse]] = field(default_factory=list)
+    eligible_calls: list[tuple[DiffusionArtifact, ...]] = field(default_factory=list)
 
     async def pack(
         self,
@@ -133,6 +157,7 @@ class _ContextPacker:
         del run_id
         self.events.append(f"pack:{position}")
         self.calls.append((task, policy))
+        self.eligible_calls.append(eligible_artifacts)
         if self.fail:
             raise RuntimeError("packer exploded")
         if self.mutate_inputs:
@@ -442,8 +467,8 @@ async def test_warmup_is_arm_neutral_runs_once_and_suffix_sees_only_causal_bank(
     ("arm", "graph_calls", "diffusion_calls", "random_calls", "packer_calls"),
     [
         (OrchestrationArm.EXECUTION_ONLY, 0, 0, 0, 0),
-        (OrchestrationArm.RANDOM_POLICY, 0, 0, 3, 3),
-        (OrchestrationArm.NO_GRAPH, 0, 3, 0, 3),
+        (OrchestrationArm.GRAPH_ONLY, 3, 0, 3, 3),
+        (OrchestrationArm.DIFFUSION_ONLY, 0, 3, 0, 3),
         (OrchestrationArm.FULL_ORCHESTRATION, 3, 3, 0, 3),
     ],
 )
@@ -462,6 +487,7 @@ async def test_each_arm_invokes_exactly_its_declared_components(
     components.diffusion.calls.clear()
     components.random.calls.clear()
     components.packer.calls.clear()
+    components.packer.eligible_calls.clear()
 
     result = await components.runner.run(
         _spec(sequence, bundle, arm=arm),
@@ -472,8 +498,20 @@ async def test_each_arm_invokes_exactly_its_declared_components(
     assert len(components.diffusion.calls) == diffusion_calls
     assert len(components.random.calls) == random_calls
     assert len(components.packer.calls) == packer_calls
-    assert all(call.graph is None for call in components.random.calls)
-    if arm is OrchestrationArm.NO_GRAPH:
+    if arm is OrchestrationArm.GRAPH_ONLY:
+        assert all(call.graph is not None for call in components.random.calls)
+        assert components.packer.eligible_calls == [
+            call.artifacts for call in components.random.calls
+        ]
+        assert all(
+            len(policy_call.artifacts) < len(graph_call.artifacts)
+            for policy_call, graph_call in zip(
+                components.random.calls,
+                components.graph.calls,
+                strict=True,
+            )
+        )
+    if arm is OrchestrationArm.DIFFUSION_ONLY:
         assert all(call.graph is None for call in components.diffusion.calls)
     assert all(
         call.policy_seed == sequence.policy_seed for call in components.random.calls

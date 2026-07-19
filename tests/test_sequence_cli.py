@@ -39,21 +39,21 @@ def _repository() -> SkillFlowRepository:
 
 
 @pytest.mark.parametrize(
-    ("arm_args", "configured_arm", "expected_arm"),
+    ("agent_args", "expected_arm"),
     [
-        ([], OrchestrationArm.RANDOM_POLICY, OrchestrationArm.RANDOM_POLICY),
+        ([], OrchestrationArm.EXECUTION_ONLY),
+        (["--graph-agent"], OrchestrationArm.GRAPH_ONLY),
+        (["--diffusion-agent"], OrchestrationArm.DIFFUSION_ONLY),
         (
-            ["--arm", "execution_only"],
-            OrchestrationArm.RANDOM_POLICY,
-            OrchestrationArm.EXECUTION_ONLY,
+            ["--graph-agent", "--diffusion-agent"],
+            OrchestrationArm.FULL_ORCHESTRATION,
         ),
     ],
 )
 def test_sequence_runs_k_seeded_permutations(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    arm_args: list[str],
-    configured_arm: OrchestrationArm,
+    agent_args: list[str],
     expected_arm: OrchestrationArm,
 ) -> None:
     repository = _repository()
@@ -84,16 +84,10 @@ def test_sequence_runs_k_seeded_permutations(
         )
 
     def load_config(*args: Any, **kwargs: Any) -> SimpleNamespace:
-        selected_arm = OrchestrationArm(
-            kwargs["overrides"]["experiment"].get(
-                "orchestration_arm",
-                configured_arm.value,
-            )
-        )
+        assert "orchestration_arm" not in kwargs["overrides"]["experiment"]
         return SimpleNamespace(
             experiment=SimpleNamespace(
                 seed=0,
-                orchestration_arm=selected_arm,
             )
         )
 
@@ -133,7 +127,7 @@ def test_sequence_runs_k_seeded_permutations(
             "7",
             "-K",
             "3",
-            *arm_args,
+            *agent_args,
             "--output-dir",
             str(tmp_path),
             "--harness-dir",

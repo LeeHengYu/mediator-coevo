@@ -6,7 +6,7 @@ from .adapters import (
     LangChainTaskGraphAdapter,
     RandomPolicyAgent,
 )
-from .arms import ArmPlan, OrchestrationArm, plan_for_arm
+from .arms import ArmPlan, OrchestrationArm, arm_for_flags, plan_for_arm
 from .contracts import (
     ContextPacker,
     DiffusionPolicyAgent,
@@ -31,5 +31,6 @@ __all__ = [
     "PolicyAgentResponse",
     "RandomPolicyAgent",
     "TaskGraphAgent",
+    "arm_for_flags",
     "plan_for_arm",
 ]

@@ -160,45 +160,12 @@ def fallback_subscriptions(
     """Preserve the legacy deterministic fallback used by the facade."""
     if max_artifacts <= 0:
         return []
-    current_task_id = str(task_profile["task_id"])
-    task_nodes = dict(snapshot.metadata.get("task_nodes") or {})
-    current_node_id = str(snapshot.metadata.get("current_node_id") or current_task_id)
-    current_node = dict(task_nodes.get(current_node_id) or {})
-    same_node_task_ids = {current_task_id}
-    same_node_task_ids.update(
-        str(task_id) for task_id in current_node.get("task_ids", [])
-    )
-
-    node_by_task_id: dict[str, str] = {}
-    for node_id, node in task_nodes.items():
-        for task_id in dict(node).get("task_ids", []):
-            node_by_task_id[str(task_id)] = str(node_id)
-    incoming_weight_by_node = {
-        edge.source_task_id: edge.weight
-        for edge in snapshot.edge_records
-        if edge.target_task_id == current_node_id
-    }
-
     ranked: list[tuple[float, str, str, str, str, DiffusionArtifact]] = []
-    for artifact in artifacts:
-        source_node_id = node_by_task_id.get(artifact.source_task_id)
-        if artifact.source_task_id == current_task_id:
-            base_score = 300.0
-            relation = "same_task_prior"
-            reason = "fallback selected same-task artifact after empty agent selection"
-        elif artifact.source_task_id in same_node_task_ids:
-            base_score = 250.0
-            relation = "same_node_prior"
-            reason = "fallback selected same-node artifact after empty agent selection"
-        elif source_node_id in incoming_weight_by_node:
-            base_score = 100.0 + 100.0 * incoming_weight_by_node[source_node_id]
-            relation = "graph_prior_fallback"
-            reason = (
-                "fallback selected incoming graph-prior artifact after empty agent "
-                "selection"
-            )
-        else:
-            continue
+    for artifact, relation, reason, base_score in graph_prior_candidates(
+        current_task_id=str(task_profile["task_id"]),
+        snapshot=snapshot,
+        artifacts=artifacts,
+    ):
         score = base_score + artifact_quality_score(artifact)
         channel = (
             REUSE_SUCCESS_CHANNEL
@@ -229,6 +196,55 @@ def fallback_subscriptions(
         if len(subscriptions) >= max_artifacts:
             break
     return subscriptions
+
+
+def graph_prior_candidates(
+    *,
+    current_task_id: str,
+    snapshot: TaskGraphSnapshot,
+    artifacts: list[DiffusionArtifact] | tuple[DiffusionArtifact, ...],
+) -> list[tuple[DiffusionArtifact, str, str, float]]:
+    """Classify causal artifacts from the current node and incoming neighbors."""
+    task_nodes = dict(snapshot.metadata.get("task_nodes") or {})
+    current_node_id = str(snapshot.metadata.get("current_node_id") or current_task_id)
+    current_node = dict(task_nodes.get(current_node_id) or {})
+    same_node_task_ids = {current_task_id}
+    same_node_task_ids.update(
+        str(task_id) for task_id in current_node.get("task_ids", [])
+    )
+
+    node_by_task_id: dict[str, str] = {}
+    for node_id, node in task_nodes.items():
+        for task_id in dict(node).get("task_ids", []):
+            node_by_task_id[str(task_id)] = str(node_id)
+    incoming_weight_by_node = {
+        edge.source_task_id: edge.weight
+        for edge in snapshot.edge_records
+        if edge.target_task_id == current_node_id
+    }
+
+    candidates: list[tuple[DiffusionArtifact, str, str, float]] = []
+    for artifact in artifacts:
+        source_node_id = node_by_task_id.get(artifact.source_task_id)
+        if artifact.source_task_id == current_task_id:
+            base_score = 300.0
+            relation = "same_task_prior"
+            reason = "fallback selected same-task artifact after empty agent selection"
+        elif artifact.source_task_id in same_node_task_ids:
+            base_score = 250.0
+            relation = "same_node_prior"
+            reason = "fallback selected same-node artifact after empty agent selection"
+        elif source_node_id in incoming_weight_by_node:
+            base_score = 100.0 + 100.0 * incoming_weight_by_node[source_node_id]
+            relation = "graph_prior_fallback"
+            reason = (
+                "fallback selected incoming graph-prior artifact after empty agent "
+                "selection"
+            )
+        else:
+            continue
+        candidates.append((artifact, relation, reason, base_score))
+    return candidates
 
 
 def artifact_quality_score(artifact: DiffusionArtifact) -> float:

@@ -67,8 +67,8 @@ The four suffix arms are:
 | Arm | Components invoked |
 |---|---|
 | `execution_only` | task execution only; the bank updates but is never routed |
-| `random_policy` | deterministic uniform selection and context packing; no graph |
-| `no_graph` | diffusion-policy agent with `graph=None`, then context packing |
+| `graph_only` | task-graph agent, graph-constrained random selection, and context packing |
+| `diffusion_only` | diffusion-policy agent with `graph=None`, then context packing |
 | `full_orchestration` | task-graph agent, diffusion-policy agent, and context packing |
 
 All arms start from the same shared warm-up bank. Their suffix banks then
