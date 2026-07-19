@@ -1,23 +1,13 @@
-"""Skill store — SKILL.md files on disk.
-
-SKILL.md files on disk are the source of truth for skill content. Per-iteration
-version history is captured by `snapshot()` into `experiment_dir/skills_snapshots/`.
-Committed edit provenance is serialized through `IterationRecord` metrics and
-points back to history entries, proposal refs, and snapshots.
-"""
+"""Read-only store for fixed prompt-injected SKILL.md files."""
 
 from __future__ import annotations
 
 import hashlib
-import logging
-import shutil
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 
 
 class SkillStore:
-    """Manages SKILL.md files on disk."""
+    """Loads and validates immutable runtime skills."""
 
     ENTRYPOINT = "SKILL.md"
 
@@ -52,15 +42,6 @@ class SkillStore:
                 hashes[skill_name] = skill_hash
         return hashes
 
-    def write_skill(self, skill_name: str, content: str) -> Path:
-        """Write skill content to disk."""
-        skill_dir = self._skills_dir / skill_name
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_path = skill_dir / self.ENTRYPOINT
-        skill_path.write_text(content)
-        logger.info("Wrote skill: %s", skill_path)
-        return skill_path
-
     def list_skills(self) -> list[str]:
         """List skill directory names with canonical SKILL.md entrypoints."""
         return sorted(
@@ -93,28 +74,3 @@ class SkillStore:
                 f"Each skill directory must contain exactly one markdown "
                 f"entrypoint named {self.ENTRYPOINT}."
             )
-
-    def restore_skill(self, skill_name: str, snapshot_dir: Path) -> Path:
-        """Restore one skill from a snapshot directory and verify the hash."""
-        source_path = snapshot_dir / skill_name / self.ENTRYPOINT
-        if not source_path.is_file():
-            raise FileNotFoundError(f"Snapshot skill not found: {source_path}")
-        content = source_path.read_text()
-        expected_hash = self.content_hash(content)
-        restored_path = self.write_skill(skill_name, content)
-        restored_hash = self.skill_hash(skill_name)
-        if restored_hash != expected_hash:
-            raise RuntimeError(
-                f"Restored skill hash mismatch for {skill_name}: "
-                f"expected {expected_hash}, got {restored_hash}"
-            )
-        return restored_path
-
-    def snapshot(self, iteration: int, snapshot_dir: Path) -> Path:
-        """Copy the current skills/ directory into a versioned snapshot."""
-        dest = snapshot_dir / f"iter_{iteration:04d}"
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(self._skills_dir, dest)
-        logger.info("Skill snapshot saved: %s", dest)
-        return dest

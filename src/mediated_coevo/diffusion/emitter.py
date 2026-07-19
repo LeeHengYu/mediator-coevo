@@ -213,7 +213,7 @@ class DiffusionEmitter:
         label: str,
         budget_tokens: int | None,
     ) -> str:
-        from mediated_coevo.evolution.compactor import compact_text_for_context
+        from mediated_coevo.runtime.context_compactor import compact_text_for_context
 
         compacted = await compact_text_for_context(
             text,
@@ -257,7 +257,10 @@ class DiffusionEmitter:
         return metadata
 
     def _debug_hint_content(self, report_summary: str) -> str | None:
-        from mediated_coevo.evolution.compactor import TARGET_HEADLINE_CHARS, first_sentence
+        from mediated_coevo.runtime.context_compactor import (
+            TARGET_HEADLINE_CHARS,
+            first_sentence,
+        )
 
         headline = first_sentence(report_summary, TARGET_HEADLINE_CHARS).strip()
         if not headline:
@@ -386,4 +389,3 @@ def _reward_text(reward: float | None) -> str:
     if reward is None:
         return "n/a"
     return f"{reward:.2f}"
-

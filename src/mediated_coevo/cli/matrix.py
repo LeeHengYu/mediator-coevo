@@ -34,7 +34,6 @@ from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     get_baseline_preset,
 )
-from mediated_coevo.experiment.conditions import validate_experiment_design
 from mediated_coevo.experiment.runtime_factory import (
     build_benchmark_repo,
     build_matrix_runtimes,
@@ -68,22 +67,6 @@ def matrix(
             "Overrides experiment.seed."
         ),
     ),
-    coevo_interval: Annotated[
-        int | None,
-        typer.Option(
-            "--coevo-interval",
-            min=1,
-            help="Override experiment.coevo_interval for every matrix row.",
-        ),
-    ] = None,
-    advisor_buffer_max: Annotated[
-        int | None,
-        typer.Option(
-            "--advisor-buffer-max",
-            min=1,
-            help="Override experiment.advisor_buffer_max for every matrix row.",
-        ),
-    ] = None,
     diffusion_enabled: Annotated[
         bool | None,
         typer.Option(
@@ -175,24 +158,14 @@ def matrix(
     config_dir: Path = typer.Option(PROJECT_ROOT / "config", help="Config directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run the eight-row learned-mediator diffusion matrix."""
+    """Run the four-row fixed-skill diffusion matrix."""
     setup_logging(verbose)
     if list_rows:
         console.print("[bold]Matrix rows:[/]")
         for index, preset in enumerate(BASELINE_PRESETS):
-            skill_updates = preset.skill_updates.model_dump()
-            enabled_roles = [role for role, enabled in skill_updates.items() if enabled]
-            if not enabled_roles:
-                skill_update_label = "none"
-            elif len(enabled_roles) == len(skill_updates):
-                skill_update_label = "all"
-            else:
-                skill_update_label = ",".join(enabled_roles)
-
             console.print(
                 f"  {index}: {preset.name} "
-                f"(skill update: {skill_update_label}, "
-                f"diffusion policy: {preset.diffusion_policy}, "
+                f"(diffusion policy: {preset.diffusion_policy}, "
                 f"diffusion graph: {preset.diffusion_graph})",
                 soft_wrap=True,
             )
@@ -227,9 +200,6 @@ def matrix(
             iterations=iterations,
             seed=seed,
             condition=None,
-            skill_updates=None,
-            coevo_interval=coevo_interval,
-            advisor_buffer_max=advisor_buffer_max,
             diffusion_enabled=None,
             diffusion_policy=None,
             diffusion_graph=None,
@@ -238,13 +208,6 @@ def matrix(
             harbor_agent_setup_timeout_multiplier=None,
         ),
     )
-    for preset_name in preset_names:
-        preset = get_baseline_preset(preset_name)
-        validate_experiment_design(
-            condition=preset.condition_name,
-            skill_updates=preset.skill_updates,
-            baseline_preset=preset.name,
-        )
     prepare_llm_credentials_or_exit(config)
     ensure_harbor_available(config)
     repository = build_benchmark_repo(PROJECT_ROOT, config)
@@ -351,7 +314,6 @@ def matrix(
             "\n[bold green]Starting matrix row:[/] "
             f"{row.preset_name} "
             f"(condition={row_config.experiment.condition_name}, "
-            f"skill_updates={row_config.experiment.skill_updates.model_dump()}, "
             f"diffusion_enabled={row_config.diffusion.enabled}, "
             f"diffusion_policy={row_config.diffusion.policy}, "
             f"diffusion_graph={row_config.diffusion.graph})"
@@ -369,7 +331,6 @@ def matrix(
         annotate_judge_rewards_or_exit(
             data_dir=row.runtime.experiment_dir,
             config=row_config,
-            history_store=row.runtime.orchestrator.history_store,
         )
         if save_artifacts:
             destination = saved_store_root / row.runtime.experiment_dir.name

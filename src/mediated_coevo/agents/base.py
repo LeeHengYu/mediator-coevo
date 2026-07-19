@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class BaseAgent:
-    """Base class for all agents in the mediated co-evolution system."""
+    """Base class for prompt-driven experiment agents."""
 
     def __init__(self, name: str, llm_client: LLMClient) -> None:
         self._name = name

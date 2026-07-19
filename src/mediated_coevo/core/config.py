@@ -44,24 +44,14 @@ REQUIRED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("budgets", "historical_summary_tokens"),
     ("budgets", "mediator_report_tokens"),
     ("budgets", "planner_context_tokens"),
-    ("budgets", "skill_update_diff_tokens"),
     ("budgets", "mediator_prompt_tokens"),
-    ("budgets", "advisor_prompt_tokens"),
-    ("budgets", "reflector_prompt_tokens"),
     ("budgets", "judge_prompt_tokens"),
     ("budgets", "planner_completion_tokens"),
     ("budgets", "mediator_completion_tokens"),
-    ("budgets", "advisor_completion_tokens"),
-    ("budgets", "reflector_completion_tokens"),
     ("budgets", "judge_completion_tokens"),
     ("experiment", "num_iterations"),
-    ("experiment", "coevo_interval"),
     ("experiment", "seed"),
-    ("experiment", "advisor_buffer_max"),
     ("experiment", "condition_name"),
-    ("experiment", "skill_updates", "executor"),
-    ("experiment", "skill_updates", "planner"),
-    ("experiment", "skill_updates", "mediator"),
     ("diffusion", "enabled"),
     ("diffusion", "policy"),
     ("diffusion", "max_artifacts"),
@@ -76,24 +66,14 @@ CONFIG_CLI_HINTS: dict[str, str] = {
     "budgets.historical_summary_tokens": "config/default.toml",
     "budgets.mediator_report_tokens": "config/default.toml",
     "budgets.planner_context_tokens": "config/default.toml",
-    "budgets.skill_update_diff_tokens": "config/default.toml",
     "budgets.mediator_prompt_tokens": "config/default.toml",
-    "budgets.advisor_prompt_tokens": "config/default.toml",
-    "budgets.reflector_prompt_tokens": "config/default.toml",
     "budgets.judge_prompt_tokens": "config/default.toml",
     "budgets.planner_completion_tokens": "config/default.toml",
     "budgets.mediator_completion_tokens": "config/default.toml",
-    "budgets.advisor_completion_tokens": "config/default.toml",
-    "budgets.reflector_completion_tokens": "config/default.toml",
     "budgets.judge_completion_tokens": "config/default.toml",
     "experiment.num_iterations": "--iterations",
-    "experiment.coevo_interval": "--coevo-interval",
     "experiment.seed": "--seed",
-    "experiment.advisor_buffer_max": "--advisor-buffer-max",
     "experiment.condition_name": "--condition",
-    "experiment.skill_updates.executor": "--skill-updates",
-    "experiment.skill_updates.planner": "--skill-updates",
-    "experiment.skill_updates.mediator": "--skill-updates",
     "diffusion.enabled": "--diffusion-enabled/--no-diffusion-enabled",
     "diffusion.policy": "--diffusion-policy",
     "diffusion.graph": "--diffusion-graph",
@@ -145,15 +125,10 @@ class BudgetsConfig(BaseModel):
     historical_summary_tokens: int
     mediator_report_tokens: int
     planner_context_tokens: int
-    skill_update_diff_tokens: int
     mediator_prompt_tokens: int
-    advisor_prompt_tokens: int
-    reflector_prompt_tokens: int
     judge_prompt_tokens: int
     planner_completion_tokens: int
     mediator_completion_tokens: int
-    advisor_completion_tokens: int
-    reflector_completion_tokens: int
     judge_completion_tokens: int
 
     @property
@@ -165,26 +140,6 @@ class JudgeConfig(BaseModel):
     """LLM judge reward annotation settings."""
 
     rubric_version: str = "rar-v1"
-
-
-class SkillUpdateConfig(BaseModel):
-    """Independent permissions for committing each runtime skill family."""
-
-    executor: bool
-    planner: bool
-    mediator: bool
-
-
-class SkillValidationConfig(BaseModel):
-    """Empirical gate settings for executor skill candidates."""
-
-    min_mean_delta: float = 0.01
-    reward_tolerance: float = 1e-9
-    require_all_tasks_usable: bool = True
-    sample_size: int = 3
-    tasks: list[str] = Field(default_factory=list)
-    allow_contributing_fallback: bool = True
-    min_tag_overlap: int = 1
 
 
 class BenchmarkSelectionConfig(BaseModel):
@@ -200,14 +155,8 @@ class ExperimentConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     num_iterations: int
-    coevo_interval: int
     seed: int
-    advisor_buffer_max: int
     condition_name: ConditionName
-    skill_updates: SkillUpdateConfig
-    skill_validation: SkillValidationConfig = Field(
-        default_factory=SkillValidationConfig
-    )
     benchmark_selection: BenchmarkSelectionConfig = Field(
         default_factory=BenchmarkSelectionConfig
     )
@@ -241,7 +190,6 @@ class ExecutorRuntimeConfig(BaseModel):
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     agent_name: str = Field(default="hermes", min_length=1)
     agent_env: dict[str, str] = Field(default_factory=dict)
-    injected_skill_name: str = "executor"
     sync_enabled: bool = False
     dataset: str = Field(default=DEFAULT_SKILLFLOW_DATASET, min_length=1)
     dataset_repo_type: str = "dataset"

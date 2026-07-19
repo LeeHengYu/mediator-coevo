@@ -273,7 +273,6 @@ effect.
 | Issue | Impact |
 | --- | --- |
 | Seed1023 has no matching no-diffusion row. | Seed1023 cannot prove diffusion helped over no diffusion; it only compares diffusion policies and checks whether seed42 patterns repeat. |
-| Diffusion rows include one synthetic `__coevolution__` metrics row. | Synthetic rows are excluded from task denominators and token tables. |
 | Seed1023 random-k has one environment failure: `oncocooler_10v20` at iteration 2. | Raw means treat the failure as zero in the 27-run denominator; judge means are over judged rows. |
 | The seed42 no-diffusion row still records cross-task prior tokens. | Interpret "no diffusion" as no artifact diffusion, not as no prior context of any kind. |
 | Several context-budget violation flags appear even when visible transfer, same-task, and total-prior counts are below caps and no artifacts were dropped. | Budget flags should be audited before treating them as strict cap violations. |

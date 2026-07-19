@@ -19,19 +19,15 @@ from mediated_coevo.diffusion import (
     REUSE_SUCCESS_CHANNEL,
     TaskGraphSnapshot,
 )
-from mediated_coevo.experiment.conditions import get_executor_proposal_feedback
 from mediated_coevo.cli.config import _run_config_overrides
-from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace
-from mediated_coevo.evolution.executor_skill_gate import ExecutorSkillGate
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.agents.prompt_context import PlannerPriorContextBundle
 from mediated_coevo.runtime.token_budget import TokenBudgetExceeded, count_text_tokens
 from mediated_coevo.stores.artifact_store import ArtifactStore
-from mediated_coevo.stores.history_store import HistoryStore
 from tests.config_helpers import (
     budgets_config,
     diffusion_config,
@@ -198,13 +194,12 @@ class _PlannerLLM:
 class _Planner:
     def __init__(self) -> None:
         self.prior_contexts: dict[str, str | None] = {}
-        self.proposal_feedback: list[str] = []
         self.llm_client = _PlannerLLM()
 
     def set_skill_context(
         self,
         executor_skills: str,
-        skill_refiner: str | None = None,
+        planner_skill: str | None = None,
     ) -> None:
         pass
 
@@ -217,19 +212,9 @@ class _Planner:
         iteration: int = 0,
     ) -> TaskSpec:
         self.prior_contexts[task_id] = prior_context
-        return TaskSpec(task_id=task_id, instruction=base_instruction, iteration=iteration)
-
-    async def suggest_skill_revision(
-        self,
-        *,
-        current_skill_content: str,
-        feedback: str,
-        edit_history: list,
-        task_id: str,
-        iteration: int,
-    ):
-        self.proposal_feedback.append(feedback)
-        return None
+        return TaskSpec(
+            task_id=task_id, instruction=base_instruction, iteration=iteration
+        )
 
 
 class _Executor:
@@ -276,13 +261,6 @@ class _Mediator:
             return None
         return await self.process_trace(trace, task_context)
 
-    async def compact_feedback(
-        self,
-        report: MediatorReport,
-    ) -> MediatorSignal:
-        self.compact_calls += 1
-        return MediatorSignal(headline=report.exposed_content or "")
-
 
 class _TraceHistoryInspectingMediator:
     llm_client = _PlannerLLM()
@@ -324,15 +302,6 @@ class _WithholdingMediator:
             reasoning="not useful for planner",
         )
 
-    async def compact_feedback(
-        self,
-        report: MediatorReport,
-    ) -> MediatorSignal:
-        return MediatorSignal(
-            withheld=report.withheld,
-            mediator_reasoning=report.reasoning,
-        )
-
 
 class _FailingMediator:
     llm_client = _PlannerLLM()
@@ -370,10 +339,6 @@ class _LLMCompactor:
         return []
 
 
-class _Advisor:
-    llm_client = _PlannerLLM()
-
-
 class _FakeLangChainGraphPolicy:
     def __init__(self) -> None:
         self.artifact_ids_seen: list[str] = []
@@ -388,7 +353,9 @@ class _FakeLangChainGraphPolicy:
     ) -> LangChainGraphPolicyResult:
         self.artifact_ids_seen = [artifact.artifact_id for artifact in artifacts]
         selected = next(
-            artifact for artifact in artifacts if artifact.artifact_id == "old-same-task"
+            artifact
+            for artifact in artifacts
+            if artifact.artifact_id == "old-same-task"
         )
         return LangChainGraphPolicyResult(
             snapshot=TaskGraphSnapshot(
@@ -438,7 +405,9 @@ class _FixedGraphLangChainPolicy:
         self.selected_snapshot_id = snapshot.snapshot_id
         self.artifact_ids_seen = [artifact.artifact_id for artifact in artifacts]
         selected = next(
-            artifact for artifact in artifacts if artifact.artifact_id == "old-same-task"
+            artifact
+            for artifact in artifacts
+            if artifact.artifact_id == "old-same-task"
         )
         return LangChainGraphPolicyResult(
             snapshot=snapshot,
@@ -468,7 +437,6 @@ def _orchestrator(
     orch.mediator = mediator
     orch.skill_store = _SkillStore()
     orch.artifact_store = ArtifactStore(base_dir=tmp_path / "artifacts")
-    orch.history_store = HistoryStore(history_dir=tmp_path / "history")
     orch.benchmark_repo = _TaskRepo()
     orch.config = Config(
         models=models_config(),
@@ -479,138 +447,13 @@ def _orchestrator(
     orch.config.experiment.condition_name = condition
     orch.config.experiment.shared_notes = "shared note"
     orch.experiment_dir = tmp_path
-    orch.skill_advisor = _Advisor()
-    orch._proposal_buffer = []
     orch._previous_report_by_task = {}
     orch._released_cross_task_reports_by_task = {}
     orch._staged_cross_task_reports_by_task = {}
     orch._previous_reward_by_task = {}
     orch._prior_context_by_target = {}
     orch._diffusion_context_by_target = {}
-    orch.executor_skill_gate = ExecutorSkillGate(
-        config=orch.config,
-        skill_store=orch.skill_store,
-        history_store=orch.history_store,
-        planner=orch.planner,
-        skill_advisor=orch.skill_advisor,
-        executor=orch.executor,
-        benchmark_repo=orch.benchmark_repo,
-        artifact_store=orch.artifact_store,
-    )
     return orch, planner, mediator
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("condition", ["no_feedback", "shared_notes"])
-async def test_non_proposal_conditions_return_no_executor_proposal_feedback(
-    tmp_path,
-    condition,
-):
-    store = ArtifactStore(base_dir=tmp_path / "artifacts")
-    store.store_trace(ExecutionTrace(task_id="task-A", iteration=1, reward=0.5, status="ok"))
-    report = MediatorReport(task_id="task-A", iteration=1, content="mediator report")
-
-    feedback = await get_executor_proposal_feedback(
-        condition=condition,
-        task_id="task-A",
-        artifact_store=store,
-        mediator_report=report,
-        model="test-model",
-    )
-
-    assert feedback is None
-
-
-@pytest.mark.asyncio
-async def test_full_traces_returns_current_usable_trace_summary_for_proposal(
-    tmp_path,
-):
-    store = ArtifactStore(base_dir=tmp_path / "artifacts")
-    store.store_trace(ExecutionTrace(task_id="task-A", iteration=2, reward=0.2, status="ok"))
-    store.store_trace(ExecutionTrace(task_id="task-A", iteration=3, reward=0.5, status="ok"))
-
-    feedback = await get_executor_proposal_feedback(
-        condition="full_traces",
-        task_id="task-A",
-        artifact_store=store,
-        mediator_report=None,
-        model="test-model",
-    )
-
-    assert feedback is not None
-    assert "task-A" in feedback
-    assert "iter=3" in feedback
-    assert "reward=0.50" in feedback
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "trace",
-    [
-        ExecutionTrace(task_id="task-A", iteration=3, reward=None, status="env_failure"),
-        ExecutionTrace(task_id="task-A", iteration=3, reward=None, status="ok"),
-        ExecutionTrace(task_id="task-A", iteration=3, reward=0.4, status="harbor_failed"),
-    ],
-)
-async def test_full_traces_returns_no_proposal_feedback_for_unusable_trace(
-    tmp_path,
-    trace,
-):
-    store = ArtifactStore(base_dir=tmp_path / "artifacts")
-    store.store_trace(trace)
-
-    feedback = await get_executor_proposal_feedback(
-        condition="full_traces",
-        task_id="task-A",
-        artifact_store=store,
-        mediator_report=None,
-        model="test-model",
-    )
-
-    assert feedback is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("condition", ["static_mediator", "learned_mediator"])
-async def test_mediator_conditions_return_exposed_report_content_for_proposal(
-    tmp_path,
-    condition,
-):
-    store = ArtifactStore(base_dir=tmp_path / "artifacts")
-    report = MediatorReport(task_id="task-A", iteration=1, content="use this insight")
-
-    feedback = await get_executor_proposal_feedback(
-        condition=condition,
-        task_id="task-A",
-        artifact_store=store,
-        mediator_report=report,
-        model="test-model",
-    )
-
-    assert feedback == "use this insight"
-
-
-@pytest.mark.asyncio
-async def test_mediator_conditions_return_no_proposal_feedback_for_withheld_report(
-    tmp_path,
-):
-    store = ArtifactStore(base_dir=tmp_path / "artifacts")
-    report = MediatorReport(
-        task_id="task-A",
-        iteration=1,
-        content="hidden insight",
-        withheld=True,
-    )
-
-    feedback = await get_executor_proposal_feedback(
-        condition="learned_mediator",
-        task_id="task-A",
-        artifact_store=store,
-        mediator_report=report,
-        model="test-model",
-    )
-
-    assert feedback is None
 
 
 @pytest.mark.asyncio
@@ -900,41 +743,6 @@ async def test_prior_context_fit_uses_same_and_transfer_slots(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_iteration_full_traces_feeds_executor_proposal_from_current_trace(
-    tmp_path,
-):
-    orch, planner, _ = _orchestrator(tmp_path, "full_traces")
-    orch.config.experiment.skill_updates.executor = True
-
-    await orch._run_iteration("task-A", 1)
-
-    assert len(planner.proposal_feedback) == 1
-    assert "task-A" in planner.proposal_feedback[0]
-    assert "iter=1" in planner.proposal_feedback[0]
-    assert "reward=0.50" in planner.proposal_feedback[0]
-
-
-@pytest.mark.asyncio
-async def test_executor_proposal_skip_log_uses_proposal_feedback_wording(
-    tmp_path,
-    caplog,
-):
-    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.config.experiment.skill_updates.executor = True
-    caplog.set_level("INFO")
-
-    await orch._ask_planner_for_skill_proposal(
-        task_id="task-A",
-        iteration=0,
-        executor_skill="# Executor\n",
-        feedback=None,
-    )
-
-    assert "no proposal feedback" in caplog.text
-    assert "no mediator feedback" not in caplog.text
-
-
-@pytest.mark.asyncio
 async def test_mediator_history_excludes_current_trace(tmp_path):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
     orch.artifact_store.store_trace(
@@ -958,25 +766,6 @@ async def test_trace_is_stored_when_mediator_fails(tmp_path):
         await orch._run_iteration("task-A", 1)
 
     assert orch.artifact_store.load_trace("task-A", 1) is not None
-
-
-@pytest.mark.asyncio
-async def test_withheld_mediator_report_is_recorded_for_reflection(tmp_path):
-    orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
-    orch.mediator = _WithholdingMediator()
-
-    record = await orch._run_iteration("task-A", 1)
-
-    assert record.mediator_report is None
-    assert record.mediator_history_entry_id is not None
-    assert "task-A" not in orch._previous_report_by_task
-    entry = next(
-        item
-        for item in orch.history_store._entries
-        if item.entry_id == record.mediator_history_entry_id
-    )
-    assert isinstance(entry.payload, MediatorSignal)
-    assert entry.payload.withheld is True
 
 
 @pytest.mark.asyncio
@@ -1115,7 +904,9 @@ async def test_capped_broadcast_builds_diffused_cross_task_context(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_capped_broadcast_excludes_same_task_and_same_iteration_artifacts(tmp_path):
+async def test_capped_broadcast_excludes_same_task_and_same_iteration_artifacts(
+    tmp_path,
+):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "capped_broadcast"
@@ -1255,7 +1046,9 @@ async def test_random_k_excludes_same_task_and_same_iteration_artifacts(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(tmp_path):
+async def test_top_k_similarity_records_eligible_selected_and_transfer_metrics(
+    tmp_path,
+):
     orch, _, _ = _orchestrator(tmp_path, "learned_mediator")
     orch.config.diffusion.enabled = True
     orch.config.diffusion.policy = "top_k_similarity"
@@ -1438,9 +1231,7 @@ async def test_top_k_similarity_prepares_per_target_subscription_board(tmp_path)
         "task-C": "task-A",
     }
     assert all(
-        record.metadata.get("edge_rank") == 1
-        for record in records
-        if record.selected
+        record.metadata.get("edge_rank") == 1 for record in records if record.selected
     )
     assert sum(1 for record in records if record.eligible) == 6
     assert sum(1 for record in records if record.selected) == 3
@@ -1687,9 +1478,6 @@ def test_condition_assignment_and_cli_validation_reject_unknown_names():
             iterations=None,
             seed=None,
             condition="bad-condition",
-            skill_updates=None,
-            coevo_interval=None,
-            advisor_buffer_max=None,
             diffusion_enabled=None,
             diffusion_policy=None,
             diffusion_graph=None,
@@ -1702,9 +1490,6 @@ def test_condition_assignment_and_cli_validation_reject_unknown_names():
         iterations=None,
         seed=None,
         condition="no_feedback",
-        skill_updates=None,
-        coevo_interval=None,
-        advisor_buffer_max=None,
         diffusion_enabled=None,
         diffusion_policy=None,
         diffusion_graph=None,

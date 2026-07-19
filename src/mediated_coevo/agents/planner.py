@@ -1,38 +1,28 @@
-"""Planner agent — Claude.
-
-Plans tasks for the Executor and decides skill updates based on
-feedback from the Mediator (or raw traces, depending on condition).
-"""
+"""Planner agent with a fixed prompt-injected planning skill."""
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mediated_coevo.evolution.candidates import candidate_from_mapping
 from mediated_coevo.prompt_text import PromptText
 
 from .base import BaseAgent
 from .prompt_context import PromptSection
-from .prompt_sections import select_markdown_sections
 
 if TYPE_CHECKING:
-    from mediated_coevo.core.config import BudgetsConfig, SkillUpdateConfig
+    from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
-    from mediated_coevo.models.skill import SkillProposal, SkillUpdateCandidate
     from mediated_coevo.models.task import TaskSpec
-    from mediated_coevo.stores.history_store import HistoryEntry
 
 logger = logging.getLogger(__name__)
 
 PLANNER_SYSTEM_PROMPT = PromptText.PLANNER_SYSTEM
 PLAN_RESPONSE_SCHEMA = PromptText.PLAN_RESPONSE_SCHEMA
-UPDATE_RESPONSE_SCHEMA = PromptText.UPDATE_RESPONSE_SCHEMA
-UPDATE_BATCH_RESPONSE_SCHEMA = PromptText.UPDATE_BATCH_RESPONSE_SCHEMA
 
 
 class PlannerAgent(BaseAgent):
-    """Claude-backed planner. Plans tasks and decides skill updates."""
+    """Claude-backed planner using immutable prompt-injected skills."""
 
     def __init__(
         self,
@@ -40,10 +30,9 @@ class PlannerAgent(BaseAgent):
     ) -> None:
         super().__init__("planner", llm_client)
         self._skill_context: str | None = None
-        self._skill_refiner: str | None = None
+        self._planner_skill: str | None = None
         self._budgets: BudgetsConfig | None = None
         self._condition_name: str | None = None
-        self._skill_updates: SkillUpdateConfig | None = None
 
     def configure_token_budget(
         self,
@@ -55,18 +44,11 @@ class PlannerAgent(BaseAgent):
         self._condition_name = condition_name
 
     def set_skill_context(
-        self, executor_skills: str, skill_refiner: str | None = None
+        self, executor_skills: str, planner_skill: str | None = None
     ) -> None:
-        """Inject executor skills and planner's own skill-refiner guidance.
-
-        Called by the orchestrator before process().
-        """
+        """Inject the fixed Planner and Executor skills as prompt context."""
         self._skill_context = executor_skills or None
-        self._skill_refiner = skill_refiner or None
-
-    def configure_skill_updates(self, skill_updates: SkillUpdateConfig) -> None:
-        """Configure which update-specific prompt sections are relevant."""
-        self._skill_updates = skill_updates
+        self._planner_skill = planner_skill or None
 
     def _append_budgeted_system_context(
         self,
@@ -103,28 +85,19 @@ class PlannerAgent(BaseAgent):
         ]
 
         model = self.llm_client.model
-        action = str(context.get("action", "plan_task"))
-
-        # Skill injection — separate system messages like OpenSpace
-        skill_refiner_prompt = self._skill_refiner_prompt(action)
-        if skill_refiner_prompt:
+        if self._planner_skill:
             self._append_budgeted_system_context(
                 messages,
-                heading=skill_refiner_prompt["heading"],
-                description=skill_refiner_prompt["description"],
-                content=skill_refiner_prompt["content"],
+                heading=PromptText.PLANNER_SKILL_HEADING,
+                description=PromptText.PLANNER_SKILL_DESCRIPTION,
+                content=self._planner_skill,
             )
 
         if self._skill_context:
-            skill_context_description = (
-                PromptText.EXECUTOR_SKILL_EDITABLE_DESCRIPTION
-                if self._executor_skill_updates_enabled()
-                else PromptText.EXECUTOR_SKILL_READ_ONLY_DESCRIPTION
-            )
             self._append_budgeted_system_context(
                 messages,
                 heading=PromptText.EXECUTOR_ACTIVE_SKILLS_HEADING,
-                description=skill_context_description,
+                description=PromptText.EXECUTOR_SKILL_READ_ONLY_DESCRIPTION,
                 content=self._skill_context,
             )
 
@@ -132,62 +105,6 @@ class PlannerAgent(BaseAgent):
         user_content = self._build_user_prompt(context, model=model, budget=user_budget)
         messages.append({"role": "user", "content": user_content})
         return messages
-
-    def _skill_refiner_prompt(self, action: str) -> dict[str, str] | None:
-        if not self._skill_refiner:
-            return None
-
-        content = self._skill_refiner_content_for_action(action)
-        if not content:
-            return None
-
-        if action in {"update_skill", "update_skill_batch"}:
-            return {
-                "heading": PromptText.SKILL_REFINER_UPDATE_HEADING,
-                "description": PromptText.SKILL_REFINER_UPDATE_DESCRIPTION,
-                "content": content,
-            }
-
-        if self._executor_skill_updates_enabled():
-            description = PromptText.SKILL_REFINER_PLANNING_WITH_UPDATES_DESCRIPTION
-        else:
-            description = PromptText.SKILL_REFINER_PLANNING_READ_ONLY_DESCRIPTION
-        return {
-            "heading": PromptText.SKILL_REFINER_PLANNING_HEADING,
-            "description": description,
-            "content": content,
-        }
-
-    def _skill_refiner_content_for_action(self, action: str) -> str | None:
-        if not self._skill_refiner:
-            return None
-        if action in {"update_skill", "update_skill_batch"}:
-            if not self._executor_skill_updates_enabled():
-                return None
-            return select_markdown_sections(
-                self._skill_refiner,
-                [
-                    "Guidelines for Updating Executor Skills",
-                    "Executor Skill Update Criteria",
-                    "Artifact-Contract Thinking",
-                ],
-            )
-
-        plan_sections = [
-            "Task Planning Guidelines",
-            "Artifact-Contract Thinking",
-        ]
-        if self._executor_skill_updates_enabled():
-            plan_sections.extend(
-                [
-                    "Guidelines for Updating Executor Skills",
-                    "Executor Skill Update Criteria",
-                ]
-            )
-        return select_markdown_sections(self._skill_refiner, plan_sections)
-
-    def _executor_skill_updates_enabled(self) -> bool:
-        return self._skill_updates is None or self._skill_updates.executor
 
     def _user_prompt_budget(
         self,
@@ -223,24 +140,6 @@ class PlannerAgent(BaseAgent):
         if action == "plan_task":
             return self._build_plan_prompt(
                 context,
-                model=model,
-                budgets=self._budgets,
-                budget=budget,
-            )
-        if action == "update_skill":
-            return self._build_update_prompt(
-                context,
-                response_schema=PromptText.UPDATE_RESPONSE_SCHEMA,
-                batch_mode=False,
-                model=model,
-                budgets=self._budgets,
-                budget=budget,
-            )
-        if action == "update_skill_batch":
-            return self._build_update_prompt(
-                context,
-                response_schema=PromptText.UPDATE_BATCH_RESPONSE_SCHEMA,
-                batch_mode=True,
                 model=model,
                 budgets=self._budgets,
                 budget=budget,
@@ -312,7 +211,7 @@ class PlannerAgent(BaseAgent):
         if not self._budgets:
             return base_instruction
 
-        from mediated_coevo.evolution.compactor import compact_text_for_context
+        from mediated_coevo.runtime.context_compactor import compact_text_for_context
         from mediated_coevo.runtime.token_budget import count_text_tokens
 
         model = self.llm_client.model
@@ -334,108 +233,6 @@ class PlannerAgent(BaseAgent):
             condition_name=self._condition_name,
         )
         return PromptText.compacted_benchmark_instruction(compacted)
-
-    async def suggest_skill_revision(
-        self,
-        current_skill_content: str,
-        feedback: str | None,
-        edit_history: list[HistoryEntry],
-        task_id: str = "",
-        iteration: int = 0,
-    ) -> SkillProposal | None:
-        """Propose a skill update without writing to disk.
-
-        Returns a SkillProposal for the advisor buffer, or None if the
-        Planner decides no change is needed.
-        """
-        from mediated_coevo.models.history_signals import PlannerSignal
-        from mediated_coevo.models.skill import SkillProposal
-
-        context: dict[str, Any] = {
-            "action": "update_skill",
-            "current_skill": current_skill_content,
-            "feedback": feedback,
-            "edit_history": [
-                {
-                    "iteration": e.iteration,
-                    "reasoning": (
-                        e.payload.reasoning
-                        if isinstance(e.payload, PlannerSignal)
-                        else ""
-                    ),
-                    "reward": e.reward,
-                }
-                for e in edit_history[-5:]
-            ],
-        }
-        result = await self.process(context)
-        parsed = result["parsed"]
-
-        if parsed.get("no_update") or parsed.get("error"):
-            return None
-
-        new_content = parsed.get("new_content", "")
-        if not new_content:
-            return None
-
-        return SkillProposal(
-            iteration=iteration,
-            task_id=task_id,
-            old_content=current_skill_content,
-            new_content=new_content,
-            reasoning=parsed.get("reasoning", ""),
-        )
-
-    async def suggest_skill_revision_batch(
-        self,
-        current_skill_content: str,
-        feedback: str | None,
-        edit_history: list[HistoryEntry],
-        rejected_update_history: list[dict[str, Any]] | None = None,
-        *,
-        skill_id: str,
-        task_ids: list[str],
-        iteration: int = 0,
-    ) -> list[SkillUpdateCandidate]:
-        """Propose multiple candidate skill updates without writing to disk."""
-        from mediated_coevo.models.history_signals import PlannerSignal
-
-        context: dict[str, Any] = {
-            "action": "update_skill_batch",
-            "current_skill": current_skill_content,
-            "feedback": feedback,
-            "task_ids": task_ids,
-            "edit_history": [
-                {
-                    "iteration": e.iteration,
-                    "reasoning": (
-                        e.payload.reasoning
-                        if isinstance(e.payload, PlannerSignal)
-                        else ""
-                    ),
-                    "reward": e.reward,
-                }
-                for e in edit_history[-5:]
-            ],
-        }
-        if rejected_update_history:
-            context["rejected_update_history"] = rejected_update_history[-5:]
-        result = await self.process(context)
-        parsed = result["parsed"]
-        raw_candidates = parsed.get("candidates")
-        if not isinstance(raw_candidates, list):
-            return []
-
-        candidates: list[SkillUpdateCandidate] = []
-        for raw_candidate in raw_candidates:
-            candidate = candidate_from_mapping(
-                raw_candidate,
-                skill_id=skill_id,
-                current_skill=current_skill_content,
-            )
-            if candidate is not None:
-                candidates.append(candidate)
-        return candidates
 
     # ── Prompt builders ──
 
@@ -522,84 +319,3 @@ class PlannerAgent(BaseAgent):
                 required=True,
             ),
         )
-
-    @staticmethod
-    def _build_update_prompt(
-        context: dict[str, Any],
-        *,
-        response_schema: str,
-        batch_mode: bool,
-        model: str = "",
-        budgets: BudgetsConfig | None = None,
-        budget: int | None = None,
-    ) -> str:
-        if budgets and budget:
-            from mediated_coevo.runtime.token_budget import BudgetSection, pack_sections
-
-            sections = [
-                BudgetSection(
-                    "current_skill",
-                    PromptText.current_skill(context.get("current_skill", "(none)")),
-                    required=True,
-                    max_tokens=budgets.max_skill_tokens,
-                    overflow_strategy="section_pack",
-                )
-            ]
-            if feedback := context.get("feedback"):
-                sections.append(
-                    BudgetSection(
-                        "execution_feedback",
-                        PromptText.execution_feedback(feedback),
-                        max_tokens=budgets.mediator_report_tokens,
-                        overflow_strategy="section_pack",
-                    )
-                )
-            if batch_mode and (task_ids := context.get("task_ids")):
-                sections.append(
-                    BudgetSection(
-                        "candidate_scope",
-                        PromptText.candidate_scope(task_ids),
-                        overflow_strategy="section_pack",
-                    )
-                )
-            if history := context.get("edit_history"):
-                sections.append(
-                    BudgetSection(
-                        "recent_edit_history",
-                        PromptText.recent_edit_history(history),
-                        max_tokens=budgets.historical_summary_tokens,
-                        overflow_strategy="section_pack",
-                    )
-                )
-            if rejected_history := context.get("rejected_update_history"):
-                sections.append(
-                    BudgetSection(
-                        "rejected_update_history",
-                        PromptText.rejected_skill_updates(rejected_history),
-                        max_tokens=budgets.historical_summary_tokens,
-                        overflow_strategy="section_pack",
-                    )
-                )
-            sections.append(
-                BudgetSection(
-                    "response_schema",
-                    response_schema,
-                    required=True,
-                    overflow_strategy="section_pack",
-                )
-            )
-            return pack_sections(model, sections, budget)
-
-        parts = [
-            PromptText.current_skill(context.get("current_skill", "(none)")),
-        ]
-        if feedback := context.get("feedback"):
-            parts.append(f"\n{PromptText.execution_feedback(feedback)}")
-        if batch_mode and (task_ids := context.get("task_ids")):
-            parts.append(f"\n{PromptText.candidate_scope(task_ids)}")
-        if history := context.get("edit_history"):
-            parts.append(f"\n{PromptText.recent_edit_history(history)}")
-        if rejected_history := context.get("rejected_update_history"):
-            parts.append(f"\n{PromptText.rejected_skill_updates(rejected_history)}")
-        parts.append(f"\n{response_schema}")
-        return "\n".join(parts)

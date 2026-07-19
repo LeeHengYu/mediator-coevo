@@ -45,9 +45,7 @@ async def test_explicit_context_seam_bypasses_legacy_discovery_and_emission(
         context=context,
     )
 
-    assert planner.prior_contexts == {
-        "task-A": "causally selected transfer context"
-    }
+    assert planner.prior_contexts == {"task-A": "causally selected transfer context"}
     assert record.diffusion_enabled is True
     assert record.diffusion_policy == "langchain_diffusion_policy"
     assert record.diffusion_graph == "langchain_graph"
@@ -128,47 +126,13 @@ async def test_explicit_context_executes_the_frozen_task_occurrence(
         position=0,
     )
     assert provenance["judge_reward"] == 0.5
-    assert orchestrator.take_explicit_execution_provenance(
-        task_id="task-A",
-        position=0,
-    ) == {}
-
-
-@pytest.mark.asyncio
-async def test_explicit_context_skips_legacy_history_and_skill_update_pipeline(
-    tmp_path,
-    monkeypatch,
-):
-    orchestrator, _, _ = _orchestrator(tmp_path, "learned_mediator")
-
-    async def forbidden_async(*args, **kwargs):
-        raise AssertionError("legacy history or skill-update path was called")
-
-    def forbidden_sync(*args, **kwargs):
-        raise AssertionError("legacy history path was called")
-
-    monkeypatch.setattr(
-        "mediated_coevo.experiment.orchestrator.get_executor_proposal_feedback",
-        forbidden_async,
+    assert (
+        orchestrator.take_explicit_execution_provenance(
+            task_id="task-A",
+            position=0,
+        )
+        == {}
     )
-    monkeypatch.setattr(orchestrator, "_ask_planner_for_skill_proposal", forbidden_async)
-    monkeypatch.setattr(orchestrator, "_record_history_entries", forbidden_async)
-    monkeypatch.setattr(
-        orchestrator.executor_skill_gate,
-        "review_and_patch",
-        forbidden_async,
-    )
-    monkeypatch.setattr(orchestrator.history_store, "tag_outcome", forbidden_sync)
-
-    record = await orchestrator.execute_task_with_context(
-        task_id="task-A",
-        position=0,
-        task=TaskProfile(task_id="task-A", instruction="frozen"),
-        context=empty_context_pack(),
-    )
-
-    assert record.history_entry_ids == {}
-    assert record.skill_update is None
 
 
 @pytest.mark.asyncio
@@ -289,7 +253,7 @@ async def test_explicit_trace_is_portable_before_later_stage_failure(
             context=empty_context_pack(),
         )
 
-    trace_text = next(
-        (tmp_path / "artifacts" / "traces").glob("*.json")
-    ).read_text(encoding="utf-8")
+    trace_text = next((tmp_path / "artifacts" / "traces").glob("*.json")).read_text(
+        encoding="utf-8"
+    )
     assert str(external.resolve()) not in trace_text

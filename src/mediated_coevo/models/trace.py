@@ -14,10 +14,10 @@ from pydantic import BaseModel, Field
 #                   itself never assigns this — a parsed-but-low reward stays "ok".
 #   env_failure   — Missing/unparseable artifact, missing trial dir, or harbor
 #                   binary not found. Reward is unreliable; downstream consumers
-#                   should NOT feed this into mediator/skill-update channels.
+#                   should NOT feed this into mediation or diffusion.
 #   parse_error   — A reward source was present but its content was malformed.
 #   harbor_failed — Harbor subprocess returned non-zero. Reward may or may not
-#                   be present; treat as env_failure for co-evolution signal.
+#                   be present; treat as an environment failure.
 TraceStatus = Literal[
     "ok", "task_failed", "env_failure", "parse_error", "harbor_failed"
 ]
@@ -56,5 +56,5 @@ class ExecutionTrace(BaseModel):
 
     @property
     def is_usable_feedback_signal(self) -> bool:
-        """True when the trace can safely feed mediation and skill updates."""
+        """True when the trace can safely feed mediation and diffusion."""
         return self.status == "ok" and self.reward is not None

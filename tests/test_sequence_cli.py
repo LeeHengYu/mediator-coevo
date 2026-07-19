@@ -215,7 +215,11 @@ def test_sequence_validates_length_before_runtime_preflight(
 )
 def test_sequence_rejects_invalid_cli_task_counts(kwargs: dict[str, int]) -> None:
     with pytest.raises(typer.BadParameter):
-        sequence_module.sequence(family=list(_FAMILIES), **kwargs)
+        sequence_module.sequence(
+            family=list(_FAMILIES),
+            length=kwargs.get("length"),
+            warmup=kwargs.get("warmup"),
+        )
 
 
 def test_sequence_config_defaults_and_requires_a_suffix() -> None:

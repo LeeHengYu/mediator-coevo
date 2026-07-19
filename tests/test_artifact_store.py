@@ -1,4 +1,5 @@
 """Tests for ArtifactStore idempotency guard."""
+
 import json
 
 import pytest
@@ -6,7 +7,6 @@ import pytest
 from mediated_coevo.stores.artifact_store import ArtifactStore
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillUpdate, SkillUpdateLedgerEntry
 
 
 def test_store_trace_first_write_succeeds(tmp_path):
@@ -111,43 +111,3 @@ def test_query_traces_skips_malformed_json_after_filtering(tmp_path, caplog):
 
     assert [trace.iteration for trace in traces] == [0]
     assert "Failed to load ExecutionTrace" in caplog.text
-
-
-def test_store_skill_update_writes_update_diff_and_history(tmp_path):
-    store = ArtifactStore(base_dir=tmp_path)
-    update = SkillUpdate(
-        skill_id="executor",
-        task_id="task-a",
-        iteration=2,
-        old_content="# Executor\n\nold rule\n",
-        new_content="# Executor\n\nnew rule\n",
-        reasoning="tighten the rule",
-    )
-
-    update_path, diff_path = store.store_skill_update("iter0002-executor", update)
-    history_path = store.append_skill_update_history(
-        SkillUpdateLedgerEntry(
-            update_id="iter0002-executor",
-            iteration=2,
-            skill_id="executor",
-            record_task_id="task-a",
-            update_task_id="task-a",
-            artifact_path="artifacts/skill_updates/iter0002-executor/update.json",
-            diff_path="artifacts/skill_updates/iter0002-executor/changes.diff",
-        )
-    )
-
-    assert update_path == (
-        tmp_path / "skill_updates" / "iter0002-executor" / "update.json"
-    )
-    assert diff_path == (
-        tmp_path / "skill_updates" / "iter0002-executor" / "changes.diff"
-    )
-    assert "-old rule" in diff_path.read_text()
-    assert "+new rule" in diff_path.read_text()
-    history_rows = [json.loads(line) for line in history_path.read_text().splitlines()]
-    assert history_rows[0]["update_id"] == "iter0002-executor"
-    assert history_rows[0]["artifact_path"].endswith("update.json")
-
-    with pytest.raises(FileExistsError):
-        store.store_skill_update("iter0002-executor", update)

@@ -234,7 +234,6 @@ def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None
         destination_root=tmp_path / "runs",
         planner_instruction="Do the planned work.",
         injected_skill_text="# Executor policy\n",
-        injected_skill_name="executor",
     )
 
     instruction = (run_dir / "instruction.md").read_text()

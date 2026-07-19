@@ -1,1 +1,1 @@
-"""CLI helpers for mediated co-evolution."""
+"""CLI helpers for fixed-skill mediated experiments."""

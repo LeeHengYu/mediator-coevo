@@ -5,7 +5,7 @@ import pytest
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.core.config import Config
-from mediated_coevo.evolution.compactor import compact_text_for_context
+from mediated_coevo.runtime.context_compactor import compact_text_for_context
 from mediated_coevo.experiment.conditions import get_prior_context
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
@@ -326,7 +326,9 @@ def test_mediator_prompt_preserves_required_task_context_after_trace_truncation(
 
     assert "KEEP_REQUIRED_TASK_CONTEXT" in user_content
     assert "## Task Context" in user_content
-    assert count_text_tokens("test-model", user_content) <= budgets.mediator_prompt_tokens
+    assert (
+        count_text_tokens("test-model", user_content) <= budgets.mediator_prompt_tokens
+    )
 
 
 @pytest.mark.asyncio
@@ -491,7 +493,7 @@ def test_planner_constructed_prompt_fits_budget():
     planner.configure_token_budget(config.budgets, condition_name="learned_mediator")
     planner.set_skill_context(
         executor_skills="# Skill\n" + ("tool guidance " * 300),
-        skill_refiner="# Refiner\n" + ("edit guidance " * 300),
+        planner_skill="# Planner\n" + ("planning guidance " * 300),
     )
 
     messages = planner.construct_messages(
@@ -532,7 +534,7 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
     planner.configure_token_budget(config.budgets, condition_name="learned_mediator")
     planner.set_skill_context(
         executor_skills="# Skill\n" + ("tool guidance " * 300),
-        skill_refiner="# Refiner\n" + ("edit guidance " * 300),
+        planner_skill="# Planner\n" + ("planning guidance " * 300),
     )
     compact_calls = []
 
@@ -554,7 +556,7 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
         }
 
     monkeypatch.setattr(
-        "mediated_coevo.evolution.compactor.compact_text_for_context",
+        "mediated_coevo.runtime.context_compactor.compact_text_for_context",
         _fake_compact_text_for_context,
     )
     monkeypatch.setattr(planner, "process", _fake_process)
@@ -570,13 +572,12 @@ async def test_planner_compacts_large_benchmark_instruction_before_prompting(
     assert compact_calls
     assert "required issue text" in compact_calls[0][0]
     assert (
-        compact_calls[0][1]["label"]
-        == "benchmark instruction for large-skillflow-task"
+        compact_calls[0][1]["label"] == "benchmark instruction for large-skillflow-task"
     )
     assert "COMPACTED ISSUE SIGNAL" in task_spec.instruction
 
 
-def test_planner_routes_plan_and_update_prompt_context_separately():
+def test_planner_ignores_removed_update_actions():
     planner = PlannerAgent(LLMClient(model="test-model"))
 
     plan_prompt = message_text(
@@ -630,17 +631,14 @@ def test_planner_routes_plan_and_update_prompt_context_separately():
             "SHOULD_NOT_APPEAR",
         ],
     )
-    assert_contains_all(
+    assert_omits_all(
         update_prompt,
         [
             "## Execution Feedback",
-            "source_task=task-A iter=1 reward=0.90 OK",
             "## Recent Edit History",
+            "reward=0.90",
+            "## Feedback from previous execution",
         ],
-    )
-    assert_omits_all(
-        update_prompt,
-        ["Plan a task for task_id", "## Feedback from previous execution"],
     )
 
 
@@ -667,7 +665,6 @@ def test_iteration_record_serializes_llm_token_events_and_total_tokens():
         llm_token_events=[event],
         condition_name="learned_mediator",
         skill_hashes={"executor": "abc123"},
-        skill_version="iter_0000",
     )
     dumped = record.model_dump()
 
@@ -676,4 +673,4 @@ def test_iteration_record_serializes_llm_token_events_and_total_tokens():
     assert dumped["llm_token_events"][0]["prompt_tokens"] == 11
     assert dumped["llm_token_events"][0]["budget_limit"] == 100
     assert dumped["skill_hashes"] == {"executor": "abc123"}
-    assert dumped["skill_version"] == "iter_0000"
+    assert "skill_version" not in dumped

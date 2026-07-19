@@ -1,148 +1,122 @@
-# Diffusion-First Motivation for the Mediator-Coevo Report
+# Experience-Diffusion Motivation
 
-## Purpose of this note
+## Purpose
 
-This note reframes the report around **experience diffusion** as the primary scientific object, while treating **skill updates** as an auxiliary downstream mechanism. This framing matches the current context-only experiments where executor, planner, and mediator skill updates are disabled, so observed performance changes should not be attributed to durable skill learning.
+This note frames experience diffusion as the primary scientific object. The
+Planner, Executor, and Mediator use fixed policies throughout every run, so the
+experiment isolates temporary contextual transfer from policy differences.
 
-## Core motivation
+## Core Motivation
 
-LLM agents often execute tasks episodically: a useful failure mode, debug hint, or partial success from one task does not automatically inform later attempts on related tasks. The central motivation of this project is to test whether prior task experience can be preserved, selected, and routed into later planning contexts in a controlled way.
+LLM agents often execute tasks episodically: a useful failure signature, debug
+hint, or partial success from one task does not automatically inform later
+attempts on related tasks. This project tests whether prior task experience can
+be preserved, selected, and routed into later planning contexts in a controlled
+way.
 
-In this framing, diffusion is a mechanism for **cross-task contextual transfer**:
+Diffusion provides cross-task contextual transfer:
 
-1. A source task runs and produces execution evidence.
-2. The system emits compact artifacts from that evidence, such as run outcomes, debug hints, mediator summaries, or regression warnings.
-3. A diffusion policy selects which prior artifacts are eligible for a later target task.
-4. The selected artifacts are rendered into the Planner's context under provenance and token-budget constraints.
-5. The target task is attempted with the same fixed skills, but with potentially more useful prior context.
+1. A source task produces execution evidence.
+2. The runtime emits compact artifacts from that evidence.
+3. A policy selects causally eligible artifacts for a later target task.
+4. Selected artifacts enter the Planner context under provenance and token
+   budgets.
+5. The target task runs with the same fixed skills and potentially more useful
+   context.
 
-The main question is therefore:
+The central question is:
 
-> Holding agent skills fixed, can graph-aware diffusion of prior task experience improve later agent performance compared with no diffusion, broadcast diffusion, or random diffusion?
+> Holding agent policies fixed, can graph-aware diffusion of prior task
+> experience improve later performance compared with execution only,
+> graph-constrained random selection, or learned selection without a graph?
 
-## Why skill updates should be auxiliary in the current report
+## Recommended Thesis
 
-Skill updates remain important to the broader mediated co-evolution agenda, but they should not be the primary claim for the current report if the experiments disable skill updates.
+> This report studies graph-aware experience diffusion for fixed-policy LLM
+> agents. It asks whether selected artifacts from prior task executions improve
+> later planning under causal, provenance, and token-budget constraints.
 
-When skill updates are disabled:
+## Contribution Framing
 
-- the executor, planner, and mediator `SKILL.md` policies remain fixed during the run;
-- any performance movement comes from task context, prior feedback, diffusion artifacts, stochasticity, or execution effects;
-- the report can isolate whether routed cross-task context is useful before introducing durable policy rewriting.
+1. **Fixed-policy context-transfer evaluation.** All arms use identical role
+   skills, isolating routed context and execution effects.
+2. **Graph-aware artifact routing.** The system can build a task graph and route
+   prior artifacts through deterministic or learned policies.
+3. **Causal sample construction.** A target position sees only artifacts from
+   earlier positions; its own artifacts enter the bank after execution.
+4. **Validity-aware observability.** Archives record source tasks, source
+   positions, eligible/selected/rendered artifacts, budgets, and dropped input.
+5. **Matched four-arm comparison.** Independent graph-agent and
+   diffusion-agent flags create execution-only, graph-only, diffusion-only, and
+   full-orchestration settings.
 
-This is a strength, not a weakness. It makes the current study a cleaner baseline for diffusion. Skill updates can then be positioned as a later **consolidation mechanism**:
+## Safe Claim Ladder
 
-> If diffusion repeatedly surfaces transferable lessons, future experiments can test whether those lessons should be distilled into persistent executor, planner, or mediator skills.
+Safe current claims:
 
-Thus, the report should treat skill updating as an auxiliary extension rather than the basis of the current empirical claim.
+- the system routes prior-task artifacts into later Planner context;
+- graph and learned-diffusion components can be evaluated independently;
+- fixed skills make observed differences attributable to context, execution,
+  and stochastic effects rather than policy changes;
+- the archive records causal provenance and context-budget behavior;
+- results should remain descriptive until matched arms and sufficient seeds are
+  complete.
 
-## Recommended thesis statement
+Tentative claims for ongoing experiments:
 
-A conservative report thesis could be:
+- graph-aware selection may provide useful contextual signals;
+- prior failure signatures may help later tasks avoid related failure modes;
+- selective routing may use a limited context budget better than broad routing.
 
-> This report studies graph-aware experience diffusion for fixed-policy LLM agents. Rather than immediately rewriting agent skills, we first ask whether selected artifacts from prior task executions can improve the context available to later planning under causal, provenance, and token-budget constraints. Skill updates are treated as a downstream consolidation mechanism to be evaluated after the context-routing effect is established.
-
-## Suggested introduction paragraph
-
-Modern LLM agents can execute complex task benchmarks, but their experience is often episodic: a failure in one task does not automatically inform later attempts on related tasks unless the system explicitly preserves and routes that experience. This report studies **experience diffusion** as a mechanism for controlled cross-task transfer. Instead of immediately modifying agent skills, we first ask a narrower question: when agent policies are held fixed, can selected artifacts from prior task executions improve the context available to future planning? This framing isolates contextual transfer from durable skill learning and allows diffusion policies such as no diffusion, capped broadcast, random selection, and graph-aware top-k similarity to be compared under shared budget and provenance constraints.
-
-## Suggested skill-update positioning paragraph
-
-Skill updates remain an important long-term objective, but they are auxiliary to the present diffusion question. If diffusion surfaces reusable lessons across related tasks, those lessons may later be distilled into persistent executor, planner, or mediator policies. In the current context-only setting, disabling skill updates is a deliberate experimental control: it prevents performance changes from being attributed to policy rewriting and lets the report focus on whether cross-task context alone provides useful signal.
-
-## Contribution framing
-
-The report can frame its contributions as follows:
-
-1. **Diffusion-first mediated co-evolution.**
-   The report reframes mediated co-evolution around controlled movement of execution experience across tasks before durable skill rewriting.
-
-2. **Fixed-skill context-transfer evaluation.**
-   By disabling skill updates, the experiments isolate whether contextual diffusion affects task performance under fixed agent policies.
-
-3. **Graph-aware artifact routing.**
-   The system emits compact artifacts from prior task runs and routes them through policies such as no diffusion, capped broadcast, random-k, and top-k similarity.
-
-4. **Validity-aware observability.**
-   The infrastructure tracks source task, source iteration, target task, selected/rendered artifacts, token budgets, and leakage constraints.
-
-5. **Path toward skill consolidation.**
-   Skill updates are positioned as a later mechanism for converting repeatedly useful diffused lessons into durable policies.
-
-## Safe claim ladder
-
-### Safe current claims
-
-The report can safely claim that:
-
-- the system implements a diffusion mechanism for routing prior-task artifacts into later-task Planner context;
-- skill updates can be disabled to isolate context-routing effects;
-- diffusion can be evaluated as temporary contextual transfer rather than durable agent learning;
-- the infrastructure records provenance, token budgets, source iterations, selected/rendered artifacts, and leakage checks;
-- ongoing experiments should be interpreted descriptively until matched controls and sufficient seeds are complete.
-
-### Tentative claims for ongoing experiments
-
-The report may cautiously say that:
-
-- top-k similarity diffusion may provide useful contextual signals;
-- prior failure signatures or mediator summaries may help later tasks avoid related failure modes;
-- graph-aware selection may be a better use of limited context budget than broadcast or random routing;
-- current results are suggestive but not yet sufficient for a causal or general performance claim.
-
-### Claims to avoid until stronger evidence is complete
-
-The report should not yet claim that:
+Claims to avoid without stronger evidence:
 
 - diffusion generally improves LLM agents;
-- graph-aware diffusion is statistically proven;
-- agents have learned better durable skills in skill-update-disabled runs;
-- observed gains are causal without matched off/random/broadcast/top-k controls;
-- skill co-evolution has been empirically demonstrated by context-only runs.
+- graph-aware diffusion is statistically established;
+- observed gains are causal without matched four-arm controls;
+- improvements from one family or seed generalize to other settings.
 
-## Recommended title options
-
-- **Graph-Aware Experience Diffusion for Fixed-Policy LLM Agents**
-- **Experience Diffusion Before Skill Evolution**
-- **Contextual Transfer for Agentic Task Execution Under Fixed Skills**
-- **From Episodic Failures to Cross-Task Context: A Diffusion-First Study of LLM Agents**
-- **Controlled Cross-Task Experience Routing for LLM Agent Planning**
-
-Recommended title:
+## Recommended Title
 
 > **Graph-Aware Experience Diffusion for Fixed-Policy LLM Agents**
 
-## Suggested abstract framing
+## Abstract Framing
 
-This report studies whether prior task experience can be routed as useful context for later LLM-agent planning. The system emits compact artifacts from completed task executions and selects prior cross-task artifacts through diffusion policies, including no diffusion, capped broadcast, random-k, and graph-aware top-k similarity. To isolate the effect of context routing, the current experiments hold executor, planner, and mediator skills fixed: no durable `SKILL.md` updates are committed during the run. This design separates temporary contextual transfer from persistent skill learning. We therefore interpret the current experiments as a diffusion-first, context-only evaluation. Skill updates remain part of the broader mediated co-evolution architecture, but in this report they are treated as a downstream consolidation mechanism to be evaluated after diffusion effects are established under matched controls, shared context budgets, and predeclared comparison rules.
+This report studies whether prior task experience can be routed as useful
+context for later LLM-agent planning. The system emits compact artifacts from
+completed task executions and selects causal cross-task artifacts through four
+settings: execution only, graph-constrained random selection, learned diffusion
+without a graph, and graph-informed learned diffusion. Planner, Executor, and
+Mediator skills remain fixed across every setting. The design therefore tests
+context routing under matched policies, shared context budgets, and explicit
+provenance constraints.
 
-## Recommended results-language template
+## Results-Language Template
 
-When reporting ongoing results, use conservative language such as:
+Prefer conservative language:
 
-> Preliminary context-only runs suggest that diffusion can change the information available to later task attempts, and in some cases performance improves after prior artifacts become available. However, these results are descriptive rather than causal: matched no-diffusion, random-k, capped-broadcast, and top-k runs across multiple seeds are still needed before claiming that graph-aware diffusion improves agent performance.
+> Preliminary fixed-policy runs show that diffusion changes the information
+> available to later task attempts. Matched arms across multiple seeds are
+> required before claiming a general performance benefit from graph-aware
+> routing.
 
-Avoid wording such as:
+Avoid “diffusion improves agents.” Prefer:
 
-> Diffusion improves agents.
+> Diffusion may improve fixed-policy agent performance by routing relevant
+> prior-task artifacts into later planning contexts.
 
-Prefer:
+## Suggested Report Structure
 
-> Diffusion may improve fixed-policy agent performance by routing relevant prior task artifacts into later planning contexts.
+1. Problem: useful task experience is episodic.
+2. Hypothesis: selected prior artifacts can improve later planning.
+3. System: fixed agents, artifact emission, graph, policy, renderer, and audit.
+4. Experimental arms: execution only, graph only, diffusion only, and both.
+5. Validity controls: causal ordering, same-task exclusion, budgets, and
+   provenance.
+6. Results: matched reward, reliability, and cost comparisons across seeds.
+7. Limitations: family specificity, model stochasticity, and executor variance.
 
-## Practical report structure
+## Bottom Line
 
-A diffusion-first report could use this structure:
-
-1. **Problem:** LLM-agent experience is episodic and not automatically transferred across related tasks.
-2. **Hypothesis:** Selective prior-task artifact diffusion can improve later planning under fixed skills.
-3. **System:** Planner, Executor, Mediator, Judge, artifact emission, diffusion policy, renderer, audit log.
-4. **Experimental control:** Skill updates disabled to isolate context transfer.
-5. **Diffusion policies:** off, capped broadcast, random-k, top-k similarity.
-6. **Validity controls:** source iteration ordering, same-task exclusion, token-budget tracking, provenance/citation logging.
-7. **Preliminary results:** report only descriptive trends and operational checks while experiments continue.
-8. **Future consolidation:** enable skill updates after diffusion effects are better established, testing whether transient lessons can become durable policies.
-
-## One-sentence bottom line
-
-The strongest current motivation is not that the agents already learn better skills, but that **controlled diffusion may let fixed-policy agents reuse prior task experience as context; skill updates are the later mechanism for consolidating those reusable lessons into durable behavior**.
+Controlled experience diffusion may let fixed-policy agents reuse prior task
+evidence as context; the experiment measures when that routing helps, harms, or
+adds cost.

@@ -23,9 +23,7 @@ class JudgeAxisScores(BaseModel):
 
     task_outcome: float = Field(ge=0.0, le=1.0)
     evidence_quality: float = Field(ge=0.0, le=1.0)
-    skill_update_usefulness: float = Field(ge=0.0, le=1.0)
     token_efficiency: float = Field(ge=0.0, le=1.0)
-    reflection_depth: float = Field(ge=0.0, le=1.0)
 
 
 class JudgeCapFlags(BaseModel):

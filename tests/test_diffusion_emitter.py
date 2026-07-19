@@ -8,11 +8,9 @@ from mediated_coevo.core.config import Config, ModelsConfig
 from mediated_coevo.diffusion import DiffusionArtifactType, emit_diffusion_artifacts
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.models.history_signals import MediatorSignal
 from mediated_coevo.models.report import MediatorReport
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.artifact_store import ArtifactStore
-from mediated_coevo.stores.history_store import HistoryStore
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
 
@@ -27,7 +25,7 @@ class _Planner:
     def __init__(self) -> None:
         self.llm_client = _LLM()
 
-    def set_skill_context(self, executor_skills: str, skill_refiner: str | None = None):
+    def set_skill_context(self, executor_skills: str, planner_skill: str | None = None):
         return None
 
 
@@ -38,9 +36,6 @@ class _Executor:
 class _Mediator:
     def __init__(self) -> None:
         self.llm_client = _LLM()
-
-    async def compact_feedback(self, report: MediatorReport) -> MediatorSignal:
-        return MediatorSignal(headline=report.content, evidence=report.content)
 
 
 class _TaskRepo:
@@ -57,10 +52,6 @@ class _SkillStore:
         return {}
 
 
-class _Advisor:
-    llm_client = _LLM()
-
-
 def _config(*, diffusion_enabled: bool) -> Config:
     config = Config(
         models=ModelsConfig(
@@ -74,8 +65,6 @@ def _config(*, diffusion_enabled: bool) -> Config:
         diffusion=diffusion_config(),
     )
     config.diffusion.enabled = diffusion_enabled
-    config.experiment.coevo_interval = 99
-    config.experiment.advisor_buffer_max = 99
     return config
 
 
@@ -107,7 +96,7 @@ async def test_emit_diffusion_artifacts_uses_compactor_for_report_summary(monkey
         return "COMPACTED REPORT SUMMARY"
 
     monkeypatch.setattr(
-        "mediated_coevo.evolution.compactor.compact_text_for_context",
+        "mediated_coevo.runtime.context_compactor.compact_text_for_context",
         _fake_compact_text_for_context,
     )
 
@@ -242,14 +231,14 @@ async def test_orchestrator_emits_diffusion_artifacts_only_when_enabled(tmp_path
         mediator=_Mediator(),  # type: ignore[arg-type]
         skill_store=_SkillStore(),  # type: ignore[arg-type]
         artifact_store=ArtifactStore(base_dir=tmp_path / "artifacts"),
-        history_store=HistoryStore(history_dir=tmp_path / "history"),
         benchmark_repo=_TaskRepo(),  # type: ignore[arg-type]
         config=_config(diffusion_enabled=True),
         experiment_dir=tmp_path,
-        skill_advisor=_Advisor(),  # type: ignore[arg-type]
     )
     trace = ExecutionTrace(task_id="task-A", iteration=1, reward=0.6, status="ok")
-    report = MediatorReport(task_id="task-A", iteration=1, content="Use the parser guard.")
+    report = MediatorReport(
+        task_id="task-A", iteration=1, content="Use the parser guard."
+    )
 
     await orchestrator._emit_diffusion_artifacts(
         trace=trace,
@@ -279,11 +268,9 @@ async def test_orchestrator_emits_diffusion_artifacts_only_when_enabled(tmp_path
         mediator=_Mediator(),  # type: ignore[arg-type]
         skill_store=_SkillStore(),  # type: ignore[arg-type]
         artifact_store=ArtifactStore(base_dir=tmp_path / "artifacts-disabled"),
-        history_store=HistoryStore(history_dir=tmp_path / "history-disabled"),
         benchmark_repo=_TaskRepo(),  # type: ignore[arg-type]
         config=_config(diffusion_enabled=False),
         experiment_dir=tmp_path / "disabled-run",
-        skill_advisor=_Advisor(),  # type: ignore[arg-type]
     )
 
     await disabled._emit_diffusion_artifacts(

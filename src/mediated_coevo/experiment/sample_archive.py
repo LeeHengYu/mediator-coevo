@@ -152,9 +152,7 @@ def sanitize_archive_workspace(
         elif path.is_dir():
             shutil.rmtree(path)
 
-    encoded_secrets = tuple(
-        value.encode("utf-8") for value in secrets
-    )
+    encoded_secrets = tuple(value.encode("utf-8") for value in secrets)
     if not encoded_secrets:
         return tuple(sorted(set(removed)))
     for path in sorted(workspace.rglob("*")):
@@ -231,16 +229,12 @@ def build_archive_manifest(
     journals, executor outputs, and compact transfer artifacts remain covered.
     """
     workspace = workspace.resolve()
-    excluded = {
-        _normalize_relative_path(value) for value in exclude_relative_paths
-    }
+    excluded = {_normalize_relative_path(value) for value in exclude_relative_paths}
     entries: list[ArchiveEntry] = []
     if not workspace.is_dir():
         raise ValueError(f"archive workspace does not exist: {workspace}")
 
-    roots = tuple(
-        _normalize_relative_path(value) for value in include_relative_roots
-    )
+    roots = tuple(_normalize_relative_path(value) for value in include_relative_roots)
     candidate_paths: set[Path] = set()
     if roots:
         for relative_root in roots:
@@ -252,7 +246,9 @@ def build_archive_manifest(
             elif root.is_dir():
                 candidate_paths.update(root.rglob("*"))
             else:
-                raise ValueError(f"archive include root does not exist: {relative_root}")
+                raise ValueError(
+                    f"archive include root does not exist: {relative_root}"
+                )
     else:
         candidate_paths.update(workspace.rglob("*"))
 
@@ -264,9 +260,7 @@ def build_archive_manifest(
         relative_path = path.relative_to(workspace)
         relative = relative_path.as_posix()
         if _is_sensitive_path(relative_path):
-            raise ValueError(
-                f"archive workspace contains a sensitive path: {relative}"
-            )
+            raise ValueError(f"archive workspace contains a sensitive path: {relative}")
         if (
             relative in excluded
             or _is_terminal_contract_path(relative)
@@ -320,9 +314,7 @@ def validate_archive_manifest(
             "archive manifest file set mismatch: "
             f"unexpected={unexpected!r} missing={missing!r}"
         )
-    discovered_by_path = {
-        entry.relative_path: entry for entry in discovered.entries
-    }
+    discovered_by_path = {entry.relative_path: entry for entry in discovered.entries}
     seen: set[str] = set()
     for entry in manifest.entries:
         relative = _normalize_relative_path(entry.relative_path)
@@ -331,7 +323,9 @@ def validate_archive_manifest(
         seen.add(relative)
         path = workspace.joinpath(*PurePosixPath(relative).parts)
         if path.is_symlink() or not path.is_file():
-            raise ValueError(f"archive entry is missing or not a regular file: {relative}")
+            raise ValueError(
+                f"archive entry is missing or not a regular file: {relative}"
+            )
         if path.stat().st_size != entry.byte_size:
             raise ValueError(f"archive entry byte size mismatch: {relative}")
         if sha256_file(path) != entry.sha256:
@@ -439,7 +433,9 @@ def write_or_validate_model(path: Path, model: BaseModel) -> Path:
     if path.exists():
         existing = type(model).model_validate_json(path.read_text(encoding="utf-8"))
         if existing != model:
-            raise ValueError(f"existing shared model conflicts with requested value: {path}")
+            raise ValueError(
+                f"existing shared model conflicts with requested value: {path}"
+            )
         return path
     return write_model_atomic(path, model, exists_error_prefix="Shared model")
 
@@ -534,9 +530,10 @@ def _validate_warmup_sequence_contract(
         raise ValueError("warm-up bundle belongs to another sequence specification")
     if bundle.warmup_count != sequence.warmup_count:
         raise ValueError("warm-up bundle has the wrong frozen prefix length")
-    if tuple(record.task for record in bundle.task_records) != sequence.tasks[
-        : sequence.warmup_count
-    ]:
+    if (
+        tuple(record.task for record in bundle.task_records)
+        != sequence.tasks[: sequence.warmup_count]
+    ):
         raise ValueError("warm-up records differ from the frozen task prefix")
     _validate_persisted_run_state(
         run_workspace=bundle_path.parent,
@@ -585,9 +582,7 @@ def _validate_sample_sequence_contract(
             raise ValueError("zero-warm-up sample must start from an empty bank")
         return
 
-    expected_bundle_path = (
-        f"warmup/{reference.warmup_run_id}/{WARMUP_BUNDLE_FILENAME}"
-    )
+    expected_bundle_path = f"warmup/{reference.warmup_run_id}/{WARMUP_BUNDLE_FILENAME}"
     expected_manifest_path = (
         f"warmup/{reference.warmup_run_id}/{ARCHIVE_MANIFEST_FILENAME}"
     )
@@ -606,14 +601,14 @@ def _validate_sample_sequence_contract(
     ):
         raise ValueError("warm-up reference differs from the shared bundle")
 
-    prefix_ids = tuple(
-        artifact.artifact_id for artifact in bundle.final_artifact_bank
-    )
+    prefix_ids = tuple(artifact.artifact_id for artifact in bundle.final_artifact_bank)
     if result.task_records[0].artifact_ids_before != prefix_ids:
         raise ValueError("sample suffix does not start from the shared warm-up bank")
     prefix_size = len(bundle.final_artifact_bank)
     if result.final_artifact_bank[:prefix_size] != bundle.final_artifact_bank:
-        raise ValueError("sample final bank does not preserve the shared warm-up prefix")
+        raise ValueError(
+            "sample final bank does not preserve the shared warm-up prefix"
+        )
     for artifact in bundle.final_artifact_bank:
         artifact_id = _validate_path_component(
             artifact.artifact_id,
@@ -735,8 +730,7 @@ def _validate_persisted_run_state(
     expected_graph_ids = {
         snapshot_id
         for record in task_records
-        if (snapshot_id := getattr(record, "graph_snapshot_id_after", None))
-        is not None
+        if (snapshot_id := getattr(record, "graph_snapshot_id_after", None)) is not None
     }
     actual_graph_ids = (
         {path.stem for path in graph_dir.glob("*.json") if path.is_file()}
@@ -864,10 +858,8 @@ def _archive_kind(relative: str) -> str:
         "artifacts": "execution_artifact",
         "diffusion": "diffusion_state",
         "jobs": "harbor_job",
-        "history": "execution_history",
         "harnesses": "harness",
         "skills": "skill_snapshot",
-        "skills_snapshots": "skill_snapshot",
     }.get(head, "run_file")
 
 

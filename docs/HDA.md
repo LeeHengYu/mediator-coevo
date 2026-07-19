@@ -85,8 +85,8 @@ prior is active; it just has no diffusion artifacts. Broadcast and random-k
 render similar artifact volume. Top-k renders less context, but that does not
 translate into lower total cost because executor tokens dominate its row.
 
-Skill update records are absent in all four rows:
-executor, planner, and mediator skill updates are disabled.
+Planner, Executor, and Mediator use the same fixed prompt-injected skills in all
+four rows, so row differences come from routed context and execution effects.
 
 ## Token Accounting
 
@@ -152,10 +152,9 @@ timeout. It is useful, but less efficient than random-k. Top-k similarity is
 not useful in this batch: it renders fewer artifacts, but it is the most
 expensive row and has the worst raw efficiency.
 
-Skill-update usefulness cannot be evaluated here because all skill updates are
-disabled. The practical read is narrower: diffusion context can help HWPX task
-transfer, but the best policy in this seed is random-k, not the more selective
-top-k similarity policy.
+The practical read is narrow: diffusion context can help HWPX task transfer,
+but the best policy in this seed is random-k, not the more selective top-k
+similarity policy.
 
 Bottom line: for HDA seed42, random-k is the row to keep. Broadcast is a
 reasonable second-best on raw score, and top-k similarity is too costly for its

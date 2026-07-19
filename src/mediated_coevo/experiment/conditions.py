@@ -6,7 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from mediated_coevo.core.config import BudgetsConfig, SkillUpdateConfig
+    from mediated_coevo.core.config import BudgetsConfig
     from mediated_coevo.llm.client import LLMClient
     from mediated_coevo.models.report import MediatorReport
     from mediated_coevo.models.trace import ExecutionTrace
@@ -23,88 +23,6 @@ ConditionName = Literal[
 MEDIATOR_CONDITIONS: frozenset[ConditionName] = frozenset(
     {"static_mediator", "learned_mediator"}
 )
-MEDIATOR_EVOLVE_CONDITIONS: frozenset[ConditionName] = frozenset({"learned_mediator"})
-
-
-class ExperimentDesignError(ValueError):
-    """Raised when a condition/update combination has contradictory semantics."""
-
-
-def validate_experiment_design(
-    *,
-    condition: ConditionName,
-    skill_updates: SkillUpdateConfig,
-    baseline_preset: str | None = None,
-) -> None:
-    """Validate experiment condition/update semantics before runtime side effects."""
-    enabled_roles: list[str] = []
-    if skill_updates.executor:
-        enabled_roles.append("executor")
-    if skill_updates.planner:
-        enabled_roles.append("planner")
-    if skill_updates.mediator:
-        enabled_roles.append("mediator")
-    enabled_updates = tuple(enabled_roles)
-    design_label = (
-        f"baseline preset {baseline_preset!r}"
-        if baseline_preset
-        else "experiment design"
-    )
-
-    if condition == "no_feedback" and enabled_updates:
-        raise ExperimentDesignError(
-            f"Invalid {design_label}: no_feedback cannot enable skill updates "
-            f"({', '.join(enabled_updates)})."
-        )
-    if "mediator" in enabled_updates and condition not in MEDIATOR_EVOLVE_CONDITIONS:
-        raise ExperimentDesignError(
-            f"Invalid {design_label}: mediator skill updates require learned_mediator; "
-            f"got condition {condition!r}."
-        )
-    if condition == "shared_notes" and "executor" in enabled_updates:
-        raise ExperimentDesignError(
-            f"Invalid {design_label}: shared_notes is planning-only and cannot enable "
-            "executor skill updates."
-        )
-    if condition == "static_mediator" and "mediator" in enabled_updates:
-        raise ExperimentDesignError(
-            f"Invalid {design_label}: static_mediator cannot enable mediator skill updates."
-        )
-
-async def get_executor_proposal_feedback(
-    *,
-    condition: ConditionName,
-    task_id: str,
-    artifact_store: ArtifactStore,
-    mediator_report: MediatorReport | None,
-    model: str,
-    llm_client: LLMClient | None = None,
-    budgets: BudgetsConfig | None = None,
-    condition_name: str | None = None,
-) -> str | None:
-    """Return condition-selected feedback for executor skill proposals."""
-    if condition in {"no_feedback", "shared_notes"}:
-        return None
-    if condition == "full_traces":
-        traces = [
-            trace
-            for trace in artifact_store.query_traces(task_id=task_id, recent=3)
-            if trace.is_usable_feedback_signal
-        ]
-        if not traces:
-            return None
-        summaries = await build_trace_summaries(
-            traces[:1],
-            include_source_task=True,
-            llm_client=llm_client,
-            model=model,
-            budgets=budgets,
-            condition_name=condition_name,
-        )
-        return summaries[0] if summaries else None
-    if condition in MEDIATOR_CONDITIONS and mediator_report is not None:
-        return mediator_report.exposed_content
-    return None
 
 
 async def get_prior_context(
@@ -239,7 +157,7 @@ async def _trace_summary(
     budgets: BudgetsConfig | None,
     condition_name: str | None,
 ) -> str:
-    from mediated_coevo.evolution.compactor import (
+    from mediated_coevo.runtime.context_compactor import (
         compact_text_for_context,
         trace_header_summary,
     )

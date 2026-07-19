@@ -1,1 +1,1 @@
-"""Experiment package for mediated co-evolution."""
+"""Experiment package for fixed-skill mediated experiments."""

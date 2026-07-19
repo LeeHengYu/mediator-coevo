@@ -5,23 +5,18 @@ File-backed JSON store indexed by task_id and iteration.
 
 from __future__ import annotations
 
-import difflib
 import logging
 from pathlib import Path
 from typing import TypeVar
 
-from pydantic import BaseModel
-
-from mediated_coevo.evolution.compactor import (
+from mediated_coevo.runtime.context_compactor import (
     TARGET_EVIDENCE_CHARS,
     head_tail_text,
     trace_header_summary,
 )
 from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.skill import SkillUpdate, SkillUpdateCandidateBatch
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.json_store import (
-    append_jsonl,
     load_directory_models,
     load_model,
     write_model,
@@ -39,14 +34,8 @@ class ArtifactStore:
         self._base_dir = base_dir
         self._traces_dir = base_dir / "traces"
         self._reports_dir = base_dir / "reports"
-        self._validation_dir = base_dir / "validation"
-        self._candidate_batches_dir = base_dir / "candidate_batches"
-        self._skill_updates_dir = base_dir / "skill_updates"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
         self._reports_dir.mkdir(parents=True, exist_ok=True)
-        self._validation_dir.mkdir(parents=True, exist_ok=True)
-        self._candidate_batches_dir.mkdir(parents=True, exist_ok=True)
-        self._skill_updates_dir.mkdir(parents=True, exist_ok=True)
 
     def store_trace(self, trace: ExecutionTrace, *, overwrite: bool = False) -> Path:
         """Persist an execution trace. Returns the file path."""
@@ -75,122 +64,6 @@ class ArtifactStore:
         )
         logger.debug("Stored report: %s", path)
         return path
-
-    def store_validation_trace(
-        self,
-        validation_id: str,
-        variant: str,
-        trace: ExecutionTrace,
-        *,
-        overwrite: bool = False,
-    ) -> Path:
-        """Persist an empirical validation trace outside normal run traces."""
-        filename = f"{trace.task_id}_iter{trace.iteration:04d}.json"
-        path = self._validation_dir / validation_id / variant / filename
-        write_model(
-            path,
-            trace,
-            overwrite=overwrite,
-            exists_error_prefix="Validation trace",
-        )
-        logger.debug("Stored validation trace: %s", path)
-        return path
-
-    def store_validation_result(
-        self,
-        validation_id: str,
-        result: BaseModel,
-        *,
-        overwrite: bool = False,
-    ) -> Path:
-        """Persist empirical validation summary evidence."""
-        path = self._validation_dir / validation_id / "result.json"
-        write_model(
-            path,
-            result,
-            overwrite=overwrite,
-            exists_error_prefix="Validation result",
-        )
-        logger.debug("Stored validation result: %s", path)
-        return path
-
-    def store_validation_variant_result(
-        self,
-        validation_id: str,
-        variant: str,
-        result: BaseModel,
-        *,
-        overwrite: bool = False,
-    ) -> Path:
-        """Persist validation summary evidence for one candidate variant."""
-        path = self._validation_dir / validation_id / variant / "result.json"
-        write_model(
-            path,
-            result,
-            overwrite=overwrite,
-            exists_error_prefix="Validation result",
-        )
-        logger.debug("Stored validation variant result: %s", path)
-        return path
-
-    def store_candidate_batch(
-        self,
-        batch: SkillUpdateCandidateBatch,
-        *,
-        overwrite: bool = False,
-    ) -> Path:
-        """Persist a full candidate batch audit artifact."""
-        path = self._candidate_batches_dir / f"{batch.batch_id}.json"
-        write_model(
-            path,
-            batch,
-            overwrite=overwrite,
-            exists_error_prefix="Candidate batch",
-        )
-        logger.debug("Stored candidate batch: %s", path)
-        return path
-
-    def store_skill_update(
-        self,
-        update_id: str,
-        update: SkillUpdate,
-        *,
-        overwrite: bool = False,
-    ) -> tuple[Path, Path | None]:
-        """Persist a committed skill update and a readable content diff."""
-        update_dir = self._skill_updates_dir / update_id
-        update_dir.mkdir(parents=True, exist_ok=True)
-        update_path = update_dir / "update.json"
-        diff_path = update_dir / "changes.diff"
-        write_model(
-            update_path,
-            update,
-            overwrite=overwrite,
-            exists_error_prefix="Skill update",
-        )
-        old_lines = update.old_content.splitlines(keepends=True)
-        new_lines = update.new_content.splitlines(keepends=True)
-        diff_text = "".join(
-            difflib.unified_diff(
-                old_lines,
-                new_lines,
-                fromfile=f"{update.skill_id}/SKILL.md@old",
-                tofile=f"{update.skill_id}/SKILL.md@new",
-            )
-        )
-        written_diff_path = None
-        if diff_text:
-            if diff_path.exists() and not overwrite:
-                raise FileExistsError(f"Skill update diff already exists: {diff_path}")
-            diff_path.write_text(diff_text)
-            written_diff_path = diff_path
-        logger.debug("Stored skill update artifact: %s", update_path)
-        return update_path, written_diff_path
-
-    def append_skill_update_history(self, entry: BaseModel) -> Path:
-        """Append one compact committed-update ledger entry."""
-        path = self._skill_updates_dir / "skill_update_history.jsonl"
-        return append_jsonl(path, entry)
 
     def load_trace(self, task_id: str, iteration: int) -> ExecutionTrace | None:
         filename = f"{task_id}_iter{iteration:04d}.json"

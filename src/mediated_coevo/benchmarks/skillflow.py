@@ -348,9 +348,7 @@ class SkillFlowRepository:
         destination_root: Path,
         planner_instruction: str,
         injected_skill_text: str | None,
-        injected_skill_name: str,
     ) -> Path:
-        del injected_skill_name
         run_dir = (
             destination_root
             / task.task_id.replace("/", "_").replace("\\", "_")

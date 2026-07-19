@@ -495,12 +495,6 @@ class SampleRuntime:
                 "_base_dir",
                 "artifacts",
             ),
-            (
-                getattr(self.orchestrator, "history_store", None),
-                "_history_dir",
-                "history",
-            ),
-            (self.orchestrator, "_snapshots_dir", "skills_snapshots"),
             (self.orchestrator, "_metrics_path", "metrics.jsonl"),
             (
                 getattr(self.orchestrator, "executor", None),
@@ -561,11 +555,9 @@ class SampleRuntime:
                 blockers.append(str(path))
         for relative in (
             "journal",
-            "history",
             "artifacts",
             "diffusion",
             "task-graph",
-            "skills_snapshots",
             "benchmarks",
         ):
             path = workspace / relative
@@ -589,7 +581,6 @@ class SampleRuntime:
             blockers.append(str(jobs))
 
         for name in (
-            "_proposal_buffer",
             "_previous_report_by_task",
             "_released_cross_task_reports_by_task",
             "_staged_cross_task_reports_by_task",
@@ -605,14 +596,6 @@ class SampleRuntime:
         ):
             if getattr(self.orchestrator, name, None):
                 blockers.append(f"in-memory:{name}")
-        history_store = getattr(self.orchestrator, "history_store", None)
-        for name in (
-            "_entries",
-            "_rejected_proposal_batches",
-            "_rejected_reflection_batches",
-        ):
-            if getattr(history_store, name, None):
-                blockers.append(f"in-memory:history_store.{name}")
         if getattr(self.orchestrator, "freeze_diffusion_artifact_store", False):
             blockers.append("in-memory:freeze_diffusion_artifact_store")
         if getattr(
@@ -1139,16 +1122,6 @@ def build_sample_runtime(
         or implementation_revision != implementation_revision.strip()
     ):
         raise ValueError("implementation_revision must be a non-empty stripped string")
-    updates = _nested_attr(
-        orchestrator,
-        "config.experiment.skill_updates",
-        default=None,
-    )
-    if updates is not None and any(
-        bool(getattr(updates, role, False))
-        for role in ("executor", "planner", "mediator")
-    ):
-        raise ValueError("sample runtime requires all online skill updates disabled")
     if _nested_attr(
         orchestrator,
         "config.experiment.baseline_preset",

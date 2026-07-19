@@ -28,27 +28,6 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
             completion_tokens=event.completion_tokens,
         )
 
-    skill_updates = []
-    if record.skill_update:
-        skill_updates.append(record.skill_update)
-    skill_updates.extend(record.skill_updates)
-    skill_update_summaries = [
-        {
-            "skill_id": update.skill_id,
-            "task_id": update.task_id,
-            "iteration": update.iteration,
-            "old_skill_hash": update.old_skill_hash,
-            "new_skill_hash": update.new_skill_hash,
-            "skill_version": update.skill_version,
-            "reasoning": update.reasoning,
-            "provenance": (
-                update.provenance.model_dump(mode="json")
-                if update.provenance is not None
-                else None
-            ),
-        }
-        for update in skill_updates
-    ]
     success = record.success
     verifier_status = record.verifier_status
     harbor_job_path = None
@@ -102,18 +81,12 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "regression_after_diffusion_context": (
             record.regression_after_diffusion_context
         ),
-        "skill_update_policy": record.skill_update_policy,
         "planner_model": record.models.get("planner"),
         "executor_model": record.models.get("executor"),
         "mediator_model": record.models.get("mediator"),
         "executor_agent": record.executor_agent,
         "skill_hashes": record.skill_hashes,
-        "skill_version": record.skill_version,
-        "mediator_history_entry_id": record.mediator_history_entry_id,
-        "planner_history_entry_id": record.planner_history_entry_id,
-        "history_entry_ids": record.history_entry_ids,
         "mediator_report_id": record.mediator_report_id,
-        "proposal_ids": record.proposal_ids,
         "reward": record.reward,
         "delta_reward": record.delta_reward,
         "success": success,
@@ -153,9 +126,6 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
         "task_resource_names": trace_metadata.get("task_resource_names"),
         "verifier_contract_kind": trace_metadata.get("verifier_contract_kind"),
         "trace_artifact_path": trace_artifact_path,
-        "advisor_decision": record.advisor_decision,
-        "advisor_reason": record.advisor_reason,
-        "advisor_rejection_id": record.advisor_rejection_id,
         "task_category": record.task_category,
         "task_difficulty": record.task_difficulty,
         "expected_reward_range": (
@@ -164,7 +134,6 @@ def metric_row(record: IterationRecord) -> dict[str, Any]:
             else None
         ),
         "verifier_type": record.verifier_type,
-        "skill_updates": skill_update_summaries,
     }
 
 

@@ -1,1 +1,1 @@
-"""Analysis package for mediated co-evolution."""
+"""Analysis package for fixed-skill mediated experiments."""

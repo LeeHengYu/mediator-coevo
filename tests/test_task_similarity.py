@@ -4,14 +4,12 @@ import json
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 from mediated_coevo.analysis.task_similarity import (
     build_task_graph_precompute,
     percentile_threshold,
     write_task_graph_artifacts,
 )
-from mediated_coevo.main import app
 
 
 def test_percentile_threshold_uses_nearest_rank() -> None:
@@ -196,70 +194,6 @@ def test_write_task_graph_artifacts(tmp_path: Path) -> None:
     assert summary["task_count"] == 2
     assert "profiles" not in summary
     assert "pairwise_similarity" not in summary
-
-
-def test_create_graph_cli_writes_thresholded_artifacts(tmp_path: Path) -> None:
-    tasks_root = tmp_path / "tasks"
-    output_dir = tmp_path / "graph"
-    _write_task(
-        tasks_root,
-        "family-a/task-a",
-        family="family-a",
-        category="Compilation & Build",
-        difficulty="easy",
-        tags=["build", "ci"],
-        instruction="Fix a build failure and write a patch diff.",
-    )
-    _write_task(
-        tasks_root,
-        "family-a/task-b",
-        family="family-a",
-        category="Compilation & Build",
-        difficulty="easy",
-        tags=["build", "debugging"],
-        instruction="Debug a CI build and write a patch diff.",
-    )
-    _write_task(
-        tasks_root,
-        "family-b/task-c",
-        family="family-b",
-        category="research",
-        difficulty="medium",
-        tags=["citation"],
-        instruction="Write answer.json with fake citations.",
-    )
-    _write_ranking(tasks_root, "family-a", ["task-a", "task-b"])
-    _write_ranking(tasks_root, "family-b", ["task-c"])
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "create-graph",
-            "--tasks-root",
-            str(tasks_root),
-            "--output-dir",
-            str(output_dir),
-            "--threshold",
-            "0.05",
-        ],
-    )
-
-    assert result.exit_code == 0
-
-    summary = json.loads((output_dir / "graph_summary.json").read_text())
-    pairwise = json.loads((output_dir / "pairwise_similarity.json").read_text())
-
-    assert summary["task_count"] == 3
-    assert summary["pair_count"] == 1
-    assert summary["threshold_kind"] == "absolute_score"
-    assert summary["active_threshold"] == 0.05
-    assert summary["edge_score_threshold"] == 0.05
-    assert summary["components_after_cut"] == [
-        ["family-a/task-a", "family-a/task-b"],
-        ["family-b/task-c"],
-    ]
-    assert pairwise["active_threshold"] == 0.05
-    assert len(pairwise["pairs"]) == 1
 
 
 def _write_task(

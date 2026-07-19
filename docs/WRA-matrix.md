@@ -285,7 +285,6 @@ high transfer-context utilization alone is not evidence of useful diffusion.
 | --- | --- |
 | Old Harbor `result.json` `agent_result` token fields are zero in persisted runs. | Executor tokens must be recovered from `agent/hermes-session.jsonl` for seed42 and seed1023, and for the seed1117 broadcast env-failure row. |
 | Seed1117 broadcast has one environment failure in `hospital-capacity-at-risk-calc`, iteration 2. | Raw reward is treated as zero over the 24-task denominator; judge mean excludes the missing judge row according to the persisted summary convention. |
-| Diffusion rows may include a synthetic `__coevolution__` metrics row. | Synthetic rows are excluded from task denominators and token tables. |
 | Cache-read tokens are large. | They are excluded from adjusted-token efficiency and included only in the weighted dollar-cost section. |
 | Three seed batches are descriptive evidence. | Seed42 is promising, but seed1023 and seed1117 show the effect is not robust enough for a broad causal claim. |
 | Broadcast/random-k graph labels can differ between config and runtime metrics. | Interpret row identity by diffusion policy first and graph label second. |

@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from mediated_coevo.models.iteration import IterationRecord
 
 ENV_FAILURE_STATUSES = {"env_failure", "parse_error", "harbor_failed"}
-COEVOLUTION_TASK_ID = "__coevolution__"
 DEFAULT_BOOTSTRAP_SAMPLES = 10**4
 DEFAULT_BOOTSTRAP_SEED = 0
 DEFAULT_CONFIDENCE_LEVEL = 0.95
@@ -197,8 +196,6 @@ def _build_task_summaries(
 def _record_rows(records: list[IterationRecord]) -> list[dict[str, Any]]:
     rows = []
     for record in records:
-        if record.task_id == COEVOLUTION_TASK_ID:
-            continue
         status = (
             record.execution_trace.status
             if record.execution_trace is not None

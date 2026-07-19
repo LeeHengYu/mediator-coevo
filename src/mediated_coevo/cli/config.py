@@ -13,7 +13,6 @@ from mediated_coevo.core.config import (
     DiffusionPolicyName,
     load_config,
 )
-from mediated_coevo.experiment.baselines import parse_skill_updates
 from mediated_coevo.experiment.conditions import ConditionName
 
 VALID_CONDITION_NAMES = set(get_args(ConditionName))
@@ -53,9 +52,6 @@ def _run_config_overrides(
     iterations: int | None,
     seed: int | None,
     condition: str | None,
-    skill_updates: str | None,
-    coevo_interval: int | None,
-    advisor_buffer_max: int | None,
     diffusion_enabled: bool | None,
     diffusion_policy: str | None,
     diffusion_graph: str | None,
@@ -68,10 +64,6 @@ def _run_config_overrides(
         experiment["num_iterations"] = iterations
     if seed is not None:
         experiment["seed"] = seed
-    if coevo_interval is not None:
-        experiment["coevo_interval"] = coevo_interval
-    if advisor_buffer_max is not None:
-        experiment["advisor_buffer_max"] = advisor_buffer_max
     if condition is not None:
         if condition not in VALID_CONDITION_NAMES:
             allowed = ", ".join(sorted(VALID_CONDITION_NAMES))
@@ -79,14 +71,6 @@ def _run_config_overrides(
                 f"invalid condition {condition!r}; expected one of: {allowed}"
             )
         experiment["condition_name"] = condition
-    if skill_updates is not None:
-        try:
-            experiment["skill_updates"] = parse_skill_updates(
-                skill_updates
-            ).model_dump()
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-
     diffusion: dict[str, Any] = {}
     if diffusion_enabled is not None:
         diffusion["enabled"] = diffusion_enabled

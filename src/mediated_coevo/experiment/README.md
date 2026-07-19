@@ -117,12 +117,12 @@ verified_result = load_sample_result(sample_workspace)
 
 The builder wires the split `LangChainTaskGraphAgent` and
 `LangChainDiffusionPolicyAgent` through their direct adapters; it does not use
-the legacy `LangChainGraphPolicy` facade. Online executor, planner, and
-mediator skill updates must be disabled for this explicit sample path.
+the `LangChainGraphPolicy` facade. Planner, Executor, and Mediator use their
+complete fixed prompt-injected skills throughout the sample.
 
 Both runtime operations reject a reused runtime or a workspace with existing
-journals, terminal records, jobs, metrics, history, reports, traces, or
-diffusion state before calling an agent. There is no reset or resume API.
+journals, terminal records, jobs, metrics, reports, traces, or diffusion state
+before calling an agent. There is no reset or resume API.
 
 ## Shared warm-up and durable archives
 

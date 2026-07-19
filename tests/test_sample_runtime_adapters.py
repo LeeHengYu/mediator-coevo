@@ -180,11 +180,6 @@ class _RuntimeOrchestrator:
     def __post_init__(self) -> None:
         self.experiment_dir.mkdir(parents=True, exist_ok=True)
         self._diffusion_store = DiffusionStore(self.experiment_dir / "diffusion")
-        self.history_store = SimpleNamespace(
-            _entries=[],
-            _rejected_proposal_batches=[],
-            _rejected_reflection_batches=[],
-        )
         self.config = SimpleNamespace(
             models=SimpleNamespace(
                 planner="fake-planner",
@@ -887,12 +882,10 @@ async def test_sample_spec_persist_failure_writes_terminal_failure(
 @pytest.mark.parametrize(
     "relative",
     [
-        "artifacts/validation/result.json",
-        "artifacts/candidate_batches/batch.json",
-        "artifacts/skill_updates/update.json",
-        "skills_snapshots/position-0000.json",
+        "journal/iteration.json",
+        "artifacts/run.json",
+        "task-graph/snapshot.json",
         "benchmarks/task/output.txt",
-        "history/history.jsonl",
         "diffusion/artifacts/stale.json",
     ],
 )
@@ -1425,9 +1418,6 @@ async def test_success_terminal_digest_rejects_provenance_tampering(tmp_path):
 
 def test_build_sample_runtime_wires_direct_agents_without_invocation(tmp_path):
     orchestrator, _, _ = _orchestrator(tmp_path, "no_feedback")
-    orchestrator.config.experiment.skill_updates.executor = False
-    orchestrator.config.experiment.skill_updates.planner = False
-    orchestrator.config.experiment.skill_updates.mediator = False
 
     runtime = build_sample_runtime(
         orchestrator=orchestrator,
@@ -1447,9 +1437,6 @@ def test_build_sample_runtime_wires_direct_agents_without_invocation(tmp_path):
 
 def test_build_sample_runtime_rejects_legacy_baseline_overlay(tmp_path):
     orchestrator, _, _ = _orchestrator(tmp_path, "no_feedback")
-    orchestrator.config.experiment.skill_updates.executor = False
-    orchestrator.config.experiment.skill_updates.planner = False
-    orchestrator.config.experiment.skill_updates.mediator = False
     orchestrator.config.experiment.baseline_preset = "skill_all_diffusion_none"
 
     with pytest.raises(ValueError, match="legacy baseline preset"):

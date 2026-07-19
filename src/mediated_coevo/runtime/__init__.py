@@ -1,1 +1,1 @@
-"""Runtime package for mediated co-evolution."""
+"""Runtime package for fixed-skill mediated experiments."""

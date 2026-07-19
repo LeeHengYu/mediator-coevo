@@ -1,1 +1,1 @@
-"""Context-Aware Mediation for Multi-Agent Skill Co-Evolution."""
+"""Context-aware mediation and diffusion for fixed-skill agents."""

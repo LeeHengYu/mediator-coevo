@@ -67,22 +67,15 @@ def test_read_skill_returns_none_when_canonical_entrypoint_is_missing(tmp_path):
     assert store.read_skill("legacy") is None
 
 
-def test_write_skill_writes_canonical_entrypoint(tmp_path):
-    store = SkillStore(tmp_path)
-
-    skill_path = store.write_skill("executor", "# Executor\n")
-
-    assert skill_path == tmp_path / "executor" / "SKILL.md"
-    assert skill_path.read_text() == "# Executor\n"
-
-
 def test_skill_hash_is_deterministic_and_content_sensitive(tmp_path):
     store = SkillStore(tmp_path)
-    store.write_skill("executor", "# Executor\n")
+    skill_path = tmp_path / "executor" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("# Executor\n")
 
     first_hash = store.skill_hash("executor")
     second_hash = store.skill_hash("executor")
-    store.write_skill("executor", "# Executor\n\nUpdated.\n")
+    skill_path.write_text("# Executor\n\nUpdated.\n")
     updated_hash = store.skill_hash("executor")
 
     assert first_hash == second_hash
@@ -92,24 +85,15 @@ def test_skill_hash_is_deterministic_and_content_sensitive(tmp_path):
 
 def test_skill_hashes_returns_sorted_canonical_skill_hashes(tmp_path):
     store = SkillStore(tmp_path)
-    store.write_skill("planner", "# Planner\n")
-    store.write_skill("executor", "# Executor\n")
+    for skill_name, content in (
+        ("planner", "# Planner\n"),
+        ("executor", "# Executor\n"),
+    ):
+        skill_path = tmp_path / skill_name / "SKILL.md"
+        skill_path.parent.mkdir(parents=True)
+        skill_path.write_text(content)
 
     assert store.skill_hashes() == {
         "executor": SkillStore.content_hash("# Executor\n"),
         "planner": SkillStore.content_hash("# Planner\n"),
     }
-
-
-def test_restore_skill_copies_snapshot_entrypoint_and_verifies_hash(tmp_path):
-    store = SkillStore(tmp_path / "skills")
-    snapshot_dir = tmp_path / "snapshots" / "iter_0003"
-    (snapshot_dir / "executor").mkdir(parents=True)
-    (snapshot_dir / "executor" / "SKILL.md").write_text("# Restored\n")
-    store.write_skill("executor", "# Current\n")
-
-    restored_path = store.restore_skill("executor", snapshot_dir)
-
-    assert restored_path == tmp_path / "skills" / "executor" / "SKILL.md"
-    assert restored_path.read_text() == "# Restored\n"
-    assert store.skill_hash("executor") == SkillStore.content_hash("# Restored\n")

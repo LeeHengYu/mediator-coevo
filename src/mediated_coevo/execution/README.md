@@ -51,10 +51,10 @@ await orchestrator.execute_task_with_context(
 ```
 
 The complete pack is passed—not just its rendered text. That seam bypasses
-legacy prior-context discovery, internal diffusion emission, hidden run
-history, and online skill-update machinery. It executes the frozen task
-occurrence, then stamps the policy, graph snapshot, counts, sources, token
-budget, compaction, and dropping fields into the returned `IterationRecord`.
+internal prior-context discovery and diffusion emission. It executes the
+frozen task occurrence with fixed prompt-injected skills, then stamps the
+policy, graph snapshot, counts, sources, token budget, compaction, and dropping
+fields into the returned `IterationRecord`.
 The adapter rejects a record whose identity or observability fields do not
 match the supplied request.
 

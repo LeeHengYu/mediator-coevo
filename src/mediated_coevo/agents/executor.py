@@ -42,13 +42,11 @@ class ExecutorAgent:
         benchmark_repo: SkillFlowRepository,
         harbor_runner: HarborTaskRunner,
         workspace_root: Path,
-        injected_skill_name: str,
     ) -> None:
         self._model = model
         self._benchmark_repo = benchmark_repo
         self._harbor_runner = harbor_runner
         self._workspace_root = workspace_root
-        self._injected_skill_name = injected_skill_name
 
     async def execute_task(
         self,
@@ -68,7 +66,6 @@ class ExecutorAgent:
                 destination_root=self._workspace_root,
                 planner_instruction=task_spec.instruction,
                 injected_skill_text=skill_text,
-                injected_skill_name=self._injected_skill_name,
             )
         except OSError as exc:
             return self._env_failure(task_spec, start, "workspace_prepare_failed", exc)

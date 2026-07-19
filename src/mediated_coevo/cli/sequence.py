@@ -283,11 +283,6 @@ def sequence(
                 "experiment": {
                     "seed": seed,
                     "condition_name": "learned_mediator",
-                    "skill_updates": {
-                        "executor": False,
-                        "planner": False,
-                        "mediator": False,
-                    },
                     "baseline_preset": None,
                 },
                 **({"sequence": sequence_overrides} if sequence_overrides else {}),

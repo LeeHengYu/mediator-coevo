@@ -14,7 +14,6 @@ from typing import Annotated
 import tomli_w
 import typer
 
-from mediated_coevo.cloud.vm import CloudVMConfigError, GCPVMConfig, load_vm_config
 from mediated_coevo.core.config import Config
 from mediated_coevo.cli.config import (
     _load_config_or_bad_parameter,
@@ -50,11 +49,7 @@ from mediated_coevo.cli.output import (
     print_experiment_controls,
     print_task_selection,
 )
-from mediated_coevo.experiment.conditions import (
-    ConditionName,
-    ExperimentDesignError,
-    validate_experiment_design,
-)
+from mediated_coevo.experiment.conditions import ConditionName
 from mediated_coevo.diffusion.store import DiffusionStore
 from mediated_coevo.experiment.runtime_factory import (
     build_benchmark_repo,
@@ -77,10 +72,9 @@ def run_skillflow_experiment(
     harness_ref: str | None = None,
     state_source: RuntimeStateSource | None = None,
     publish_state_ref: str | None = None,
-    remote_harbor_config: GCPVMConfig | None = None,
     artifact_store_dir: Path | None = None,
 ) -> Path:
-    """Run a SkillFlow selection in one evolution loop."""
+    """Run a SkillFlow selection locally."""
     random.seed(seed)
     config.experiment.benchmark_selection.tasks = selection.task_ids
     config.experiment.benchmark_selection.family = selection.family
@@ -88,14 +82,7 @@ def run_skillflow_experiment(
     config.experiment.benchmark_selection.task_stream_seed = selection.task_stream_seed
 
     prepare_llm_credentials_or_exit(config)
-    if remote_harbor_config is None:
-        ensure_harbor_available(config)
-    elif shutil.which("gcloud") is None:
-        console.print(
-            "[bold red]ERROR:[/] gcloud CLI not found on PATH. Install the "
-            "Google Cloud CLI before using --cloud."
-        )
-        raise typer.Exit(code=1)
+    ensure_harbor_available(config)
 
     resolved_run_id = (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{run_id or f'{seed}-skillflow'}"
@@ -135,23 +122,14 @@ def run_skillflow_experiment(
         runtime_skills_dir=runtime_skills_dir,
         experiment_dir=experiment_dir,
         benchmark_repo=benchmark_repo,
-        remote_harbor_config=remote_harbor_config,
     )
 
     print_task_selection(selection)
-    if remote_harbor_config is not None:
-        console.print(
-            "[bold]Harbor runtime:[/] "
-            f"GCP VM {remote_harbor_config.vm_name} ({remote_harbor_config.zone})"
-        )
     if selection.family is not None:
         console.print(f"[bold]Task stream length:[/] {len(selection.task_ids)}")
     else:
         console.print(f"[bold]Iterations:[/] {iterations}")
     console.print(f"[bold]Condition:[/] {condition_name}")
-    console.print(
-        f"[bold]Skill updates:[/] {config.experiment.skill_updates.model_dump()}"
-    )
     print_experiment_controls(config)
     console.print(
         "[bold]Models:[/] "
@@ -170,7 +148,6 @@ def run_skillflow_experiment(
     annotate_judge_rewards_or_exit(
         data_dir=runtime.experiment_dir,
         config=config,
-        history_store=runtime.orchestrator.history_store,
     )
     if artifact_store_dir is not None:
         runtime.orchestrator.diffusion_store.save_artifact_store(
@@ -226,11 +203,6 @@ def base_artifacts(
                 "num_iterations": 1,
                 "seed": seed,
                 "condition_name": "learned_mediator",
-                "skill_updates": {
-                    "executor": False,
-                    "planner": False,
-                    "mediator": False,
-                },
                 "baseline_preset": None,
             },
             "diffusion": {
@@ -356,33 +328,6 @@ def run(
             ),
         ),
     ] = None,
-    skill_updates: Annotated[
-        str | None,
-        typer.Option(
-            "--skill-updates",
-            help=(
-                "Comma-separated skill updates allowed. Overrides "
-                "experiment.skill_updates. Allowed: none | executor | planner | "
-                "mediator | all."
-            ),
-        ),
-    ] = None,
-    coevo_interval: Annotated[
-        int | None,
-        typer.Option(
-            "--coevo-interval",
-            min=1,
-            help="Override experiment.coevo_interval for this run.",
-        ),
-    ] = None,
-    advisor_buffer_max: Annotated[
-        int | None,
-        typer.Option(
-            "--advisor-buffer-max",
-            min=1,
-            help="Override experiment.advisor_buffer_max for this run.",
-        ),
-    ] = None,
     diffusion_enabled: Annotated[
         bool | None,
         typer.Option(
@@ -492,25 +437,9 @@ def run(
         Path,
         typer.Option(help="Config directory"),
     ] = PROJECT_ROOT / "config",
-    cloud: Annotated[
-        bool,
-        typer.Option(
-            "--cloud",
-            help=(
-                "Run Harbor jobs on the configured GCP VM while keeping the "
-                "experiment control plane local."
-            ),
-        ),
-    ] = False,
-    cloud_env_file: Annotated[
-        Path,
-        typer.Option(
-            "--cloud-env-file", help="Dotenv file containing GCP VM settings."
-        ),
-    ] = PROJECT_ROOT / ".env",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run a SkillFlow co-evolution experiment."""
+    """Run a fixed-skill SkillFlow experiment."""
     resolved_harness_dir = _resolve_harness_options(
         harness_dir,
         harness_ref,
@@ -527,9 +456,6 @@ def run(
                 iterations=iterations,
                 seed=seed,
                 condition=condition,
-                skill_updates=skill_updates,
-                coevo_interval=coevo_interval,
-                advisor_buffer_max=advisor_buffer_max,
                 diffusion_enabled=diffusion_enabled,
                 diffusion_policy=diffusion_policy,
                 diffusion_graph=diffusion_graph,
@@ -540,18 +466,12 @@ def run(
                 ),
             ),
         )
-        try:
-            validate_experiment_design(
-                condition=config.experiment.condition_name,
-                skill_updates=config.experiment.skill_updates,
-                baseline_preset=config.experiment.baseline_preset,
-            )
-        except ExperimentDesignError as exc:
-            raise typer.BadParameter(str(exc)) from exc
         repository = build_benchmark_repo(PROJECT_ROOT, config)
         if task_manifest is not None:
             if family:
-                raise typer.BadParameter("--task-manifest cannot be combined with --family")
+                raise typer.BadParameter(
+                    "--task-manifest cannot be combined with --family"
+                )
             selection = load_task_manifest_selection(
                 repository=repository,
                 manifest_path=task_manifest,
@@ -571,13 +491,6 @@ def run(
             raise typer.BadParameter(
                 "--publish-state-ref may only publish graph state from --split train runs"
             )
-        if cloud:
-            try:
-                remote_harbor_config = load_vm_config(cloud_env_file)
-            except (OSError, CloudVMConfigError) as exc:
-                raise typer.BadParameter(str(exc)) from exc
-        else:
-            remote_harbor_config = None
         run_skillflow_experiment(
             config=config,
             selection=selection,
@@ -589,7 +502,6 @@ def run(
             harness_ref=harness_ref,
             state_source=state_source,
             publish_state_ref=publish_state_ref,
-            remote_harbor_config=remote_harbor_config,
         )
     finally:
         _restore_scoped_harness_overlay()

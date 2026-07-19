@@ -18,20 +18,14 @@ from mediated_coevo.benchmarks import (
     SkillFlowRepository,
     SkillFlowSyncConfig,
 )
-from mediated_coevo.cloud.vm import GCPVMConfig, RemoteHarborRunner
 from mediated_coevo.core.config import Config
-from mediated_coevo.evolution.skill_advisor import SkillAdvisor
 from mediated_coevo.experiment.baselines import (
     BASELINE_PRESET_NAMES,
     get_baseline_preset,
 )
-from mediated_coevo.experiment.conditions import (
-    ConditionName,
-    validate_experiment_design,
-)
+from mediated_coevo.experiment.conditions import ConditionName
 from mediated_coevo.experiment.orchestrator import Orchestrator
 from mediated_coevo.stores.artifact_store import ArtifactStore
-from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.skill_store import SkillStore
 
 
@@ -59,13 +53,8 @@ def build_experiment(
     condition_name: ConditionName,
     experiment_dir: Path | None = None,
     benchmark_repo: SkillFlowRepository | None = None,
-    harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
+    harbor_runner: HarborRunner | None = None,
 ) -> ExperimentRuntime:
-    validate_experiment_design(
-        condition=condition_name,
-        skill_updates=config.experiment.skill_updates,
-        baseline_preset=config.experiment.baseline_preset,
-    )
     if experiment_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = config.experiment.baseline_preset or condition_name
@@ -93,7 +82,6 @@ def build_experiment(
         runtime_skills_dir=runtime_skills_dir,
         experiment_dir=experiment_dir,
         benchmark_repo=benchmark_repo,
-        remote_harbor_config=None,
         harbor_runner=harbor_runner,
     )
 
@@ -135,61 +123,40 @@ def build_experiment_runtime(
     runtime_skills_dir: Path,
     experiment_dir: Path,
     benchmark_repo: SkillFlowRepository,
-    remote_harbor_config: GCPVMConfig | None,
-    harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
+    harbor_runner: HarborRunner | None = None,
 ) -> ExperimentRuntime:
     """Build one runtime from already materialized experiment directories."""
     from mediated_coevo.llm.client import LLMClient
 
-    validate_experiment_design(
-        condition=condition_name,
-        skill_updates=config.experiment.skill_updates,
-        baseline_preset=config.experiment.baseline_preset,
-    )
     skill_store = SkillStore(runtime_skills_dir)
     skill_store.validate()
     artifact_store = ArtifactStore(base_dir=experiment_dir / "artifacts")
-    history_store = HistoryStore(history_dir=experiment_dir / "history")
     if harbor_runner is None:
         jobs_dir = experiment_dir / config.executor_runtime.jobs_dir
         timeout_sec = config.executor_runtime.harbor_timeout_sec
         setup_timeout_multiplier = (
             config.executor_runtime.harbor_agent_setup_timeout_multiplier
         )
-        if remote_harbor_config is not None:
-            harbor_runner = RemoteHarborRunner(
-                config=remote_harbor_config,
-                jobs_dir=jobs_dir,
-                timeout_sec=timeout_sec,
-                agent_name=config.executor_runtime.agent_name,
-                agent_env=config.executor_runtime.agent_env,
-                agent_setup_timeout_multiplier=setup_timeout_multiplier,
-            )
-        else:
-            harbor_runner = HarborRunner(
-                jobs_dir=jobs_dir,
-                timeout_sec=timeout_sec,
-                agent_name=config.executor_runtime.agent_name,
-                agent_env=config.executor_runtime.agent_env,
-                agent_setup_timeout_multiplier=setup_timeout_multiplier,
-                harbor_base_image=config.executor_runtime.harbor_base_image,
-                legacy_harbor_base_images=(
-                    config.executor_runtime.legacy_harbor_base_images
-                ),
-            )
+        harbor_runner = HarborRunner(
+            jobs_dir=jobs_dir,
+            timeout_sec=timeout_sec,
+            agent_name=config.executor_runtime.agent_name,
+            agent_env=config.executor_runtime.agent_env,
+            agent_setup_timeout_multiplier=setup_timeout_multiplier,
+            harbor_base_image=config.executor_runtime.harbor_base_image,
+            legacy_harbor_base_images=config.executor_runtime.legacy_harbor_base_images,
+        )
 
     planner = PlannerAgent(llm_client=LLMClient(model=config.models.planner))
     planner.configure_token_budget(
         config.budgets,
         condition_name=config.experiment.condition_name,
     )
-    planner.configure_skill_updates(config.experiment.skill_updates)
     executor = ExecutorAgent(
         model=config.models.executor,
         benchmark_repo=benchmark_repo,
         harbor_runner=harbor_runner,
         workspace_root=experiment_dir / "benchmarks",
-        injected_skill_name=config.executor_runtime.injected_skill_name,
     )
     mediator = MediatorAgent(
         llm_client=LLMClient(model=config.models.mediator),
@@ -199,15 +166,9 @@ def build_experiment_runtime(
         config.budgets,
         condition_name=config.experiment.condition_name,
     )
-    mediator.configure_skill_updates(config.experiment.skill_updates)
     protocol = skill_store.read_skill("mediator")
     if protocol:
         mediator.load_protocol(protocol)
-    skill_advisor = SkillAdvisor(llm_client=LLMClient(model=config.models.planner))
-    skill_advisor.configure_token_budget(
-        config.budgets,
-        condition_name=config.experiment.condition_name,
-    )
     judge_client = LLMClient(model=config.models.judge)
     return ExperimentRuntime(
         experiment_dir=experiment_dir,
@@ -217,11 +178,9 @@ def build_experiment_runtime(
             mediator=mediator,
             skill_store=skill_store,
             artifact_store=artifact_store,
-            history_store=history_store,
             benchmark_repo=benchmark_repo,
             config=config,
             experiment_dir=experiment_dir,
-            skill_advisor=skill_advisor,
             judge_llm_client=judge_client,
         ),
     )
@@ -234,7 +193,7 @@ def build_matrix_runtimes(
     seed: int,
     matrix_dir: Path,
     benchmark_repo: SkillFlowRepository,
-    harbor_runner: HarborRunner | RemoteHarborRunner | None = None,
+    harbor_runner: HarborRunner | None = None,
     preset_names: Sequence[str] | None = None,
     flatten_single_row: bool = False,
 ) -> list[MatrixRuntime]:

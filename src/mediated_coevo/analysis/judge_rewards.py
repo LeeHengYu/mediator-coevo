@@ -9,14 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from mediated_coevo.analysis.reporting import (
-    COEVOLUTION_TASK_ID,
     ExperimentScoreSummary,
     build_score_summary,
     write_score_summary,
 )
 from mediated_coevo.core.config import Config
 from mediated_coevo.core.utils import as_optional_float, parse_json_object
-from mediated_coevo.evolution.compactor import head_tail_text, trace_header_summary
+from mediated_coevo.runtime.context_compactor import (
+    head_tail_text,
+    trace_header_summary,
+)
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.judge import (
@@ -27,7 +29,6 @@ from mediated_coevo.models.judge import (
 )
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.prompt_text import PromptText
-from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.stores.json_store import load_jsonl_dicts
 
 logger = logging.getLogger(__name__)
@@ -37,19 +38,15 @@ JUDGE_AXIS_SCORE_KEYS = frozenset(
     {
         "task_outcome",
         "evidence_quality",
-        "skill_update_usefulness",
         "token_efficiency",
-        "reflection_depth",
     }
 )
 JUDGE_SYSTEM_PROMPT = PromptText.JUDGE_SYSTEM
 
 JUDGE_WEIGHTS = {
-    "task_outcome": 0.50,
-    "evidence_quality": 0.15,
-    "skill_update_usefulness": 0.20,
-    "token_efficiency": 0.10,
-    "reflection_depth": 0.05,
+    "task_outcome": 2 / 3,
+    "evidence_quality": 1 / 5,
+    "token_efficiency": 2 / 15,
 }
 CAP_VALUES = {
     "no_meaningful_progress": 0.20,
@@ -89,7 +86,6 @@ async def annotate_judge_rewards(
     *,
     data_dir: Path,
     config: Config,
-    history_store: HistoryStore | None = None,
     llm_client: Any | None = None,
 ) -> list[JudgeRewardRecord]:
     """Annotate verifier-scored run outputs with required judge rewards."""
@@ -142,11 +138,6 @@ async def annotate_judge_rewards(
         _append_records(sidecar_path, new_records)
     all_records = list(records_by_id.values())
     _write_judge_summary(data_dir=data_dir, judge_records=all_records)
-    if history_store is not None:
-        _annotate_history_entries(
-            history_store=history_store,
-            judge_records=all_records,
-        )
     logger.info(
         "Judge reward annotation complete: data_dir=%s records=%d new=%d",
         data_dir,
@@ -171,11 +162,10 @@ async def judge_reward_for_trace(
     verifier_status: str | None = None,
     total_tokens: int | None = None,
 ) -> JudgeRewardRecord | None:
-    """Return the evolution reward for one live trace.
+    """Return the task reward for one live trace.
 
-    Online evolution uses this before contrastive reflection and candidate
-    validation. Unusable traces return ``None``; usable traces fall back to the
-    verifier reward if the judge client is unavailable or fails.
+    Unusable traces return ``None``; usable traces fall back to the verifier
+    reward if the judge client is unavailable or fails.
     """
     if trace.status != "ok" or trace.reward is None:
         return None
@@ -249,7 +239,7 @@ async def judge_reward_for_trace(
 
 
 def judge_reward_metadata(record: JudgeRewardRecord) -> dict[str, Any]:
-    """Return compact provenance for a judge-derived evolution reward."""
+    """Return compact provenance for a judge-derived task reward."""
     reward_source = (
         "verifier_fallback" if record.metadata.get("judge_reward_fallback") else "judge"
     )
@@ -283,9 +273,7 @@ def compute_judge_reward(response: JudgeLLMResponse) -> tuple[float, float, str 
     base_reward = (
         JUDGE_WEIGHTS["task_outcome"] * scores.task_outcome
         + JUDGE_WEIGHTS["evidence_quality"] * scores.evidence_quality
-        + JUDGE_WEIGHTS["skill_update_usefulness"] * scores.skill_update_usefulness
         + JUDGE_WEIGHTS["token_efficiency"] * scores.token_efficiency
-        + JUDGE_WEIGHTS["reflection_depth"] * scores.reflection_depth
     )
     if response.flags.benchmark_gaming_or_obscured_failure:
         return 0.0, base_reward, "benchmark_gaming_or_obscured_failure"
@@ -381,9 +369,7 @@ def _fallback_record(
         axis_scores=JudgeAxisScores(
             task_outcome=fallback_task_outcome,
             evidence_quality=0.0,
-            skill_update_usefulness=0.0,
             token_efficiency=0.0,
-            reflection_depth=0.0,
         ),
         flags=JudgeCapFlags(),
         confidence=0.0,
@@ -492,7 +478,7 @@ def _candidates_from_metrics(
     candidates = []
     for row in _read_jsonl(metrics_path):
         task_id = str(row.get("task_id") or "")
-        if not task_id or task_id == COEVOLUTION_TASK_ID:
+        if not task_id:
             continue
         raw_reward = as_optional_float(row.get("reward"))
         if raw_reward is None:
@@ -617,25 +603,6 @@ def _write_judge_summary(
         ]
     )
     write_score_summary(summary, summary_path)
-
-
-def _annotate_history_entries(
-    *,
-    history_store: HistoryStore,
-    judge_records: list[JudgeRewardRecord],
-) -> None:
-    for record in judge_records:
-        metadata = judge_reward_metadata(record)
-        history_store.annotate_judge_reward(
-            task_id=record.task_id,
-            iteration=record.iteration,
-            judge_reward=record.judge_reward,
-            judge_reward_record_id=record.record_id,
-            rubric_version=record.rubric_version,
-            confidence=record.confidence,
-            applied_cap=record.applied_cap,
-            reward_source=metadata["reward_source"],
-        )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

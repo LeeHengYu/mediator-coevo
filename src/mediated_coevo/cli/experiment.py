@@ -27,7 +27,6 @@ from mediated_coevo.benchmarks import (
 from mediated_coevo.core.config import Config
 from mediated_coevo.experiment.runtime_factory import ExperimentRuntime
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.stores.history_store import HistoryStore
 from mediated_coevo.cli.output import console, print_result_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -267,14 +266,12 @@ def annotate_judge_rewards_or_exit(
     *,
     data_dir: Path,
     config: Config,
-    history_store: HistoryStore | None = None,
 ) -> None:
     try:
         asyncio.run(
             annotate_judge_rewards(
                 data_dir=data_dir,
                 config=config,
-                history_store=history_store,
             )
         )
     except JudgeRewardAnnotationError as exc:
