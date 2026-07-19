@@ -215,6 +215,19 @@ class ExperimentConfig(BaseModel):
     shared_notes: str | None = None
 
 
+class SequenceConfig(BaseModel):
+    """Task-count settings for the sequence CLI."""
+
+    length: int = Field(default=10, ge=4)
+    warmup: int = Field(default=3, ge=0)
+
+    @model_validator(mode="after")
+    def validate_suffix(self) -> Self:
+        if self.warmup >= self.length:
+            raise ValueError("sequence warmup must leave at least one suffix task")
+        return self
+
+
 class PathsConfig(BaseModel):
     skills_dir: str = "skills"
     data_dir: str = "data"
@@ -304,6 +317,7 @@ class Config(BaseModel):
     budgets: BudgetsConfig
     experiment: ExperimentConfig
     diffusion: DiffusionConfig
+    sequence: SequenceConfig = Field(default_factory=SequenceConfig)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     executor_runtime: ExecutorRuntimeConfig = Field(

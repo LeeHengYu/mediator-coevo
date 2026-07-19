@@ -9,8 +9,7 @@ runs use one frozen harness and only their runtime artifact state may grow.
 ## Harness-owned surfaces
 
 The offline heuristic-learning process may modify these surfaces. One promoted
-harness snapshot must freeze them for the entire sequence, including every
-iteration of a `-K` run.
+harness snapshot must freeze them for every repeated sequence in a `-K` run.
 
 ### Graph heuristic
 

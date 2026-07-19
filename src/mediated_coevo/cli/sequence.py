@@ -60,14 +60,15 @@ def _select_sequence_tasks(
     repository: SkillFlowRepository,
     families: list[str],
     seed: int,
+    length: int,
 ) -> list[str]:
     candidates: list[str] = []
     for family in families:
         candidates.extend(repository.list_local_task_ids(family=family))
     candidates = sorted(dict.fromkeys(candidates))
-    if len(candidates) < 10:
+    if len(candidates) < length:
         raise typer.BadParameter(
-            f"selected families have {len(candidates)} tasks; sequence requires 10"
+            f"selected families have {len(candidates)} tasks; sequence requires {length}"
         )
     by_family = {
         family: [
@@ -85,7 +86,7 @@ def _select_sequence_tasks(
     rng = random.Random(seed)
     selected = [rng.choice(by_family[family]) for family in families]
     remaining = [task_id for task_id in candidates if task_id not in selected]
-    selected.extend(rng.sample(remaining, 10 - len(selected)))
+    selected.extend(rng.sample(remaining, length - len(selected)))
     rng.shuffle(selected)
     return selected
 
@@ -101,30 +102,32 @@ async def _run_sequence(
     iteration: int,
     iterations: int,
 ) -> SampleResult:
-    warmup_experiment = build_experiment(
-        project_root=PROJECT_ROOT,
-        config=config.model_copy(deep=True),
-        seed=sequence.policy_seed,
-        condition_name=config.experiment.condition_name,
-        experiment_dir=sequence_dir / "warmup" / "warmup",
-        benchmark_repo=repository,
-    )
-    warmup_runtime = build_sample_runtime(
-        orchestrator=warmup_experiment.orchestrator,
-        run_id="warmup",
-        sequence_dir=sequence_dir,
-        implementation_revision="workspace",
-        implementation_dirty=True,
-    )
-    warmup = await warmup_runtime.prepare_warmup_from_stores(
-        sequence,
-        artifact_store_root=artifact_store_root,
-    )
-    console.print(
-        f"[bold]Iteration {iteration}/{iterations}[/] · warmup loaded "
-        f"{sequence.warmup_count}/{len(sequence.tasks)}: "
-        f"{', '.join(sequence.task_ids[: sequence.warmup_count])}"
-    )
+    warmup = None
+    if sequence.warmup_count:
+        warmup_experiment = build_experiment(
+            project_root=PROJECT_ROOT,
+            config=config.model_copy(deep=True),
+            seed=sequence.policy_seed,
+            condition_name=config.experiment.condition_name,
+            experiment_dir=sequence_dir / "warmup" / "warmup",
+            benchmark_repo=repository,
+        )
+        warmup_runtime = build_sample_runtime(
+            orchestrator=warmup_experiment.orchestrator,
+            run_id="warmup",
+            sequence_dir=sequence_dir,
+            implementation_revision="workspace",
+            implementation_dirty=True,
+        )
+        warmup = await warmup_runtime.prepare_warmup_from_stores(
+            sequence,
+            artifact_store_root=artifact_store_root,
+        )
+        console.print(
+            f"[bold]Iteration {iteration}/{iterations}[/] · warmup loaded "
+            f"{sequence.warmup_count}/{len(sequence.tasks)}: "
+            f"{', '.join(sequence.task_ids[: sequence.warmup_count])}"
+        )
 
     sample_id = arm.value
     experiment = build_experiment(
@@ -160,7 +163,7 @@ async def _run_sequence(
             sample_id=sample_id,
             sequence=sequence,
             arm=arm,
-            warmup_bundle_id=warmup.bundle_id,
+            warmup_bundle_id=warmup.bundle_id if warmup is not None else None,
         ),
         warmup=warmup,
         on_position_complete=show_progress,
@@ -188,6 +191,21 @@ def sequence(
             help="Number of sequences to run serially.",
         ),
     ] = 1,
+    length: Annotated[
+        int | None,
+        typer.Option(
+            "-n",
+            "--length",
+            help="Tasks per sequence; overrides sequence.length in config.",
+        ),
+    ] = None,
+    warmup: Annotated[
+        int | None,
+        typer.Option(
+            "--warmup",
+            help="Warmup tasks per sequence; overrides sequence.warmup in config.",
+        ),
+    ] = None,
     graph_agent: Annotated[
         bool,
         typer.Option(
@@ -233,7 +251,7 @@ def sequence(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Repeat one agent setting over seeded 10-task sequences."""
+    """Repeat one agent setting over seeded task sequences."""
     resolved_harness_dir = _resolve_harness_options(
         harness_dir,
         harness_ref,
@@ -254,6 +272,11 @@ def sequence(
         families = _normalize_families(family)
         if len(families) != 4:
             raise typer.BadParameter("sequence requires exactly four distinct families")
+        sequence_overrides = {}
+        if length is not None:
+            sequence_overrides["length"] = length
+        if warmup is not None:
+            sequence_overrides["warmup"] = warmup
         config = _load_config_or_bad_parameter(
             config_dir,
             overrides={
@@ -267,19 +290,32 @@ def sequence(
                     },
                     "baseline_preset": None,
                 },
+                **({"sequence": sequence_overrides} if sequence_overrides else {}),
             },
         )
+        sequence_length = config.sequence.length
+        warmup_count = config.sequence.warmup
         arm = arm_for_flags(
             graph_agent_enabled=graph_agent,
             diffusion_agent_enabled=diffusion_agent,
         )
         repository = build_benchmark_repo(PROJECT_ROOT, config)
+        task_sequences = tuple(
+            _select_sequence_tasks(
+                repository,
+                families,
+                seed + loop_index,
+                sequence_length,
+            )
+            for loop_index in range(k)
+        )
         prepare_llm_credentials_or_exit(config)
         ensure_harbor_available(config)
         provider = BenchmarkTaskProfileProvider(repository)
         console.print(
-            f"[bold]Sequence run:[/] {k} iteration(s), 10 tasks each "
-            f"(3 warmup loaded + 7 evaluated), setting {arm.value} "
+            f"[bold]Sequence run:[/] {k} iteration(s), {sequence_length} tasks each "
+            f"({warmup_count} warmup loaded + "
+            f"{sequence_length - warmup_count} evaluated), setting {arm.value} "
             f"(graph={'on' if graph_agent else 'off'}, "
             f"diffusion={'on' if diffusion_agent else 'off'}), "
             f"seeds {seed}..{seed + k - 1}"
@@ -294,15 +330,14 @@ def sequence(
                 archive_snapshot=False,
             )
             console.print(f"[bold]Harness overlay:[/] {resolved_harness_dir}")
-        for loop_index in range(k):
+        for loop_index, task_ids in enumerate(task_sequences):
             sequence_seed = seed + loop_index
             config.experiment.seed = sequence_seed
-            task_ids = _select_sequence_tasks(repository, families, sequence_seed)
             sequence_id = f"{run_id}-iter-{loop_index + 1}"
             spec = SequenceSpec(
                 sequence_id=sequence_id,
                 tasks=tuple(provider.resolve(task_id) for task_id in task_ids),
-                warmup_count=3,
+                warmup_count=warmup_count,
                 policy_seed=sequence_seed,
                 task_set_id=f"families:{','.join(families)}",
             )

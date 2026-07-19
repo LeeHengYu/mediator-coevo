@@ -3,15 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import typer
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from mediated_coevo.benchmarks import SkillFlowRepository
 from mediated_coevo.cli import sequence as sequence_module
+from mediated_coevo.core.config import SequenceConfig
 from mediated_coevo.experiment.sample_models import SequenceSpec
+from mediated_coevo.execution.models import TaskProfile
 from mediated_coevo.main import app
 from mediated_coevo.orchestration.arms import OrchestrationArm
 
@@ -61,7 +64,7 @@ def test_sequence_runs_k_seeded_permutations(
     target = harness / "overlay" / sequence_module._SEQUENCE_HARNESS_FILES[1]
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("# harness\n")
-    runs: list[tuple[OrchestrationArm, int, int, int, tuple[str, ...], Path]] = []
+    runs: list[tuple[OrchestrationArm, int, int, int, tuple[str, ...], int, Path]] = []
     applied: list[Path] = []
     prepared: list[tuple[Path, Path, dict[str, Any]]] = []
     restored: list[bool] = []
@@ -75,6 +78,7 @@ def test_sequence_runs_k_seeded_permutations(
                 kwargs["iteration"],
                 kwargs["iterations"],
                 spec.task_ids,
+                spec.warmup_count,
                 kwargs["sequence_dir"],
             )
         )
@@ -85,10 +89,12 @@ def test_sequence_runs_k_seeded_permutations(
 
     def load_config(*args: Any, **kwargs: Any) -> SimpleNamespace:
         assert "orchestration_arm" not in kwargs["overrides"]["experiment"]
+        assert kwargs["overrides"]["sequence"] == {"length": 6, "warmup": 2}
         return SimpleNamespace(
             experiment=SimpleNamespace(
                 seed=0,
-            )
+            ),
+            sequence=SimpleNamespace(length=6, warmup=2),
         )
 
     monkeypatch.setattr(sequence_module, "_load_config_or_bad_parameter", load_config)
@@ -127,6 +133,10 @@ def test_sequence_runs_k_seeded_permutations(
             "7",
             "-K",
             "3",
+            "-n",
+            "6",
+            "--warmup",
+            "2",
             *agent_args,
             "--output-dir",
             str(tmp_path),
@@ -137,14 +147,15 @@ def test_sequence_runs_k_seeded_permutations(
 
     assert result.exit_code == 0, result.output
     assert [
-        (arm, seed, iteration, total) for arm, seed, iteration, total, _, _ in runs
+        (arm, seed, iteration, total) for arm, seed, iteration, total, *_ in runs
     ] == [
         (expected_arm, 7, 1, 3),
         (expected_arm, 8, 2, 3),
         (expected_arm, 9, 3, 3),
     ]
-    assert len({task_ids for *_, task_ids, _ in runs}) == 3
-    assert len({frozenset(task_ids) for *_, task_ids, _ in runs}) == 1
+    assert all(len(run[4]) == 6 for run in runs)
+    assert all(run[5] == 2 for run in runs)
+    assert len({run[4] for run in runs}) == 3
     assert [path.name for *_, path in runs] == ["iter-1", "iter-2", "iter-3"]
     assert len({path.parent for *_, path in runs}) == 1
     assert runs[0][-1].parent.name.endswith("-7")
@@ -172,3 +183,86 @@ def test_sequence_rejects_legacy_facade_only_harness(tmp_path: Path) -> None:
 def test_sequence_rejects_non_positive_k() -> None:
     with pytest.raises(typer.BadParameter):
         sequence_module.sequence(family=list(_FAMILIES), k=0)
+
+
+def test_sequence_validates_length_before_runtime_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentials = MagicMock()
+    harbor = MagicMock()
+    monkeypatch.setattr(
+        sequence_module,
+        "build_benchmark_repo",
+        lambda *args: _repository(),
+    )
+    monkeypatch.setattr(sequence_module, "prepare_llm_credentials_or_exit", credentials)
+    monkeypatch.setattr(sequence_module, "ensure_harbor_available", harbor)
+
+    with pytest.raises(typer.BadParameter, match="selected families have 10 tasks"):
+        sequence_module.sequence(family=list(_FAMILIES), length=11)
+
+    credentials.assert_not_called()
+    harbor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    (
+        {"length": 3},
+        {"warmup": -1},
+        {"length": 4, "warmup": 4},
+    ),
+)
+def test_sequence_rejects_invalid_cli_task_counts(kwargs: dict[str, int]) -> None:
+    with pytest.raises(typer.BadParameter):
+        sequence_module.sequence(family=list(_FAMILIES), **kwargs)
+
+
+def test_sequence_config_defaults_and_requires_a_suffix() -> None:
+    assert SequenceConfig() == SequenceConfig(length=10, warmup=3)
+    with pytest.raises(ValidationError, match="leave at least one suffix task"):
+        SequenceConfig(length=4, warmup=4)
+
+
+@pytest.mark.asyncio
+async def test_run_sequence_skips_warmup_loading_when_count_is_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    expected = object()
+    runtime = SimpleNamespace(run=AsyncMock(return_value=expected))
+    config = MagicMock()
+    config.model_copy.return_value = config
+    config.experiment.condition_name = "learned_mediator"
+    monkeypatch.setattr(
+        sequence_module,
+        "build_experiment",
+        lambda **kwargs: SimpleNamespace(orchestrator=object()),
+    )
+    monkeypatch.setattr(
+        sequence_module,
+        "build_sample_runtime",
+        lambda **kwargs: runtime,
+    )
+    spec = SequenceSpec(
+        sequence_id="zero-warmup",
+        tasks=(TaskProfile(task_id="task-0", instruction="execute"),),
+        warmup_count=0,
+        policy_seed=7,
+    )
+
+    result = await sequence_module._run_sequence(
+        config=config,
+        repository=_repository(),
+        sequence=spec,
+        arm=OrchestrationArm.EXECUTION_ONLY,
+        sequence_dir=tmp_path,
+        artifact_store_root=tmp_path / "stores",
+        iteration=1,
+        iterations=1,
+    )
+
+    assert result is expected
+    sample_spec = runtime.run.await_args.args[0]
+    assert sample_spec.warmup_bundle_id is None
+    assert runtime.run.await_args.kwargs["warmup"] is None

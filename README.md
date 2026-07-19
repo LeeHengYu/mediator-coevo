@@ -27,7 +27,7 @@ Package guides describe the boundaries and public contracts:
 - [experiment](src/mediated_coevo/experiment/README.md): causal sample state
   machine, shared warm-up archive, rewards, journals, and loading APIs.
 
-The `sequence` CLI samples one or more seeded 10-task streams from four families
+The `sequence` CLI samples one or more seeded, configurable-length streams from four families
 and composes each suffix from independent `--graph-agent` and
 `--diffusion-agent` flags. Both flags default to off. Automated heuristic
 learning and cross-sequence aggregation remain outside this runtime.
@@ -288,32 +288,42 @@ Pre-run per-task stores are written under:
 data/base_artifacts/<family>/<task>/
 ```
 
-Generate any missing stores, then run `K` seeded 3-warm-up plus 7-task sequences:
+Sequence task counts default from `config/default.toml` and can be overridden per
+invocation:
+
+```toml
+[sequence]
+length = 10
+warmup = 3
+```
+
+Generate any missing stores, then run repeated seeded sequences:
 
 ```bash
 uv run medcoevo base-artifacts --family <family>
 uv run medcoevo sequence \
   --family <family-1> --family <family-2> \
   --family <family-3> --family <family-4> \
-  --seed 0 -K 10
+  --seed 0 -K 10 -n 10 --warmup 3
 ```
 
 `base-artifacts` skips valid existing stores. After a successful export it
 removes that command-owned experiment workspace; failed workspaces remain under
-`data/experiments` for diagnosis. `sequence` never executes its first three
-tasks: it imports their stores into one shared `WarmupBundle`, then evaluates
-only the seven-task suffix in the selected setting. `-K` defaults to `1`; loop
-`i` uses `--seed + i` to produce its task-stream permutation and policy seed.
+`data/experiments` for diagnosis. `sequence` imports the configured warmup
+prefix into one shared `WarmupBundle`, then evaluates only the remaining suffix.
+`-K` controls repeat count, `-n/--length` controls tasks per sequence, and
+`--warmup` controls prefix length; task-count flags override `[sequence]`.
+Loop `i` uses `--seed + i` to produce its task-stream permutation and policy seed.
 `--graph-agent/--no-graph-agent` and
 `--diffusion-agent/--no-diffusion-agent` independently select the four fixed
-settings; both default to off. Keep the family order, seed, and `-K` fixed when
-comparing them:
+settings; both default to off. Keep the family order, seed, `-K`, `-n`, and
+`--warmup` fixed when comparing them:
 
 ```bash
-uv run medcoevo sequence ... --seed 0 -K 10
-uv run medcoevo sequence ... --seed 0 -K 10 --graph-agent
-uv run medcoevo sequence ... --seed 0 -K 10 --diffusion-agent
-uv run medcoevo sequence ... --seed 0 -K 10 --graph-agent --diffusion-agent
+uv run medcoevo sequence ... --seed 0 -K 10 -n 10 --warmup 3
+uv run medcoevo sequence ... --seed 0 -K 10 -n 10 --warmup 3 --graph-agent
+uv run medcoevo sequence ... --seed 0 -K 10 -n 10 --warmup 3 --diffusion-agent
+uv run medcoevo sequence ... --seed 0 -K 10 -n 10 --warmup 3 --graph-agent --diffusion-agent
 ```
 
 Graph-only mode uses deterministic random selection over same-node and incoming
