@@ -58,37 +58,40 @@ _SEQUENCE_HARNESS_FILES = (
 
 def _select_sequence_tasks(
     repository: SkillFlowRepository,
-    families: list[str],
+    family: str,
     seed: int,
     length: int,
+    warmup_count: int,
 ) -> list[str]:
-    candidates: list[str] = []
-    for family in families:
-        candidates.extend(repository.list_local_task_ids(family=family))
-    candidates = sorted(dict.fromkeys(candidates))
-    if len(candidates) < length:
+    candidates = sorted(dict.fromkeys(repository.list_local_task_ids(family=family)))
+    if not candidates:
         raise typer.BadParameter(
-            f"selected families have {len(candidates)} tasks; sequence requires {length}"
+            f"no local SkillFlow tasks found for family {family!r}"
         )
-    by_family = {
-        family: [
-            task_id
-            for task_id in candidates
-            if repository.resolve(task_id).family == family
-        ]
-        for family in families
-    }
-    missing = [family for family, task_ids in by_family.items() if not task_ids]
-    if missing:
+    if warmup_count > min(length, len(candidates)):
         raise typer.BadParameter(
-            f"selected families have no tasks for: {', '.join(missing)}"
+            f"family {family!r} has {len(candidates)} distinct tasks; "
+            f"warmup requires {warmup_count}"
         )
+
     rng = random.Random(seed)
-    selected = [rng.choice(by_family[family]) for family in families]
-    remaining = [task_id for task_id in candidates if task_id not in selected]
-    selected.extend(rng.sample(remaining, length - len(selected)))
-    rng.shuffle(selected)
-    return selected
+    full_cycles, extra_slots = divmod(length, len(candidates))
+    remaining_counts = dict.fromkeys(candidates, full_cycles)
+    for task_id in rng.sample(candidates, k=extra_slots):
+        remaining_counts[task_id] += 1
+
+    warmup_candidates = [
+        task_id for task_id, count in remaining_counts.items() if count
+    ]
+    warmup_tasks = rng.sample(warmup_candidates, k=warmup_count)
+    for task_id in warmup_tasks:
+        remaining_counts[task_id] -= 1
+
+    suffix_tasks = [
+        task_id for task_id, count in remaining_counts.items() for _ in range(count)
+    ]
+    rng.shuffle(suffix_tasks)
+    return warmup_tasks + suffix_tasks
 
 
 async def _run_sequence(
@@ -175,7 +178,7 @@ def sequence(
         list[str],
         typer.Option(
             "--family",
-            help="Exactly four SkillFlow families. Repeat this option.",
+            help="One SkillFlow family shared by every task in each sequence.",
         ),
     ],
     seed: Annotated[
@@ -270,8 +273,9 @@ def sequence(
         if k < 1:
             raise typer.BadParameter("-K must be at least 1")
         families = _normalize_families(family)
-        if len(families) != 4:
-            raise typer.BadParameter("sequence requires exactly four distinct families")
+        if len(families) != 1:
+            raise typer.BadParameter("sequence requires exactly one family")
+        family_name = families[0]
         sequence_overrides = {}
         if length is not None:
             sequence_overrides["length"] = length
@@ -298,9 +302,10 @@ def sequence(
         task_sequences = tuple(
             _select_sequence_tasks(
                 repository,
-                families,
+                family_name,
                 seed + loop_index,
                 sequence_length,
+                warmup_count,
             )
             for loop_index in range(k)
         )
@@ -311,6 +316,7 @@ def sequence(
             f"[bold]Sequence run:[/] {k} iteration(s), {sequence_length} tasks each "
             f"({warmup_count} warmup loaded + "
             f"{sequence_length - warmup_count} evaluated), setting {arm.value} "
+            f"within family {family_name!r} "
             f"(graph={'on' if graph_agent else 'off'}, "
             f"diffusion={'on' if diffusion_agent else 'off'}), "
             f"seeds {seed}..{seed + k - 1}"
@@ -334,7 +340,7 @@ def sequence(
                 tasks=tuple(provider.resolve(task_id) for task_id in task_ids),
                 warmup_count=warmup_count,
                 policy_seed=sequence_seed,
-                task_set_id=f"families:{','.join(families)}",
+                task_set_id=f"families:{family_name}",
             )
             sequence_dir = run_dir / f"iter-{loop_index + 1}"
             result = asyncio.run(
