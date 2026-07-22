@@ -162,13 +162,12 @@ sequences:
 ```bash
 uv run medcoevo base-artifacts --family <family>
 uv run medcoevo sequence \
-  --family <family-1> \
-  --family <family-2> \
-  --family <family-3> \
-  --family <family-4> \
+  --family <family> \
   --seed 0 -K 10 -n 10 --warmup 3
 ```
 
+- Every sequence stays within one task family. Task IDs are repeated as needed
+  with balanced multiplicities; the preloaded warmup prefix remains distinct.
 - `-K` is the repeat count.
 - `-n/--length` is the total tasks per sequence.
 - `--warmup` is the number of warmup tasks.

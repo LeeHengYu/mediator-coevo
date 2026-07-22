@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,11 +19,14 @@ from mediated_coevo.execution.models import TaskProfile
 from mediated_coevo.main import app
 from mediated_coevo.orchestration.arms import OrchestrationArm
 
-_FAMILIES = ("alpha", "beta", "gamma", "delta")
-_FAMILY_ARGS = [item for family in _FAMILIES for item in ("--family", family)]
+_FAMILY = "alpha"
+_FAMILY_ARGS = ["--family", _FAMILY]
 
 
-def _repository() -> SkillFlowRepository:
+def _repository(
+    family_counts: dict[str, int] | None = None,
+) -> SkillFlowRepository:
+    family_counts = family_counts or {_FAMILY: 8}
     tasks = {
         f"{family}-{index}": SimpleNamespace(
             task_id=f"{family}-{index}",
@@ -30,7 +34,7 @@ def _repository() -> SkillFlowRepository:
             instruction=f"execute {family} task {index}",
             task_config={},
         )
-        for family, count in zip(_FAMILIES, (3, 3, 2, 2), strict=True)
+        for family, count in family_counts.items()
         for index in range(count)
     }
     repository = MagicMock(spec=SkillFlowRepository)
@@ -39,6 +43,62 @@ def _repository() -> SkillFlowRepository:
     ]
     repository.resolve.side_effect = tasks.__getitem__
     return repository
+
+
+@pytest.mark.parametrize(
+    ("task_count", "expected_multiplicities"),
+    [
+        (8, [1, 1, 1, 1, 1, 1, 2, 2]),
+        (9, [1, 1, 1, 1, 1, 1, 1, 1, 2]),
+    ],
+)
+def test_sequence_sampler_balances_repeats_with_distinct_warmup(
+    task_count: int,
+    expected_multiplicities: list[int],
+) -> None:
+    repository = _repository({_FAMILY: task_count})
+
+    selected = sequence_module._select_sequence_tasks(
+        repository,
+        _FAMILY,
+        seed=7,
+        length=10,
+        warmup_count=3,
+    )
+
+    assert len(selected) == 10
+    assert len(set(selected[:3])) == 3
+    assert sorted(Counter(selected).values()) == expected_multiplicities
+    assert selected == sequence_module._select_sequence_tasks(
+        repository,
+        _FAMILY,
+        seed=7,
+        length=10,
+        warmup_count=3,
+    )
+
+
+def test_sequence_sampler_rejects_missing_family() -> None:
+    with pytest.raises(typer.BadParameter, match="no local SkillFlow tasks"):
+        sequence_module._select_sequence_tasks(
+            _repository({_FAMILY: 0}),
+            _FAMILY,
+            seed=0,
+            length=10,
+            warmup_count=3,
+        )
+
+
+def test_sequence_sampler_can_repeat_one_task_without_warmup() -> None:
+    selected = sequence_module._select_sequence_tasks(
+        _repository({_FAMILY: 1}),
+        _FAMILY,
+        seed=0,
+        length=5,
+        warmup_count=0,
+    )
+
+    assert selected == [f"{_FAMILY}-0"] * 5
 
 
 @pytest.mark.parametrize(
@@ -68,9 +128,11 @@ def test_sequence_runs_k_seeded_permutations(
     applied: list[Path] = []
     prepared: list[tuple[Path, Path, dict[str, Any]]] = []
     restored: list[bool] = []
+    task_set_ids: list[str | None] = []
 
     async def fake_run_sequence(**kwargs: Any) -> Any:
         spec: SequenceSpec = kwargs["sequence"]
+        task_set_ids.append(spec.task_set_id)
         runs.append(
             (
                 kwargs["arm"],
@@ -156,6 +218,7 @@ def test_sequence_runs_k_seeded_permutations(
     assert all(len(run[4]) == 6 for run in runs)
     assert all(run[5] == 2 for run in runs)
     assert len({run[4] for run in runs}) == 3
+    assert task_set_ids == [f"families:{_FAMILY}"] * 3
     assert [path.name for *_, path in runs] == ["iter-1", "iter-2", "iter-3"]
     assert len({path.parent for *_, path in runs}) == 1
     assert runs[0][-1].parent.name.endswith("-7")
@@ -177,15 +240,27 @@ def test_sequence_rejects_legacy_facade_only_harness(tmp_path: Path) -> None:
     facade.write_text("# legacy facade\n")
 
     with pytest.raises(typer.BadParameter):
-        sequence_module.sequence(family=list(_FAMILIES), harness_dir=harness)
+        sequence_module.sequence(family=[_FAMILY], harness_dir=harness)
 
 
 def test_sequence_rejects_non_positive_k() -> None:
     with pytest.raises(typer.BadParameter):
-        sequence_module.sequence(family=list(_FAMILIES), k=0)
+        sequence_module.sequence(family=[_FAMILY], k=0)
 
 
-def test_sequence_validates_length_before_runtime_preflight(
+def test_sequence_rejects_multiple_families_before_loading_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_config = MagicMock()
+    monkeypatch.setattr(sequence_module, "_load_config_or_bad_parameter", load_config)
+
+    with pytest.raises(typer.BadParameter, match="exactly one family"):
+        sequence_module.sequence(family=[_FAMILY, "beta"])
+
+    load_config.assert_not_called()
+
+
+def test_sequence_validates_distinct_warmup_before_runtime_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     credentials = MagicMock()
@@ -193,13 +268,13 @@ def test_sequence_validates_length_before_runtime_preflight(
     monkeypatch.setattr(
         sequence_module,
         "build_benchmark_repo",
-        lambda *args: _repository(),
+        lambda *args: _repository({_FAMILY: 2}),
     )
     monkeypatch.setattr(sequence_module, "prepare_llm_credentials_or_exit", credentials)
     monkeypatch.setattr(sequence_module, "ensure_harbor_available", harbor)
 
-    with pytest.raises(typer.BadParameter, match="selected families have 10 tasks"):
-        sequence_module.sequence(family=list(_FAMILIES), length=11)
+    with pytest.raises(typer.BadParameter, match="has 2 distinct tasks"):
+        sequence_module.sequence(family=[_FAMILY], length=5, warmup=3)
 
     credentials.assert_not_called()
     harbor.assert_not_called()
@@ -216,7 +291,7 @@ def test_sequence_validates_length_before_runtime_preflight(
 def test_sequence_rejects_invalid_cli_task_counts(kwargs: dict[str, int]) -> None:
     with pytest.raises(typer.BadParameter):
         sequence_module.sequence(
-            family=list(_FAMILIES),
+            family=[_FAMILY],
             length=kwargs.get("length"),
             warmup=kwargs.get("warmup"),
         )
