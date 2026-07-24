@@ -5,10 +5,10 @@ import pytest
 from mediated_coevo.diffusion import (
     AVOID_RECHECK_CHANNEL,
     DIFFUSED_SECTION_NAME,
+    REUSE_SUCCESS_CHANNEL,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
-    REUSE_SUCCESS_CHANNEL,
     DiffusionStore,
     DiffusionSubscription,
     TaskGraphSnapshot,

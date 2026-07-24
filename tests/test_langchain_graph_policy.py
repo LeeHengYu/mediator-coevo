@@ -6,11 +6,11 @@ import pytest
 
 from mediated_coevo.diffusion import (
     AVOID_RECHECK_CHANNEL,
+    REUSE_SUCCESS_CHANNEL,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
     LangChainGraphPolicy,
-    REUSE_SUCCESS_CHANNEL,
     TaskGraphEdgeRecord,
     TaskGraphSnapshot,
 )

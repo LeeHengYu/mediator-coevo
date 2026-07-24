@@ -15,10 +15,6 @@ from mediated_coevo.analysis.reporting import (
 )
 from mediated_coevo.core.config import Config
 from mediated_coevo.core.utils import as_optional_float, parse_json_object
-from mediated_coevo.runtime.context_compactor import (
-    head_tail_text,
-    trace_header_summary,
-)
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.judge import (
@@ -29,6 +25,10 @@ from mediated_coevo.models.judge import (
 )
 from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.prompt_text import PromptText
+from mediated_coevo.runtime.context_compactor import (
+    head_tail_text,
+    trace_header_summary,
+)
 from mediated_coevo.stores.json_store import load_jsonl_dicts
 
 logger = logging.getLogger(__name__)

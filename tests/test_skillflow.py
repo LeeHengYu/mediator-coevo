@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections import Counter
 import json
+from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -10,20 +12,22 @@ from typer.testing import CliRunner
 import mediated_coevo.benchmarks.skillflow as skillflow_benchmark
 import mediated_coevo.cli.experiment as experiment_cli
 from mediated_coevo.benchmarks import (
-    HarborPrebuiltImageMissingError,
-    HarborRunResult,
-    HarborRunner,
     SKILLFLOW_VERIFIER_TYPE,
+    HarborPrebuiltImageMissingError,
+    HarborRunner,
+    HarborRunResult,
     SkillFlowRepository,
     SkillFlowSyncConfig,
     parse_skillflow_execution_trace,
 )
+from mediated_coevo.cli import benchmark as benchmark_cli
+from mediated_coevo.cli import lifelong_agent_bench as lifelong_cli
+from mediated_coevo.cli import skillflow as skillflow_cli
 from mediated_coevo.cli.experiment import (
     BOOTSTRAP_FAMILY_TASK_COUNT,
     load_task_manifest_selection,
     resolve_task_selection,
 )
-from mediated_coevo.cli import skillflow as skillflow_cli
 from mediated_coevo.main import app
 
 
@@ -436,6 +440,147 @@ def test_sync_cli_accepts_selected_tasks(monkeypatch, tmp_path: Path) -> None:
     assert (tmp_path / "tasks" / "family-a" / "task-one" / "task.toml").is_file()
 
 
+def test_sync_cli_uses_same_family_shape_for_lifelong_agent_bench(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sources: list[Path] = []
+    monkeypatch.setattr(benchmark_cli, "PROJECT_ROOT", tmp_path)
+
+    def load_rows(source: Path):
+        sources.append(source)
+        return [
+            {
+                "sample_index": 9,
+                "instruction": "Create /root/done.",
+                "initialization_command_item": repr(
+                    {"command_name": "bash", "script": ""}
+                ),
+                "evaluation_info": repr(
+                    {
+                        "evaluation_command_item": {
+                            "command_name": "bash",
+                            "script": "test -f /root/done",
+                        }
+                    }
+                ),
+            }
+        ]
+
+    monkeypatch.setattr(
+        lifelong_cli,
+        "load_lifelong_agent_bench_rows",
+        load_rows,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "sync",
+            "--output-dir",
+            str(tmp_path / "tasks"),
+            "--family",
+            "os_interaction",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert sources[0].name == "train.jsonl"
+    assert "Synced 1 os_interaction tasks" in result.output
+    assert (
+        tmp_path / "docs/lifelong_agent_bench_tasks.txt"
+    ).read_text() == "os_interaction/lab-os-9\n"
+    assert (
+        tmp_path
+        / "tasks"
+        / "os_interaction"
+        / "lab-os-9"
+        / "task.toml"
+    ).is_file()
+
+
+def test_list_cli_reads_lifelong_slugs_from_local_text_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(benchmark_cli, "PROJECT_ROOT", tmp_path)
+    slug_file = tmp_path / "docs/lifelong_agent_bench_tasks.txt"
+    slug_file.parent.mkdir(parents=True)
+    slug_file.write_text(
+        "db_bench/lab-db-1\n"
+        "os_interaction/lab-os-2\n"
+        "os_interaction/lab-os-9\n"
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["list", "--family", "os_interaction"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output.splitlines() == [
+        "os_interaction/lab-os-2",
+        "os_interaction/lab-os-9",
+    ]
+
+
+def test_list_cli_combines_skillflow_and_lifelong_slug_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(benchmark_cli, "PROJECT_ROOT", tmp_path)
+    slug_file = tmp_path / "docs/lifelong_agent_bench_tasks.txt"
+    slug_file.parent.mkdir(parents=True)
+    slug_file.write_text("os_interaction/lab-os-2\n")
+    repository = MagicMock()
+    repository.list_remote_task_ids.return_value = ["skillflow-family/task-1"]
+    monkeypatch.setattr(
+        skillflow_cli,
+        "build_benchmark_repo",
+        lambda project_root, config: repository,
+    )
+    monkeypatch.setattr(
+        skillflow_cli,
+        "_load_config_or_bad_parameter",
+        lambda config_dir: SimpleNamespace(
+            executor_runtime=SimpleNamespace(dataset="")
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["list"])
+
+    assert result.exit_code == 0
+    assert result.output.splitlines() == [
+        "os_interaction/lab-os-2",
+        "skillflow-family/task-1",
+    ]
+
+
+def test_sync_cli_rejects_fidelity_gated_lifelong_family_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def load_rows(_source):
+        raise AssertionError("fidelity-gated family should not load Parquet")
+
+    monkeypatch.setattr(
+        lifelong_cli,
+        "load_lifelong_agent_bench_rows",
+        load_rows,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "sync",
+            "--family",
+            "db_bench",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "fidelity-gated" in result.output
+
+
 def test_sync_tasks_normalizes_legacy_dockerfiles(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -542,7 +687,7 @@ def test_sync_cli_accepts_family_selector(monkeypatch, tmp_path: Path) -> None:
     assert (tmp_path / "tasks" / "family-a" / "task-two" / "task.toml").is_file()
 
 
-def test_build_base_image_cli_runs_skillflow_build_script(
+def test_build_base_image_cli_builds_skillflow_and_os_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
@@ -551,25 +696,33 @@ def test_build_base_image_cli_runs_skillflow_build_script(
         calls.append((list(command), dict(kwargs)))
         return _Completed(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("mediated_coevo.cli.skillflow.subprocess.run", fake_run)
+    monkeypatch.setattr(benchmark_cli.subprocess, "run", fake_run)
 
-    result = CliRunner().invoke(
-        app,
-        [
-            "build-base-image",
-            "--base-image-tag",
-            "skillflow/harbor-cli-base:test",
-        ],
-    )
+    result = CliRunner().invoke(app, ["build-base-image"])
 
     assert result.exit_code == 0
-    assert calls[0][0] == [
-        "bash",
-        str(Path.cwd() / "docker" / "harbor-cli-base" / "build.sh"),
-        "skillflow/harbor-cli-base:test",
+    assert [call[0] for call in calls] == [
+        [
+            "bash",
+            str(Path.cwd() / "docker" / "harbor-cli-base" / "build.sh"),
+            "skillflow/harbor-cli-base:ubuntu24.04",
+        ],
+        [
+            "docker",
+            "build",
+            "--progress=plain",
+            "-f",
+            str(
+                Path.cwd()
+                / "benchmarks/lifelong_agent_bench/docker/os-base/Dockerfile"
+            ),
+            "-t",
+            "lifelong-agent-bench/os-base:ubuntu24.04",
+            str(Path.cwd() / "benchmarks/lifelong_agent_bench/docker/os-base"),
+        ],
     ]
-    assert calls[0][1]["cwd"] == Path.cwd()
-    assert calls[0][1]["check"] is False
+    assert all(call[1]["cwd"] == Path.cwd() for call in calls)
+    assert all(call[1]["check"] is False for call in calls)
 
 
 def test_build_base_image_cli_dry_run_does_not_run_build(
@@ -579,17 +732,9 @@ def test_build_base_image_cli_dry_run_does_not_run_build(
         del command, kwargs
         raise AssertionError("dry-run should not execute subprocess.run")
 
-    monkeypatch.setattr("mediated_coevo.cli.skillflow.subprocess.run", fake_run)
+    monkeypatch.setattr(benchmark_cli.subprocess, "run", fake_run)
 
-    result = CliRunner().invoke(
-        app,
-        [
-            "build-base-image",
-            "--base-image-tag",
-            "skillflow/harbor-cli-base:test",
-            "--dry-run",
-        ],
-    )
+    result = CliRunner().invoke(app, ["build-base-image", "--dry-run"])
 
     assert result.exit_code == 0
 

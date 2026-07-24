@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 
 from mediated_coevo.diffusion import (
-    DiffusionStore,
     DiffusionNetwork,
+    DiffusionStore,
     GraphBuildSpec,
     adjacency_from_snapshot,
 )

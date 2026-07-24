@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Integrity checks for the generated report.md."""
-import re
 import os
+import re
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 txt = open(os.path.join(BASE, "report.md"), encoding="utf-8").read()

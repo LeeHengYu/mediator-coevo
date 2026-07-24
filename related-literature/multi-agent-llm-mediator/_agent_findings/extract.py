@@ -5,6 +5,7 @@ background-agent JSONL transcript. Usage: python3 extract.py <transcript.output>
 import json
 import sys
 
+
 def main(path):
     asst_texts = []
     with open(path) as fh:

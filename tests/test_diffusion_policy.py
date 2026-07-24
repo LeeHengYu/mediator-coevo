@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from mediated_coevo.diffusion import (
     AVOID_RECHECK_CHANNEL,
+    REUSE_SUCCESS_CHANNEL,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
-    REUSE_SUCCESS_CHANNEL,
     TaskGraphEdgeRecord,
     TaskGraphSnapshot,
     select_capped_broadcast_subscriptions,

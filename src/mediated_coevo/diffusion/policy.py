@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import random
+from dataclasses import dataclass, field
 from typing import Any
 
 from mediated_coevo.core.selection import deterministic_seed

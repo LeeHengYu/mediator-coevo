@@ -7,14 +7,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mediated_coevo.diffusion.policy import (
-    AVOID_RECHECK_CHANNEL,
-    REUSE_SUCCESS_CHANNEL,
-)
 from mediated_coevo.diffusion.models import (
     DiffusedRecord,
     DiffusionArtifact,
     TaskGraphSnapshot,
+)
+from mediated_coevo.diffusion.policy import (
+    AVOID_RECHECK_CHANNEL,
+    REUSE_SUCCESS_CHANNEL,
 )
 from mediated_coevo.diffusion.store import DiffusionStore
 from mediated_coevo.prompt_text import PromptText

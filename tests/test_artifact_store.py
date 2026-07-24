@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from mediated_coevo.stores.artifact_store import ArtifactStore
-from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.models.report import MediatorReport
+from mediated_coevo.models.trace import ExecutionTrace
+from mediated_coevo.stores.artifact_store import ArtifactStore
 
 
 def test_store_trace_first_write_succeeds(tmp_path):

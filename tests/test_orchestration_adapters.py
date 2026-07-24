@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,12 +36,12 @@ from mediated_coevo.execution import (
     TaskProfile,
     empty_context_pack,
 )
-from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
 from mediated_coevo.execution.models import (
     redact_sensitive_data,
     redact_sensitive_text,
 )
+from mediated_coevo.models.iteration import IterationRecord
+from mediated_coevo.models.trace import ExecutionTrace, TraceStatus
 from mediated_coevo.orchestration import (
     GraphAgentRequest,
     OrchestrationArm,
@@ -49,15 +49,15 @@ from mediated_coevo.orchestration import (
     arm_for_flags,
     plan_for_arm,
 )
-from mediated_coevo.orchestration.contracts import (
-    GraphAgentResponse,
-    PolicyAgentResponse,
-)
 from mediated_coevo.orchestration.adapters import (
     DiffusionContextPacker,
     LangChainDiffusionPolicyAdapter,
     LangChainTaskGraphAdapter,
     RandomPolicyAgent,
+)
+from mediated_coevo.orchestration.contracts import (
+    GraphAgentResponse,
+    PolicyAgentResponse,
 )
 
 

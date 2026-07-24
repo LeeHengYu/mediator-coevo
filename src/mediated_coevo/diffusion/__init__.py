@@ -20,8 +20,8 @@ from .models import (
 )
 from .policy import (
     AVOID_RECHECK_CHANNEL,
-    DiffusionSubscription,
     REUSE_SUCCESS_CHANNEL,
+    DiffusionSubscription,
     diffusion_channel_for_artifact,
     select_capped_broadcast_subscriptions,
     select_random_k_subscriptions,

@@ -7,8 +7,8 @@ import json
 import logging
 import os
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import tempfile
 import tomllib
@@ -795,12 +795,10 @@ def _ensure_declared_prebuilt_image(
 
     dockerfile = task_dir / "environment" / "Dockerfile"
     if not dockerfile.is_file():
-        logger.warning(
-            "Prebuilt image %s is missing, but task Dockerfile is absent: %s",
-            image_name,
-            dockerfile,
+        raise HarborPrebuiltImageMissingError(
+            f"Prepared image `{image_name}` is missing and task Dockerfile does "
+            f"not exist: {dockerfile}"
         )
-        return
 
     legacy_base_images = _dedupe_nonempty(legacy_harbor_base_images)
     _normalize_dockerfile_base_images(

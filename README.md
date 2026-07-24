@@ -89,7 +89,7 @@ uv sync --dev
 uv run medcoevo --help
 ```
 
-Build the local Harbor base image once:
+Build the shared SkillFlow and OS benchmark base images once:
 
 ```bash
 uv run medcoevo build-base-image
@@ -286,3 +286,37 @@ Missing SkillFlow base image
 Run `uv run medcoevo build-base-image`. If a task declares an optional
 `[environment].docker_image`, either provide that image or remove the stale
 field so Harbor builds from the task Dockerfile.
+
+## LifelongAgentBench secondary dataset
+
+Pinned upstream code and family Parquet files live under
+`benchmarks/lifelong_agent_bench/`. See
+[`docs/lifelong_agent_bench.md`](docs/lifelong_agent_bench.md) for the execution,
+fidelity, licensing, and HL artifact-reuse evaluation. Materialize one family
+into the existing Harbor task contract, then run the normal family-isolated
+sequence command:
+
+```bash
+uv run medcoevo sync --family os_interaction
+uv run medcoevo list --family os_interaction
+uv run medcoevo build-base-image
+uv run medcoevo base-artifacts --family os_interaction
+uv run medcoevo sequence --family os_interaction
+```
+
+The sequence length remains the configured default of 10 tasks, and exactly one
+family is accepted per sequence. The benchmark source is inferred from the
+family name. Build the shared family base once before task execution; a missing
+task-specific image is then built lazily immediately before that task runs.
+The existing `base-artifacts` pre-run remains a separate task-execution phase
+that produces portable per-task HL stores for configured sequence warm-up. For
+`os_interaction` only, `sequence` lazily runs and persists a selected warm-up
+task when its store is missing; existing stores are reused.
+`os_interaction` is the first executable family. The DB and
+knowledge-graph families remain fidelity-gated until their MySQL and
+ontology/SPARQL environments can be reproduced from released inputs.
+
+LifelongAgentBench reuses the normal SkillFlow-compatible Harbor trace and
+archive transfer. Agent logs are not separately parsed, redacted, truncated, or
+reformatted; benchmark oracle fields and skill labels are not placed in
+agent-visible task metadata.

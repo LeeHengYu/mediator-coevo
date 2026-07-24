@@ -14,8 +14,8 @@ from typer.testing import CliRunner
 from mediated_coevo.benchmarks import SkillFlowRepository
 from mediated_coevo.cli import sequence as sequence_module
 from mediated_coevo.core.config import SequenceConfig
-from mediated_coevo.experiment.sample_models import SequenceSpec
 from mediated_coevo.execution.models import TaskProfile
+from mediated_coevo.experiment.sample_models import SequenceSpec
 from mediated_coevo.main import app
 from mediated_coevo.orchestration.arms import OrchestrationArm
 
@@ -79,7 +79,7 @@ def test_sequence_sampler_balances_repeats_with_distinct_warmup(
 
 
 def test_sequence_sampler_rejects_missing_family() -> None:
-    with pytest.raises(typer.BadParameter, match="no local SkillFlow tasks"):
+    with pytest.raises(typer.BadParameter, match="no local benchmark tasks"):
         sequence_module._select_sequence_tasks(
             _repository({_FAMILY: 0}),
             _FAMILY,
@@ -168,6 +168,12 @@ def test_sequence_runs_k_seeded_permutations(
     )
     monkeypatch.setattr(sequence_module, "ensure_harbor_available", lambda config: None)
     monkeypatch.setattr(sequence_module, "_run_sequence", fake_run_sequence)
+    ensure_os_warmup_stores = MagicMock()
+    monkeypatch.setattr(
+        sequence_module,
+        "_ensure_os_warmup_stores",
+        ensure_os_warmup_stores,
+    )
     monkeypatch.setattr(
         sequence_module,
         "_apply_harness_overlay_and_reexec",
@@ -231,6 +237,49 @@ def test_sequence_runs_k_seeded_permutations(
         )
     ]
     assert restored == [True]
+    ensure_os_warmup_stores.assert_not_called()
+
+
+def test_os_warmup_prepares_each_selected_store_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    warmup_config = object()
+    ensure_store = MagicMock(side_effect=[True, False, True])
+    monkeypatch.setattr(
+        sequence_module,
+        "_os_warmup_config",
+        lambda config, *, seed: warmup_config,
+    )
+    monkeypatch.setattr(
+        sequence_module,
+        "ensure_base_artifact_store",
+        ensure_store,
+    )
+
+    sequence_module._ensure_os_warmup_stores(
+        config=MagicMock(),
+        task_sequences=(
+            ["os_interaction/a", "os_interaction/b", "suffix-1"],
+            ["os_interaction/b", "os_interaction/c", "suffix-2"],
+        ),
+        warmup_count=2,
+        seed=11,
+        artifact_store_root=tmp_path,
+    )
+
+    assert [call.kwargs["task_id"] for call in ensure_store.call_args_list] == [
+        "os_interaction/a",
+        "os_interaction/b",
+        "os_interaction/c",
+    ]
+    assert all(
+        call.kwargs["config"] is warmup_config
+        and call.kwargs["family"] == "os_interaction"
+        and call.kwargs["seed"] == 11
+        and call.kwargs["output_dir"] == tmp_path
+        for call in ensure_store.call_args_list
+    )
 
 
 def test_sequence_rejects_legacy_facade_only_harness(tmp_path: Path) -> None:
@@ -246,6 +295,16 @@ def test_sequence_rejects_legacy_facade_only_harness(tmp_path: Path) -> None:
 def test_sequence_rejects_non_positive_k() -> None:
     with pytest.raises(typer.BadParameter):
         sequence_module.sequence(family=[_FAMILY], k=0)
+
+
+def test_sequence_infers_lifelong_benchmark_root_from_family(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(sequence_module, "PROJECT_ROOT", tmp_path)
+
+    with pytest.raises(typer.BadParameter, match="lifelong_agent_bench"):
+        sequence_module.sequence(family=["os_interaction"])
 
 
 def test_sequence_rejects_multiple_families_before_loading_config(

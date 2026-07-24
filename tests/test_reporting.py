@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from mediated_coevo.analysis.metrics import metric_row
+from mediated_coevo.analysis.reporting import build_score_summary, write_score_summary
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage, TraceStatus
-from mediated_coevo.analysis.reporting import build_score_summary, write_score_summary
 
 
 def _record(

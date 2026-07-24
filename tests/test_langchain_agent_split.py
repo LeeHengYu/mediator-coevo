@@ -8,10 +8,10 @@ from typing import Any
 import pytest
 
 from mediated_coevo.diffusion import (
+    REUSE_SUCCESS_CHANNEL,
     DiffusionArtifact,
     DiffusionArtifactType,
     DiffusionRiskLevel,
-    REUSE_SUCCESS_CHANNEL,
     TaskGraphSnapshot,
 )
 from mediated_coevo.diffusion import langchain_graph as langchain_graph_module

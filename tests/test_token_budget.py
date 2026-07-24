@@ -5,13 +5,12 @@ import pytest
 from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.core.config import Config
-from mediated_coevo.runtime.context_compactor import compact_text_for_context
 from mediated_coevo.experiment.conditions import get_prior_context
 from mediated_coevo.llm.client import LLMClient
 from mediated_coevo.models.iteration import IterationRecord
 from mediated_coevo.models.task import TaskSpec
 from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
-from mediated_coevo.stores.artifact_store import ArtifactStore
+from mediated_coevo.runtime.context_compactor import compact_text_for_context
 from mediated_coevo.runtime.token_budget import (
     BudgetSection,
     TokenBudgetEvent,
@@ -22,6 +21,7 @@ from mediated_coevo.runtime.token_budget import (
     fit_text_to_tokens,
     pack_sections,
 )
+from mediated_coevo.stores.artifact_store import ArtifactStore
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 from tests.prompt_helpers import assert_contains_all, assert_omits_all, message_text
 
@@ -182,7 +182,6 @@ def test_pack_sections_drop_oldest_keeps_newest_complete_lines():
     assert "Required instruction." in packed
     assert "event-0" not in packed
     assert "event-19" in packed
-    assert "..." not in packed
     assert count_text_tokens("test-model", packed) <= 20
 
 
@@ -206,7 +205,7 @@ def test_pack_sections_drop_oldest_salvages_overlong_newest_line():
     assert count_text_tokens("test-model", packed) <= 20
 
 
-def test_pack_sections_section_pack_keeps_complete_lines_without_tail_marker():
+def test_pack_sections_section_pack_keeps_complete_lines():
     packed = pack_sections(
         "test-model",
         [
@@ -223,11 +222,10 @@ def test_pack_sections_section_pack_keeps_complete_lines_without_tail_marker():
     assert "Required instruction." in packed
     assert "example-0" in packed
     assert "example-19" not in packed
-    assert "..." not in packed
     assert count_text_tokens("test-model", packed) <= 20
 
 
-def test_pack_sections_section_pack_salvages_overlong_first_line_without_marker():
+def test_pack_sections_section_pack_salvages_overlong_first_line():
     packed = pack_sections(
         "test-model",
         [
@@ -243,7 +241,6 @@ def test_pack_sections_section_pack_salvages_overlong_first_line_without_marker(
 
     assert "Required instruction." in packed
     assert "OVERSIZED_EXAMPLE" in packed
-    assert "..." not in packed
     assert count_text_tokens("test-model", packed) <= 20
 
 

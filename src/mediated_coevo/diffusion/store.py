@@ -13,8 +13,8 @@ from mediated_coevo.diffusion.models import (
 )
 from mediated_coevo.stores.json_store import (
     append_jsonl,
-    load_jsonl_dicts,
     load_directory_models,
+    load_jsonl_dicts,
     load_jsonl_models,
     load_model,
     write_model,

@@ -24,10 +24,10 @@ from mediated_coevo.benchmarks import (
     HarborPrebuiltImageMissingError,
     SkillFlowRepository,
 )
+from mediated_coevo.cli.output import console, print_result_summary
 from mediated_coevo.core.config import Config
 from mediated_coevo.experiment.runtime_factory import ExperimentRuntime
 from mediated_coevo.models.iteration import IterationRecord
-from mediated_coevo.cli.output import console, print_result_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BOOTSTRAP_FAMILY_TASK_COUNT = 8

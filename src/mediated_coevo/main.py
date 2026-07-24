@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import typer
 
+from mediated_coevo.cli.benchmark import register_benchmark_commands
 from mediated_coevo.cli.matrix import register_matrix_command
 from mediated_coevo.cli.run import register_run_command
 from mediated_coevo.cli.sequence import register_sequence_command
-from mediated_coevo.cli.skillflow import register_skillflow_commands
 
-app = typer.Typer(name="medcoevo", help="Fixed-Skill Mediation Experiment Runner")
+app = typer.Typer(
+    name="medcoevo",
+    help="Mediated benchmark and heuristic-learning experiment runner.",
+)
 
 register_run_command(app)
 register_sequence_command(app)
 register_matrix_command(app)
-register_skillflow_commands(app)
+register_benchmark_commands(app)
 
 if __name__ == "__main__":
     app()

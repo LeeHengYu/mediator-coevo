@@ -12,6 +12,15 @@ from typing import Annotated
 import typer
 
 from mediated_coevo.benchmarks import SkillFlowRepository
+from mediated_coevo.benchmarks.lifelong_agent_bench import (
+    KNOWN_FAMILIES as LIFELONG_AGENT_BENCH_FAMILIES,
+)
+from mediated_coevo.benchmarks.lifelong_agent_bench import (
+    SUPPORTED_FAMILY as LIFELONG_AGENT_BENCH_SUPPORTED_FAMILY,
+)
+from mediated_coevo.benchmarks.lifelong_agent_bench import (
+    ensure_os_base_image,
+)
 from mediated_coevo.cli.config import _load_config_or_bad_parameter
 from mediated_coevo.cli.experiment import (
     PROJECT_ROOT,
@@ -30,6 +39,7 @@ from mediated_coevo.cli.run import (
     _HARNESS_APPLIED_ENV,
     _apply_harness_overlay_and_reexec,
     _restore_scoped_harness_overlay,
+    ensure_base_artifact_store,
 )
 from mediated_coevo.core.config import Config
 from mediated_coevo.execution.adapters import BenchmarkTaskProfileProvider
@@ -49,7 +59,6 @@ from mediated_coevo.orchestration.arms import (
     arm_for_flags,
 )
 
-
 _SEQUENCE_HARNESS_FILES = (
     Path("src/mediated_coevo/diffusion/task_graph_agent.py"),
     Path("src/mediated_coevo/diffusion/policy_agent.py"),
@@ -66,7 +75,7 @@ def _select_sequence_tasks(
     candidates = sorted(dict.fromkeys(repository.list_local_task_ids(family=family)))
     if not candidates:
         raise typer.BadParameter(
-            f"no local SkillFlow tasks found for family {family!r}"
+            f"no local benchmark tasks found for family {family!r}"
         )
     if warmup_count > min(length, len(candidates)):
         raise typer.BadParameter(
@@ -92,6 +101,50 @@ def _select_sequence_tasks(
     ]
     rng.shuffle(suffix_tasks)
     return warmup_tasks + suffix_tasks
+
+
+def _os_warmup_config(config: Config, *, seed: int) -> Config:
+    warmup_config = config.model_copy(deep=True)
+    warmup_config.experiment = warmup_config.experiment.model_copy(
+        update={
+            "num_iterations": 1,
+            "seed": seed,
+            "condition_name": "learned_mediator",
+            "baseline_preset": None,
+        }
+    )
+    warmup_config.diffusion = warmup_config.diffusion.model_copy(
+        update={"enabled": True, "policy": "random_k", "graph": "none"}
+    )
+    return warmup_config
+
+
+def _ensure_os_warmup_stores(
+    *,
+    config: Config,
+    task_sequences: tuple[list[str], ...],
+    warmup_count: int,
+    seed: int,
+    artifact_store_root: Path,
+) -> None:
+    selected = dict.fromkeys(
+        task_id
+        for task_ids in task_sequences
+        for task_id in task_ids[:warmup_count]
+    )
+    if not selected:
+        return
+    warmup_config = _os_warmup_config(config, seed=seed)
+    for task_id in selected:
+        created = ensure_base_artifact_store(
+            config=warmup_config,
+            task_id=task_id,
+            family=LIFELONG_AGENT_BENCH_SUPPORTED_FAMILY,
+            seed=seed,
+            output_dir=artifact_store_root,
+        )
+        if created:
+            console.print(f"[bold green]Prepared warmup artifact:[/] {task_id}")
 
 
 async def _run_sequence(
@@ -178,7 +231,7 @@ def sequence(
         list[str],
         typer.Option(
             "--family",
-            help="One SkillFlow family shared by every task in each sequence.",
+            help="One benchmark family shared by every task in each sequence.",
         ),
     ],
     seed: Annotated[
@@ -206,7 +259,10 @@ def sequence(
         int | None,
         typer.Option(
             "--warmup",
-            help="Warmup tasks per sequence; overrides sequence.warmup in config.",
+            help=(
+                "Preloaded artifact-store tasks per sequence; overrides "
+                "sequence.warmup in config."
+            ),
         ),
     ] = None,
     graph_agent: Annotated[
@@ -229,7 +285,12 @@ def sequence(
     ] = PROJECT_ROOT / "config",
     artifact_store_root: Annotated[
         Path,
-        typer.Option(help="Per-task base artifact store root."),
+        typer.Option(
+            help=(
+                "Root containing warmup artifact stores; missing OS stores are "
+                "created and persisted automatically."
+            )
+        ),
     ] = PROJECT_ROOT / "data" / "base_artifacts",
     output_dir: Annotated[
         Path,
@@ -254,7 +315,7 @@ def sequence(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Repeat one agent setting over seeded task sequences."""
+    """Load warmup artifacts, then run seeded suffix tasks within one family."""
     resolved_harness_dir = _resolve_harness_options(
         harness_dir,
         harness_ref,
@@ -292,6 +353,15 @@ def sequence(
                 **({"sequence": sequence_overrides} if sequence_overrides else {}),
             },
         )
+        if family_name in LIFELONG_AGENT_BENCH_FAMILIES:
+            benchmark_root = (
+                PROJECT_ROOT / "benchmarks" / "lifelong_agent_bench"
+            ).resolve()
+            if not benchmark_root.is_dir():
+                raise typer.BadParameter(
+                    f"benchmark root does not exist: {benchmark_root}"
+                )
+            config.paths.benchmarks_dir = str(benchmark_root)
         sequence_length = config.sequence.length
         warmup_count = config.sequence.warmup
         arm = arm_for_flags(
@@ -311,6 +381,15 @@ def sequence(
         )
         prepare_llm_credentials_or_exit(config)
         ensure_harbor_available(config)
+        if family_name == LIFELONG_AGENT_BENCH_SUPPORTED_FAMILY:
+            ensure_os_base_image()
+            _ensure_os_warmup_stores(
+                config=config,
+                task_sequences=task_sequences,
+                warmup_count=warmup_count,
+                seed=seed,
+                artifact_store_root=artifact_store_root,
+            )
         provider = BenchmarkTaskProfileProvider(repository)
         console.print(
             f"[bold]Sequence run:[/] {k} iteration(s), {sequence_length} tasks each "

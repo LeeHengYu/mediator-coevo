@@ -10,7 +10,6 @@ from rich.console import Console
 from mediated_coevo.analysis.reporting import ExperimentScoreSummary
 from mediated_coevo.core.config import Config
 
-
 console = Console()
 
 

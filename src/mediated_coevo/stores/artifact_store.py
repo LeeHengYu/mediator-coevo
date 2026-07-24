@@ -9,13 +9,13 @@ import logging
 from pathlib import Path
 from typing import TypeVar
 
+from mediated_coevo.models.report import MediatorReport
+from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.runtime.context_compactor import (
     TARGET_EVIDENCE_CHARS,
     head_tail_text,
     trace_header_summary,
 )
-from mediated_coevo.models.report import MediatorReport
-from mediated_coevo.models.trace import ExecutionTrace
 from mediated_coevo.stores.json_store import (
     load_directory_models,
     load_model,

@@ -8,10 +8,10 @@
 - Skips values containing [不确定], fields listed in each item's uncertain[] array,
   and None/empty values.
 """
-import json
-import re
 import glob
+import json
 import os
+import re
 import unicodedata
 
 BASE = os.path.dirname(os.path.abspath(__file__))

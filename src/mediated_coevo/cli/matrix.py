@@ -23,15 +23,15 @@ from mediated_coevo.cli.experiment import (
     setup_logging,
     write_and_print_result_summary,
 )
+from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
 from mediated_coevo.cli.output import (
     console,
     print_experiment_controls,
     print_task_selection,
 )
-from mediated_coevo.cli.graph import materialize_task_graph_for_diffusion
 from mediated_coevo.experiment.baselines import (
-    BASELINE_PRESETS,
     BASELINE_PRESET_NAMES,
+    BASELINE_PRESETS,
     get_baseline_preset,
 )
 from mediated_coevo.experiment.runtime_factory import (

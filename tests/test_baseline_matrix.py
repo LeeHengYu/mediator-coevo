@@ -1,12 +1,16 @@
 from mediated_coevo.cli.config import _run_config_overrides
+from mediated_coevo.core.config import Config
 from mediated_coevo.experiment.baselines import (
-    BASELINE_PRESETS,
     BASELINE_PRESET_NAMES,
+    BASELINE_PRESETS,
     get_baseline_preset,
 )
-from tests.config_helpers import budgets_config, diffusion_config, experiment_config
-from mediated_coevo.core.config import Config
-from tests.config_helpers import models_config
+from tests.config_helpers import (
+    budgets_config,
+    diffusion_config,
+    experiment_config,
+    models_config,
+)
 
 
 def _config() -> Config:

@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from mediated_coevo.analysis.task_similarity import PairSimilarity, TaskSimilarityProfile
+from mediated_coevo.analysis.task_similarity import (
+    PairSimilarity,
+    TaskSimilarityProfile,
+)
 from mediated_coevo.diffusion.models import TaskGraphEdgeRecord, TaskGraphSnapshot
 
 if TYPE_CHECKING:

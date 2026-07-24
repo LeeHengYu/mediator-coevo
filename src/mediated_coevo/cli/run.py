@@ -14,7 +14,15 @@ from typing import Annotated
 import tomli_w
 import typer
 
-from mediated_coevo.core.config import Config
+from mediated_coevo.benchmarks.lifelong_agent_bench import (
+    KNOWN_FAMILIES as LIFELONG_AGENT_BENCH_FAMILIES,
+)
+from mediated_coevo.benchmarks.lifelong_agent_bench import (
+    SUPPORTED_FAMILY as LIFELONG_AGENT_BENCH_SUPPORTED_FAMILY,
+)
+from mediated_coevo.benchmarks.lifelong_agent_bench import (
+    ensure_os_base_image,
+)
 from mediated_coevo.cli.config import (
     _load_config_or_bad_parameter,
     _run_config_overrides,
@@ -49,8 +57,9 @@ from mediated_coevo.cli.output import (
     print_experiment_controls,
     print_task_selection,
 )
-from mediated_coevo.experiment.conditions import ConditionName
+from mediated_coevo.core.config import Config
 from mediated_coevo.diffusion.store import DiffusionStore
+from mediated_coevo.experiment.conditions import ConditionName
 from mediated_coevo.experiment.runtime_factory import (
     build_benchmark_repo,
     build_experiment_runtime,
@@ -83,6 +92,8 @@ def run_skillflow_experiment(
 
     prepare_llm_credentials_or_exit(config)
     ensure_harbor_available(config)
+    if selection.families == (LIFELONG_AGENT_BENCH_SUPPORTED_FAMILY,):
+        ensure_os_base_image()
 
     resolved_run_id = (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{run_id or f'{seed}-skillflow'}"
@@ -175,12 +186,51 @@ def _remove_base_artifact_experiment(experiment_dir: Path, *, data_dir: str) -> 
     shutil.rmtree(resolved)
 
 
+def ensure_base_artifact_store(
+    *,
+    config: Config,
+    task_id: str,
+    family: str,
+    seed: int,
+    output_dir: Path,
+) -> bool:
+    """Create one missing task artifact store and return whether it was created."""
+    destination = output_dir / task_id
+    if (destination / "manifest.json").is_file():
+        DiffusionStore.load_artifact_store(
+            destination,
+            expected_store_id=task_id,
+        )
+        return False
+    experiment_dir = run_skillflow_experiment(
+        config=config.model_copy(deep=True),
+        selection=TaskSelection(
+            task_ids=[task_id],
+            families=(family,),
+            task_stream_seed=seed,
+        ),
+        iterations=1,
+        seed=seed,
+        condition_name="learned_mediator",
+        run_id=f"base-artifact-{task_id.replace('/', '-')}",
+        artifact_store_dir=destination,
+    )
+    _remove_base_artifact_experiment(
+        experiment_dir,
+        data_dir=config.paths.data_dir,
+    )
+    return True
+
+
 def base_artifacts(
     family: Annotated[
         list[str],
         typer.Option(
             "--family",
-            help="SkillFlow family to pre-run. Repeat for multiple families.",
+            help=(
+                "Benchmark family to pre-run. LifelongAgentBench families cannot "
+                "be mixed with other families."
+            ),
         ),
     ],
     seed: Annotated[int, typer.Option(help="Experiment seed.")] = 0,
@@ -194,8 +244,29 @@ def base_artifacts(
     ] = PROJECT_ROOT / "data" / "base_artifacts",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Pre-run each task independently and keep only its artifact store."""
+    """Pre-run family tasks independently and save reusable HL artifact stores."""
     setup_logging(verbose)
+    families = list(dict.fromkeys(name.strip() for name in family if name.strip()))
+    if not families:
+        raise typer.BadParameter("provide --family")
+    lifelong_families = [
+        name for name in families if name in LIFELONG_AGENT_BENCH_FAMILIES
+    ]
+    if lifelong_families and len(families) != 1:
+        raise typer.BadParameter(
+            "LifelongAgentBench base artifacts cannot mix benchmark families"
+        )
+    paths_override = (
+        {
+            "paths": {
+                "benchmarks_dir": str(
+                    PROJECT_ROOT / "benchmarks" / "lifelong_agent_bench"
+                )
+            }
+        }
+        if lifelong_families
+        else {}
+    )
     config = _load_config_or_bad_parameter(
         config_dir,
         overrides={
@@ -210,12 +281,10 @@ def base_artifacts(
                 "policy": "random_k",
                 "graph": "none",
             },
+            **paths_override,
         },
     )
     repository = build_benchmark_repo(PROJECT_ROOT, config)
-    families = list(dict.fromkeys(name.strip() for name in family if name.strip()))
-    if not families:
-        raise typer.BadParameter("provide --family")
     for family_name in families:
         task_ids = repository.list_local_task_ids(family=family_name)
         if not task_ids:
@@ -224,31 +293,18 @@ def base_artifacts(
             )
         for task_id in task_ids:
             destination = output_dir / task_id
-            if (destination / "manifest.json").is_file():
-                DiffusionStore.load_artifact_store(
-                    destination,
-                    expected_store_id=task_id,
-                )
-                console.print(f"[dim]Already exists:[/] {destination}")
-                continue
-            experiment_dir = run_skillflow_experiment(
+            created = ensure_base_artifact_store(
                 config=config.model_copy(deep=True),
-                selection=TaskSelection(
-                    task_ids=[task_id],
-                    families=(family_name,),
-                    task_stream_seed=seed,
-                ),
-                iterations=1,
+                task_id=task_id,
+                family=family_name,
                 seed=seed,
-                condition_name="learned_mediator",
-                run_id=f"base-artifact-{task_id.replace('/', '-')}",
-                artifact_store_dir=destination,
+                output_dir=output_dir,
             )
-            _remove_base_artifact_experiment(
-                experiment_dir,
-                data_dir=config.paths.data_dir,
+            console.print(
+                f"[bold green]Saved:[/] {destination}"
+                if created
+                else f"[dim]Already exists:[/] {destination}"
             )
-            console.print(f"[bold green]Saved:[/] {destination}")
 
 
 def _apply_harness_overlay_and_reexec(harness_dir: Path) -> None:
@@ -285,7 +341,14 @@ def run(
         list[str] | None,
         typer.Option(
             "--family",
-            help="SkillFlow family to bootstrap into a stream. Repeat for multiple.",
+            help="Benchmark family to bootstrap into a stream. Repeat for multiple.",
+        ),
+    ] = None,
+    task: Annotated[
+        str | None,
+        typer.Option(
+            "--task",
+            help="Run one exact benchmark task slug, for example family/task-name.",
         ),
     ] = None,
     split: Annotated[
@@ -439,7 +502,7 @@ def run(
     ] = PROJECT_ROOT / "config",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run a fixed-skill SkillFlow experiment."""
+    """Run one task or a selected benchmark task stream."""
     resolved_harness_dir = _resolve_harness_options(
         harness_dir,
         harness_ref,
@@ -466,8 +529,31 @@ def run(
                 ),
             ),
         )
+        if task is not None:
+            if family or task_manifest is not None:
+                raise typer.BadParameter(
+                    "--task cannot be combined with --family or --task-manifest"
+                )
+            if split is not None:
+                raise typer.BadParameter("--task cannot be combined with --split")
+            task_family, separator, task_name = task.partition("/")
+            if not separator or not task_family or not task_name:
+                raise typer.BadParameter(
+                    "--task must be a family-qualified slug such as family/task-name"
+                )
+            if task_family in LIFELONG_AGENT_BENCH_FAMILIES:
+                config.paths.benchmarks_dir = str(
+                    PROJECT_ROOT / "benchmarks" / "lifelong_agent_bench"
+                )
         repository = build_benchmark_repo(PROJECT_ROOT, config)
-        if task_manifest is not None:
+        if task is not None:
+            resolved_task = repository.resolve(task)
+            selection = TaskSelection(
+                task_ids=[task],
+                families=(resolved_task.family or task_family,),
+                task_stream_seed=config.experiment.seed,
+            )
+        elif task_manifest is not None:
             if family:
                 raise typer.BadParameter(
                     "--task-manifest cannot be combined with --family"

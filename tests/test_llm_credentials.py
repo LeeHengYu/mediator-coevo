@@ -7,10 +7,13 @@ import pytest
 from typer.testing import CliRunner
 
 import mediated_coevo.cli.run as run_module
-from mediated_coevo.core.config import Config, ModelConfigError, ModelsConfig
 from mediated_coevo.cli.experiment import prepare_llm_credentials_or_exit
+from mediated_coevo.core.config import Config, ModelConfigError, ModelsConfig
 from mediated_coevo.experiment.runtime_factory import build_experiment
-from mediated_coevo.llm.client import LLMCredentialError, validate_openrouter_credentials
+from mediated_coevo.llm.client import (
+    LLMCredentialError,
+    validate_openrouter_credentials,
+)
 from mediated_coevo.main import app
 from tests.config_helpers import budgets_config, diffusion_config, experiment_config
 
