@@ -65,6 +65,20 @@ _SEQUENCE_HARNESS_FILES = (
 )
 
 
+def _select_iteration_families(
+    families: tuple[str, ...],
+    *,
+    seed: int,
+    k: int,
+) -> tuple[str, ...]:
+    rng = random.Random(seed)
+    full_cycles, extra_slots = divmod(k, len(families))
+    selected = [family for family in families for _ in range(full_cycles)]
+    selected.extend(rng.sample(families, k=extra_slots))
+    rng.shuffle(selected)
+    return tuple(selected)
+
+
 def _select_sequence_tasks(
     repository: SkillFlowRepository,
     family: str,
@@ -231,7 +245,10 @@ def sequence(
         list[str],
         typer.Option(
             "--family",
-            help="One benchmark family shared by every task in each sequence.",
+            help=(
+                "Benchmark family pool, spread as evenly as possible across "
+                "-K iterations."
+            ),
         ),
     ],
     seed: Annotated[
@@ -315,7 +332,7 @@ def sequence(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Load warmup artifacts, then run seeded suffix tasks within one family."""
+    """Run seeded single-family iterations sampled from a family pool."""
     resolved_harness_dir = _resolve_harness_options(
         harness_dir,
         harness_ref,
@@ -333,10 +350,12 @@ def sequence(
         setup_logging(verbose)
         if k < 1:
             raise typer.BadParameter("-K must be at least 1")
-        families = _normalize_families(family)
-        if len(families) != 1:
-            raise typer.BadParameter("sequence requires exactly one family")
-        family_name = families[0]
+        families = tuple(_normalize_families(family))
+        lifelong_families = set(families) & set(LIFELONG_AGENT_BENCH_FAMILIES)
+        if lifelong_families and len(families) != 1:
+            raise typer.BadParameter(
+                "lifelong-agent-bench families cannot be mixed with another family"
+            )
         sequence_overrides = {}
         if length is not None:
             sequence_overrides["length"] = length
@@ -353,7 +372,7 @@ def sequence(
                 **({"sequence": sequence_overrides} if sequence_overrides else {}),
             },
         )
-        if family_name in LIFELONG_AGENT_BENCH_FAMILIES:
+        if lifelong_families:
             benchmark_root = (
                 PROJECT_ROOT / "benchmarks" / "lifelong_agent_bench"
             ).resolve()
@@ -369,19 +388,24 @@ def sequence(
             diffusion_agent_enabled=diffusion_agent,
         )
         repository = build_benchmark_repo(PROJECT_ROOT, config)
+        iteration_families = _select_iteration_families(
+            families,
+            seed=seed,
+            k=k,
+        )
         task_sequences = tuple(
             _select_sequence_tasks(
                 repository,
-                family_name,
+                iteration_family,
                 seed + loop_index,
                 sequence_length,
                 warmup_count,
             )
-            for loop_index in range(k)
+            for loop_index, iteration_family in enumerate(iteration_families)
         )
         prepare_llm_credentials_or_exit(config)
         ensure_harbor_available(config)
-        if family_name == LIFELONG_AGENT_BENCH_SUPPORTED_FAMILY:
+        if families == (LIFELONG_AGENT_BENCH_SUPPORTED_FAMILY,):
             ensure_os_base_image()
             _ensure_os_warmup_stores(
                 config=config,
@@ -395,7 +419,7 @@ def sequence(
             f"[bold]Sequence run:[/] {k} iteration(s), {sequence_length} tasks each "
             f"({warmup_count} warmup loaded + "
             f"{sequence_length - warmup_count} evaluated), setting {arm.value} "
-            f"within family {family_name!r} "
+            f"from family pool {families!r}; sampled {iteration_families!r} "
             f"(graph={'on' if graph_agent else 'off'}, "
             f"diffusion={'on' if diffusion_agent else 'off'}), "
             f"seeds {seed}..{seed + k - 1}"
@@ -410,7 +434,9 @@ def sequence(
                 archive_snapshot=False,
             )
             console.print(f"[bold]Harness overlay:[/] {resolved_harness_dir}")
-        for loop_index, task_ids in enumerate(task_sequences):
+        for loop_index, (iteration_family, task_ids) in enumerate(
+            zip(iteration_families, task_sequences, strict=True)
+        ):
             sequence_seed = seed + loop_index
             config.experiment.seed = sequence_seed
             sequence_id = f"{run_id}-iter-{loop_index + 1}"
@@ -419,7 +445,7 @@ def sequence(
                 tasks=tuple(provider.resolve(task_id) for task_id in task_ids),
                 warmup_count=warmup_count,
                 policy_seed=sequence_seed,
-                task_set_id=f"families:{family_name}",
+                task_set_id=f"families:{iteration_family}",
             )
             sequence_dir = run_dir / f"iter-{loop_index + 1}"
             result = asyncio.run(

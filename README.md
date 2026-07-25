@@ -201,6 +201,41 @@ All four settings start from the same arm-neutral warmup bank. Each suffix bank
 then evolves independently because routed context can change execution and
 future artifacts.
 
+## Offline HL Agent
+
+The offline HL agent is independent from the graph and diffusion agents that run
+inside a sequence. It loads `docs/hl_agent_prompt.md`, analyzes completed
+sequence evidence, and may write only to an invocation-owned campaign staging
+overlay before publishing an immutable update.
+
+```bash
+uv run medcoevo hl-agent \
+  --campaign HL6 \
+  --source-sequence data/sequences/<sequence-run> \
+  --episodes 5 \
+  --start-episode 3 \
+  --family <family-1> \
+  --family <family-2> \
+  --family <family-3> \
+  --family <family-4> \
+  -K 3
+```
+
+`--episodes` counts new episodes; the optional source sequence is analyzed first
+and is not counted. `--start-episode` allows a pre-existing campaign to resume
+from an absolute episode number. `sequence` spreads K as evenly as possible
+across the supplied family pool, randomly assigns any remainder, and shuffles
+the order. Every iteration remains single-family, and per-episode family counts
+differ by at most one. The infrastructure chooses the fresh seed, K, harness,
+and episode cadence, then invokes the HL agent after every completed episode,
+including the final one.
+
+The command defaults to `models.planner`. The agent can inspect repository and
+campaign evidence, stage harness-owned files, run focused checks, and publish
+with the existing harness registry. It has no sequence-launch or unrestricted
+shell tool and cannot write repository `src/` directly. Managed episode records
+are stored under `data/experiments/<campaign>/episodes/`.
+
 ## Harness Overlays
 
 A sequence harness is a cumulative sparse code overlay. It must replace at

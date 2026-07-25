@@ -15,7 +15,8 @@ from mediated_coevo.main import app
         (["list"], "SkillFlow and local benchmark indexes"),
         (["build-base-image"], "shared SkillFlow and OS benchmark base images"),
         (["base-artifacts"], "reusable HL artifact stores"),
-        (["sequence"], "run seeded suffix tasks within one family"),
+        (["sequence"], "Run seeded single-family iterations"),
+        (["hl-agent"], "independent offline agent"),
     ],
 )
 def test_cli_help_describes_benchmark_workflow(

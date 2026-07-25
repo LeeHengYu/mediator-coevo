@@ -101,6 +101,34 @@ def test_sequence_sampler_can_repeat_one_task_without_warmup() -> None:
     assert selected == [f"{_FAMILY}-0"] * 5
 
 
+def test_iteration_family_sampler_is_seeded_and_balanced() -> None:
+    selected = sequence_module._select_iteration_families(
+        ("alpha", "beta", "gamma", "delta"),
+        seed=7,
+        k=10,
+    )
+
+    assert selected == (
+        "delta",
+        "gamma",
+        "beta",
+        "beta",
+        "gamma",
+        "gamma",
+        "alpha",
+        "alpha",
+        "alpha",
+        "delta",
+    )
+    assert max(Counter(selected).values()) - min(Counter(selected).values()) == 1
+    short_episode = sequence_module._select_iteration_families(
+        ("alpha", "beta", "gamma", "delta"),
+        seed=7,
+        k=3,
+    )
+    assert len(set(short_episode)) == 3
+
+
 @pytest.mark.parametrize(
     ("agent_args", "expected_arm"),
     [
@@ -119,7 +147,7 @@ def test_sequence_runs_k_seeded_permutations(
     agent_args: list[str],
     expected_arm: OrchestrationArm,
 ) -> None:
-    repository = _repository()
+    repository = _repository({"alpha": 8, "beta": 8})
     harness = tmp_path / "harness"
     target = harness / "overlay" / sequence_module._SEQUENCE_HARNESS_FILES[1]
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +224,10 @@ def test_sequence_runs_k_seeded_permutations(
         app,
         [
             "sequence",
-            *_FAMILY_ARGS,
+            "--family",
+            "alpha",
+            "--family",
+            "beta",
             "--seed",
             "7",
             "-K",
@@ -224,7 +255,15 @@ def test_sequence_runs_k_seeded_permutations(
     assert all(len(run[4]) == 6 for run in runs)
     assert all(run[5] == 2 for run in runs)
     assert len({run[4] for run in runs}) == 3
-    assert task_set_ids == [f"families:{_FAMILY}"] * 3
+    assert task_set_ids == [
+        "families:beta",
+        "families:beta",
+        "families:alpha",
+    ]
+    assert all(
+        all(task_id.startswith(f"{task_set_id.removeprefix('families:')}-") for task_id in run[4])
+        for task_set_id, run in zip(task_set_ids, runs, strict=True)
+    )
     assert [path.name for *_, path in runs] == ["iter-1", "iter-2", "iter-3"]
     assert len({path.parent for *_, path in runs}) == 1
     assert runs[0][-1].parent.name.endswith("-7")
@@ -307,14 +346,14 @@ def test_sequence_infers_lifelong_benchmark_root_from_family(
         sequence_module.sequence(family=["os_interaction"])
 
 
-def test_sequence_rejects_multiple_families_before_loading_config(
+def test_sequence_rejects_mixed_lifelong_family_pool_before_loading_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     load_config = MagicMock()
     monkeypatch.setattr(sequence_module, "_load_config_or_bad_parameter", load_config)
 
-    with pytest.raises(typer.BadParameter, match="exactly one family"):
-        sequence_module.sequence(family=[_FAMILY, "beta"])
+    with pytest.raises(typer.BadParameter, match="cannot be mixed"):
+        sequence_module.sequence(family=["os_interaction", _FAMILY])
 
     load_config.assert_not_called()
 

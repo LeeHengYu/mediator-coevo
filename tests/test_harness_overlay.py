@@ -86,16 +86,23 @@ def test_harness_overlay_reexec_failure_restores_checkout(monkeypatch, tmp_path)
     target.write_text("VALUE = 1\n")
     monkeypatch.setattr(run_module, "PROJECT_ROOT", project)
     monkeypatch.delenv(run_module._HARNESS_APPLIED_ENV, raising=False)
-    monkeypatch.setattr(
-        run_module.os,
-        "execvpe",
-        lambda *args: (_ for _ in ()).throw(OSError("exec failed")),
-    )
+    observed = {}
 
-    with pytest.raises(OSError, match="exec failed"):
+    def fail_child(command, **kwargs):
+        observed["command"] = command
+        observed["env"] = kwargs["env"]
+        assert target.read_text() == "VALUE = 2\n"
+        return run_module.subprocess.CompletedProcess(command, 7)
+
+    monkeypatch.setattr(run_module.subprocess, "run", fail_child)
+
+    with pytest.raises(typer.Exit) as exc_info:
         run_module._apply_harness_overlay_and_reexec(harness)
 
+    assert exc_info.value.exit_code == 7
     assert target.read_text() == "VALUE = 1\n"
+    assert observed["env"][run_module._HARNESS_APPLIED_ENV] == str(harness.resolve())
+    assert run_module._HARNESS_BACKUP_ENV not in observed["env"]
 
 
 def test_harness_overlay_rejects_non_overlay_folder(tmp_path):

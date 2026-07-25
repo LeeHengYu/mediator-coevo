@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import random
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -320,12 +321,15 @@ def _apply_harness_overlay_and_reexec(harness_dir: Path) -> None:
     typer.echo(f"Applied harness overlay: {resolved} ({len(applied_files)} files)")
     env = os.environ.copy()
     env[_HARNESS_APPLIED_ENV] = str(resolved)
-    env[_HARNESS_BACKUP_ENV] = str(backup_dir)
     try:
-        os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
-    except OSError:
+        completed = subprocess.run(
+            [sys.executable, *sys.argv],
+            env=env,
+            check=False,
+        )
+    finally:
         _restore_harness_overlay_backup(PROJECT_ROOT, backup_dir)
-        raise
+    raise typer.Exit(code=completed.returncode)
 
 
 def _restore_scoped_harness_overlay() -> None:
