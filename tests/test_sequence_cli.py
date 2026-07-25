@@ -261,7 +261,11 @@ def test_sequence_runs_k_seeded_permutations(
         "families:alpha",
     ]
     assert all(
-        all(task_id.startswith(f"{task_set_id.removeprefix('families:')}-") for task_id in run[4])
+        task_set_id is not None
+        and all(
+            task_id.startswith(f"{task_set_id.removeprefix('families:')}-")
+            for task_id in run[4]
+        )
         for task_set_id, run in zip(task_set_ids, runs, strict=True)
     )
     assert [path.name for *_, path in runs] == ["iter-1", "iter-2", "iter-3"]

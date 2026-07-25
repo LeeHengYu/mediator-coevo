@@ -157,7 +157,7 @@ warmup = 3
 ```
 
 Generate any missing per-task base artifact stores, then run repeated seeded
-sequences:
+single-family iterations in one sequence archive:
 
 ```bash
 uv run medcoevo base-artifacts --family <family>
@@ -166,13 +166,16 @@ uv run medcoevo sequence \
   --seed 0 -K 10 -n 10 --warmup 3
 ```
 
-- Every sequence stays within one task family. Task IDs are repeated as needed
-  with balanced multiplicities; the preloaded warmup prefix remains distinct.
-- `-K` is the repeat count.
-- `-n/--length` is the total tasks per sequence.
-- `--warmup` is the number of warmup tasks.
+- Repeatable `--family` values form a pool. Each iteration selects one family,
+  with selections balanced across `K`.
+- Within an iteration, task IDs are repeated as needed with balanced
+  multiplicities; the preloaded warmup prefix remains distinct.
+- `-K` is the number of single-family iterations in the sequence archive.
+- `-n/--length` is the total tasks per iteration, including warmup.
+- `--warmup` is the preloaded prefix count, so the evaluated suffix contains
+  `length - warmup` tasks.
 - CLI task-count flags override `[sequence]`.
-- Loop `i` uses `seed + i` for both the task stream and policy seed.
+- Iteration `i` uses `seed + i` for both the task stream and policy seed.
 
 The graph and diffusion flags are independent booleans, both defaulting to
 false:
@@ -204,37 +207,41 @@ future artifacts.
 ## Offline HL Agent
 
 The offline HL agent is independent from the graph and diffusion agents that run
-inside a sequence. It loads `docs/hl_agent_prompt.md`, analyzes completed
-sequence evidence, and may write only to an invocation-owned campaign staging
-overlay before publishing an immutable update.
+inside a sequence. It loads `docs/hl_agent_prompt.md` and analyzes completed
+sequence evidence. Harness source changes may be written only to an
+invocation-owned campaign staging overlay; episode, decision, update, and
+promotion metadata stay under the campaign directory.
 
 ```bash
 uv run medcoevo hl-agent \
   --campaign HL6 \
-  --source-sequence data/sequences/<sequence-run> \
-  --episodes 5 \
-  --start-episode 3 \
+  --episodes 1 \
   --family <family-1> \
   --family <family-2> \
   --family <family-3> \
   --family <family-4> \
-  -K 3
+  -K 1
 ```
 
-`--episodes` counts new episodes; the optional source sequence is analyzed first
-and is not counted. `--start-episode` allows a pre-existing campaign to resume
-from an absolute episode number. `sequence` spreads K as evenly as possible
-across the supplied family pool, randomly assigns any remainder, and shuffles
-the order. Every iteration remains single-family, and per-episode family counts
-differ by at most one. The infrastructure chooses the fresh seed, K, harness,
-and episode cadence, then invokes the HL agent after every completed episode,
-including the final one.
+`--episodes` counts new episodes to execute and analyze. `--start-episode` is the
+absolute number of the first new episode and is inferred from managed campaign
+records when omitted.
+
+Within each episode, `sequence` spreads K as evenly as possible across the
+supplied family pool, randomly assigns any remainder, and shuffles the order.
+Every iteration remains single-family, and per-episode family counts differ by
+at most one. The infrastructure chooses the fresh seed, K, harness, and episode
+cadence, then invokes the HL agent after every completed episode, including the
+final one.
 
 The command defaults to `models.planner`. The agent can inspect repository and
 campaign evidence, stage harness-owned files, run focused checks, and publish
 with the existing harness registry. It has no sequence-launch or unrestricted
 shell tool and cannot write repository `src/` directly. Managed episode records
-are stored under `data/experiments/<campaign>/episodes/`.
+are stored under `data/experiments/<campaign>/episodes/`; decisions are stored
+under `decisions/`. `HOLD` publishes no update. `TARGETED_UPDATE` freezes the
+invocation staging overlay as the next immutable `update_XXXX` and updates the
+promoted-harness channel.
 
 ## Harness Overlays
 
@@ -244,7 +251,9 @@ least one direct-agent file:
 - `src/mediated_coevo/diffusion/task_graph_agent.py`
 - `src/mediated_coevo/diffusion/policy_agent.py`
 
-Publish an existing campaign update and use it later:
+`hl-agent` publishes `TARGETED_UPDATE` results automatically. Use
+`publish-harness` only to register an existing update prepared outside that
+managed flow:
 
 ```bash
 uv run medcoevo publish-harness \

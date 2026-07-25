@@ -253,7 +253,6 @@ def test_infrastructure_runs_new_episodes_from_middle_and_analyzes_final(
         k=3,
         config_dir=tmp_path / "config",
         project_root=tmp_path,
-        source_sequence=None,
     )
 
     assert [(call[0], call[1]) for call in calls] == [
@@ -276,56 +275,6 @@ def test_infrastructure_runs_new_episodes_from_middle_and_analyzes_final(
     ).is_file()
 
 
-def test_source_analysis_is_excluded_from_new_episode_count(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _, source = _project(tmp_path)
-    calls: list[tuple[int, tuple[str, ...], Path]] = []
-
-    def fake_sequence(**kwargs: Any) -> tuple[Path, tuple[str, ...]]:
-        sequence = tmp_path / "data" / "sequences" / "sequence-new"
-        sequence.mkdir(parents=True)
-        return sequence, ("gamma", "gamma", "delta")
-
-    def fake_agent(**kwargs: Any) -> dict[str, Any]:
-        calls.append(
-            (
-                kwargs["episode_number"],
-                kwargs["episode_families"],
-                kwargs["source_sequence"],
-            )
-        )
-        return {
-            "response": "analyzed",
-            "decision": {"decision": "HOLD"},
-            "published_update": None,
-        }
-
-    monkeypatch.setattr(hl_module.secrets, "randbits", lambda _: 55)
-    monkeypatch.setattr(hl_module, "_run_sequence_episode", fake_sequence)
-    monkeypatch.setattr(hl_module, "run_hl_agent", fake_agent)
-
-    records = hl_module.run_hl_campaign(
-        model="openrouter:test/model",
-        campaign="HLT",
-        families=_FAMILIES,
-        episodes=1,
-        start_episode=2,
-        k=3,
-        config_dir=tmp_path / "config",
-        project_root=tmp_path,
-        source_sequence=source,
-    )
-
-    assert [(call[0], call[1]) for call in calls] == [
-        (1, ("alpha",)),
-        (2, ("gamma", "gamma", "delta")),
-    ]
-    assert len(records) == 1
-    assert records[0]["episode"] == 2
-
-
 def test_start_episode_is_inferred_from_managed_records(tmp_path: Path) -> None:
     campaign_root = tmp_path / "data" / "experiments" / "HLT"
     record = campaign_root / "episodes" / "episode_0007.json"
@@ -336,7 +285,6 @@ def test_start_episode_is_inferred_from_managed_records(tmp_path: Path) -> None:
         hl_module._resolve_start_episode(
             campaign_root=campaign_root,
             requested=None,
-            has_source=False,
         )
         == 8
     )
@@ -381,7 +329,6 @@ def test_failed_episode_is_retried(
         hl_module._resolve_start_episode(
             campaign_root=campaign_root,
             requested=None,
-            has_source=False,
         )
         == 7
     )
@@ -394,7 +341,6 @@ def test_failed_episode_is_retried(
         k=1,
         config_dir=tmp_path / "config",
         project_root=tmp_path,
-        source_sequence=None,
     )
 
     record = json.loads(record_path.read_text())

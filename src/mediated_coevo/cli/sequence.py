@@ -246,8 +246,8 @@ def sequence(
         typer.Option(
             "--family",
             help=(
-                "Benchmark family pool, spread as evenly as possible across "
-                "-K iterations."
+                "Repeatable benchmark family pool; each -K iteration selects "
+                "one family, balanced across the pool."
             ),
         ),
     ],
@@ -261,7 +261,7 @@ def sequence(
         int,
         typer.Option(
             "-K",
-            help="Number of sequences to run serially.",
+            help="Number of single-family iterations to run serially.",
         ),
     ] = 1,
     length: Annotated[
@@ -269,7 +269,10 @@ def sequence(
         typer.Option(
             "-n",
             "--length",
-            help="Tasks per sequence; overrides sequence.length in config.",
+            help=(
+                "Total tasks per iteration, including warmup; overrides "
+                "sequence.length in config."
+            ),
         ),
     ] = None,
     warmup: Annotated[
@@ -277,8 +280,8 @@ def sequence(
         typer.Option(
             "--warmup",
             help=(
-                "Preloaded artifact-store tasks per sequence; overrides "
-                "sequence.warmup in config."
+                "Preloaded prefix tasks per iteration, included in --length; "
+                "overrides sequence.warmup in config."
             ),
         ),
     ] = None,
@@ -317,7 +320,10 @@ def sequence(
         Path | None,
         typer.Option(
             "--harness-dir",
-            help="Repo-root overlay containing at least one sequence agent harness.",
+            help=(
+                "Cumulative repo-relative overlay containing "
+                "task_graph_agent.py or policy_agent.py."
+            ),
         ),
     ] = None,
     harness_ref: Annotated[

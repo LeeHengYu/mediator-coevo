@@ -36,40 +36,33 @@ def hl_agent(
         typer.Option(
             "--family",
             help=(
-                "Exactly four campaign families, spread as evenly as possible "
-                "across -K iterations."
+                "Repeat exactly four campaign families; each -K iteration "
+                "selects one, balanced within each episode."
             ),
         ),
     ],
     episodes: Annotated[
         int,
         typer.Option(
-            help="Number of new deployment episodes for infrastructure to run."
+            help="Number of new sequence episodes to execute and analyze."
         ),
     ] = 1,
     start_episode: Annotated[
         int | None,
         typer.Option(
-            help="Absolute number of the first new episode; inferred for managed campaigns."
-        ),
-    ] = None,
-    source_sequence: Annotated[
-        Path | None,
-        typer.Option(
-            "--source-sequence",
             help=(
-                "Optional completed episode to analyze before the new episodes; "
-                "it does not count toward --episodes."
-            ),
+                "Absolute number of the first new episode; inferred from "
+                "managed campaign records."
+            )
         ),
     ] = None,
     k: Annotated[
-        int | None,
+        int,
         typer.Option(
             "-K",
-            help="Sequence iterations per episode; defaults to source K or 3.",
+            help="Single-family sequence iterations per episode.",
         ),
-    ] = None,
+    ] = 3,
     model: Annotated[
         str | None,
         typer.Option(help="OpenRouter model; defaults to models.planner."),
@@ -85,42 +78,14 @@ def hl_agent(
         raise typer.BadParameter("hl-agent requires exactly four --family values")
     if episodes < 1:
         raise typer.BadParameter("--episodes must be at least 1")
-    resolved_source = _resolve_source_sequence(source_sequence, PROJECT_ROOT)
-    source_k = _source_k(resolved_source)
-    resolved_k = k if k is not None else source_k
-    if resolved_k < 1:
+    if k < 1:
         raise typer.BadParameter("-K must be at least 1")
-    if (
-        resolved_source is not None
-        and _completed_iterations(resolved_source) != source_k
-    ):
-        raise typer.BadParameter(
-            "--source-sequence must contain one completed sample_result.json "
-            "for every recorded source iteration"
-        )
 
     campaign_root = _campaign_root(PROJECT_ROOT, campaign)
     resolved_start = _resolve_start_episode(
         campaign_root=campaign_root,
         requested=start_episode,
-        has_source=resolved_source is not None,
     )
-    if resolved_source is not None and resolved_start == 1:
-        raise typer.BadParameter(
-            "--source-sequence precedes the first new episode, so "
-            "--start-episode must be at least 2"
-        )
-    if resolved_source is not None:
-        try:
-            source_families = _source_families(resolved_source)
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        unexpected = set(source_families) - set(families)
-        if unexpected:
-            raise typer.BadParameter(
-                "source sequence contains families outside the campaign pool: "
-                + ", ".join(sorted(unexpected))
-            )
     for episode_number in range(resolved_start, resolved_start + episodes):
         record_path = _episode_record_path(campaign_root, episode_number)
         if record_path.exists() and _episode_status(record_path) != "failed":
@@ -143,10 +108,9 @@ def hl_agent(
         families=families,
         episodes=episodes,
         start_episode=resolved_start,
-        k=resolved_k,
+        k=k,
         config_dir=config_dir.resolve(),
         project_root=PROJECT_ROOT,
-        source_sequence=resolved_source,
     )
 
 
@@ -160,33 +124,9 @@ def run_hl_campaign(
     k: int,
     config_dir: Path,
     project_root: Path,
-    source_sequence: Path | None,
 ) -> list[dict[str, Any]]:
     """Run exactly ``episodes`` new episodes and analyze the final one too."""
     campaign_root = _campaign_root(project_root, campaign)
-    if source_sequence is not None:
-        source_episode = start_episode - 1
-        source_families = _source_families(source_sequence)
-        unexpected = set(source_families) - set(families)
-        if unexpected:
-            raise ValueError(
-                "source sequence contains families outside the campaign pool: "
-                + ", ".join(sorted(unexpected))
-            )
-        console.print(
-            f"[bold]HL source analysis:[/] episode {source_episode} · "
-            f"{source_families} · {source_sequence}"
-        )
-        source_result = run_hl_agent(
-            model=model,
-            campaign=campaign,
-            families=families,
-            episode_number=source_episode,
-            episode_families=source_families,
-            project_root=project_root,
-            source_sequence=source_sequence,
-        )
-        console.print(source_result["response"])
 
     completed_records: list[dict[str, Any]] = []
     for episode_number in range(start_episode, start_episode + episodes):
@@ -318,26 +258,10 @@ def _run_sequence_episode(
     return created[0], selected_families
 
 
-def _resolve_source_sequence(
-    source_sequence: Path | None,
-    project_root: Path,
-) -> Path | None:
-    if source_sequence is None:
-        return None
-    resolved = source_sequence.expanduser().resolve()
-    sequence_root = (project_root / "data" / "sequences").resolve()
-    if not resolved.is_relative_to(sequence_root) or not resolved.is_dir():
-        raise typer.BadParameter(
-            "--source-sequence must be a completed data/sequences/ directory"
-        )
-    return resolved
-
-
 def _resolve_start_episode(
     *,
     campaign_root: Path,
     requested: int | None,
-    has_source: bool,
 ) -> int:
     if requested is not None:
         if requested < 1:
@@ -352,8 +276,6 @@ def _resolve_start_episode(
         latest = max(managed)
         latest_record = _episode_record_path(campaign_root, latest)
         return latest if _episode_status(latest_record) == "failed" else latest + 1
-    if has_source:
-        return 2
     has_legacy_state = (
         any(campaign_root.glob("update_*"))
         or (campaign_root / "decisions").is_dir()
@@ -387,22 +309,6 @@ def _episode_status(record_path: Path) -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     return payload.get("status") if isinstance(payload, dict) else None
-
-
-def _source_k(source_sequence: Path | None) -> int:
-    if source_sequence is None:
-        return 3
-    return len(
-        [
-            path
-            for path in source_sequence.glob("iter-*")
-            if path.is_dir() and (path / "sequence_spec.json").is_file()
-        ]
-    ) or 3
-
-
-def _completed_iterations(sequence: Path) -> int:
-    return len(list(sequence.glob("iter-*/samples/*/sample_result.json")))
 
 
 def _source_families(sequence: Path) -> tuple[str, ...]:
