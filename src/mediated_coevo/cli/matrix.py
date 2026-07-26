@@ -46,7 +46,7 @@ def matrix(
         list[str] | None,
         typer.Option(
             "--family",
-            help="SkillFlow family to bootstrap into a stream. Repeat for multiple.",
+            help="Benchmark family to bootstrap into a stream. Repeat for multiple.",
         ),
     ] = None,
     split: Annotated[
@@ -218,7 +218,7 @@ def matrix(
         split=split,
     )
     config.experiment.benchmark_selection.tasks = selection.task_ids
-    config.experiment.benchmark_selection.family = selection.family
+    config.experiment.benchmark_selection.family = selection.family_label
     config.experiment.benchmark_selection.split = selection.split
     config.experiment.benchmark_selection.task_stream_seed = selection.task_stream_seed
     seed = config.experiment.seed
@@ -240,7 +240,7 @@ def matrix(
     )
 
     print_task_selection(selection)
-    if selection.family is not None:
+    if selection.families:
         console.print(f"[bold]Task stream length per row:[/] {len(selection.task_ids)}")
     else:
         console.print(f"[bold]Iterations per row:[/] {iterations}")
@@ -281,7 +281,7 @@ def matrix(
             )
         _write_matrix_invocation_metadata(
             row_dir=row.runtime.experiment_dir,
-            family=selection.family,
+            family=selection.family_label,
             split=getattr(selection, "split", None),
             selected_task_ids=selection.task_ids,
             iterations=iterations,

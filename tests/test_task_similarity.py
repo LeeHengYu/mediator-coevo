@@ -20,7 +20,7 @@ def test_percentile_threshold_uses_nearest_rank() -> None:
         percentile_threshold([0.0], 0.0)
 
 
-def test_task_graph_precompute_scores_directed_skillflow_edges_and_cuts_below_p20(
+def test_task_graph_precompute_scores_directed_edges_and_cuts_below_p20(
     tmp_path: Path,
 ) -> None:
     tasks_root = tmp_path / "tasks"
@@ -183,14 +183,14 @@ def test_write_task_graph_artifacts(tmp_path: Path) -> None:
 
     assert profiles["task_count"] == 2
     assert sorted(profiles["profiles"]) == ["family-a/task-a", "family-a/task-b"]
-    assert pairwise["graph_kind"] == "skillflow_ranked_similarity"
+    assert pairwise["graph_kind"] == "ranked_task_similarity"
     assert pairwise["pair_count"] == 1
     assert pairwise["active_threshold"] == pairwise["p20_threshold"]
     assert pairwise["threshold_kind"] == "p20"
     assert pairwise["pairs"][0]["source"] == "family-a/task-a"
     assert pairwise["pairs"][0]["metadata"]["directed"] is True
     assert pairwise["pairs"][0]["metadata"]["same_family"] is True
-    assert summary["graph_kind"] == "skillflow_ranked_similarity"
+    assert summary["graph_kind"] == "ranked_task_similarity"
     assert summary["task_count"] == 2
     assert "profiles" not in summary
     assert "pairwise_similarity" not in summary

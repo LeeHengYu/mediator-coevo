@@ -192,7 +192,7 @@ CAPABILITY_MARKERS: dict[str, frozenset[str]] = {
 
 
 class ScoreWeights(BaseModel):
-    """Weights for directed SkillFlow edge scoring components."""
+    """Weights for directed benchmark-task edge scoring components."""
 
     same_family_base: float = 0.65
     rank_affinity: float = 0.15
@@ -202,7 +202,7 @@ class ScoreWeights(BaseModel):
 
 
 class TaskSimilarityProfile(BaseModel):
-    """Graph node ingredients extracted from a local SkillFlow task."""
+    """Graph node ingredients extracted from a local benchmark task."""
 
     task_id: str
     family_id: str = ""
@@ -234,7 +234,7 @@ class PairSimilarity(BaseModel):
 class TaskGraphPrecompute(BaseModel):
     """Precomputed graph ingredients and threshold-pruned edge set."""
 
-    graph_kind: str = "skillflow_ranked_similarity"
+    graph_kind: str = "ranked_task_similarity"
     task_count: int
     pair_count: int
     score_weights: ScoreWeights
@@ -346,7 +346,7 @@ def compute_pairwise_similarity(
     features: dict[str, _ProfileFeatures],
     score_weights: ScoreWeights,
 ) -> list[PairSimilarity]:
-    """Compute weighted directed SkillFlow edge candidates."""
+    """Compute weighted directed benchmark-task edge candidates."""
     pairs: list[PairSimilarity] = []
     family_task_ids: dict[str, list[str]] = {}
     for task_id in sorted(features):

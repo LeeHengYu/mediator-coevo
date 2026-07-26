@@ -15,7 +15,7 @@ from mediated_coevo.benchmarks.lifelong_agent_bench import (
     load_lifelong_agent_bench_rows,
     materialize_lifelong_agent_bench,
 )
-from mediated_coevo.benchmarks.skillflow import SkillFlowRepository
+from mediated_coevo.benchmarks.skillflow import TaskPackageRepository
 from mediated_coevo.cli.sequence import _select_sequence_tasks
 
 
@@ -108,7 +108,7 @@ def test_materialized_family_uses_existing_default_ten_task_sampler(
         rows=[_os_row(index) for index in range(12)],
         tasks_root=tasks_root,
     )
-    repository = SkillFlowRepository(tmp_path, ["tasks"])
+    repository = TaskPackageRepository(tmp_path, ["tasks"])
 
     selected = _select_sequence_tasks(
         repository,

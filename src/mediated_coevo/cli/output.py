@@ -87,7 +87,7 @@ def print_result_summary(
 
 def print_task_selection(selection: Any) -> None:
     families = getattr(selection, "families", None)
-    label = ", ".join(families) if families else selection.family
+    label = ", ".join(families) if families else selection.family_label
     console.print(f"[bold]Family:[/] {label}")
     if getattr(selection, "split", None):
         console.print(f"[bold]Split:[/] {selection.split}")

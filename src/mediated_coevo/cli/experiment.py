@@ -22,7 +22,7 @@ from mediated_coevo.analysis.judge_rewards import (
 from mediated_coevo.analysis.reporting import build_score_summary, write_score_summary
 from mediated_coevo.benchmarks import (
     HarborPrebuiltImageMissingError,
-    SkillFlowRepository,
+    TaskPackageRepository,
 )
 from mediated_coevo.cli.output import console, print_result_summary
 from mediated_coevo.core.config import Config
@@ -37,7 +37,7 @@ TASK_SPLIT_NAMES = frozenset({"train", "validation", "test"})
 
 @dataclass(frozen=True)
 class TaskSelection:
-    """Resolved SkillFlow task stream for one run."""
+    """Resolved benchmark task stream for one run."""
 
     task_ids: list[str]
     families: tuple[str, ...]
@@ -45,14 +45,14 @@ class TaskSelection:
     task_stream_seed: int | None = None
 
     @property
-    def family(self) -> str:
+    def family_label(self) -> str:
         """Compact label for persisted metadata and old call sites."""
         return ",".join(self.families)
 
 
 def load_task_manifest_selection(
     *,
-    repository: SkillFlowRepository,
+    repository: TaskPackageRepository,
     manifest_path: Path,
 ) -> TaskSelection:
     """Load a frozen ordered task stream without resampling it."""
@@ -120,7 +120,7 @@ def setup_logging(verbose: bool = False) -> None:
 
 def resolve_task_selection(
     *,
-    repository: SkillFlowRepository,
+    repository: TaskPackageRepository,
     family: str | Sequence[str] | None,
     seed: int | None = None,
     split: str | None = None,
@@ -131,7 +131,7 @@ def resolve_task_selection(
         family_task_ids = repository.list_local_task_ids(family=family_name)
         if not family_task_ids:
             raise typer.BadParameter(
-                f"no local SkillFlow tasks found for family {family_name!r}"
+                f"no local benchmark tasks found for family {family_name!r}"
             )
         selected.extend(family_task_ids)
     selected = sorted(dict.fromkeys(selected))

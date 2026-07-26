@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, Self
-
-from pydantic import BaseModel, ConfigDict, model_validator
+from typing import Literal
 
 
 class OrchestrationArm(str, Enum):
@@ -20,38 +19,15 @@ class OrchestrationArm(str, Enum):
 PolicyComponent = Literal["none", "random_uniform", "diffusion"]
 
 
-class ArmPlan(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ArmPlan:
     """Frozen component plan invoked for one suffix task occurrence."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal[1] = 1
     arm: OrchestrationArm
     graph_agent_enabled: bool
     diffusion_agent_enabled: bool
     policy_component: PolicyComponent
     pack_context: bool
-
-    @model_validator(mode="after")
-    def validate_composition(self) -> Self:
-        """Reject compositions that blur the four fixed treatments."""
-        if self.arm is OrchestrationArm.EXECUTION_ONLY:
-            expected = (False, False, "none", False)
-        elif self.arm is OrchestrationArm.GRAPH_ONLY:
-            expected = (True, False, "random_uniform", True)
-        elif self.arm is OrchestrationArm.DIFFUSION_ONLY:
-            expected = (False, True, "diffusion", True)
-        else:
-            expected = (True, True, "diffusion", True)
-        actual = (
-            self.graph_agent_enabled,
-            self.diffusion_agent_enabled,
-            self.policy_component,
-            self.pack_context,
-        )
-        if actual != expected:
-            raise ValueError(f"invalid component plan for {self.arm.value}")
-        return self
 
 
 _ARM_PLANS = {

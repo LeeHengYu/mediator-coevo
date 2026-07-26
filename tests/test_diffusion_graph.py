@@ -75,7 +75,7 @@ def test_diffusion_network_can_include_unkept_pairs(tmp_path: Path) -> None:
     assert all(edge.metadata["threshold_filter_applied"] is False for edge in edges)
 
 
-def test_diffusion_network_materializes_directed_skillflow_edges(tmp_path: Path) -> None:
+def test_diffusion_network_materializes_directed_benchmark_edges(tmp_path: Path) -> None:
     network = _build_network(
         tmp_path,
         task_ids=["task-a", "task-b", "task-c"],
@@ -242,7 +242,7 @@ def _task_profiles() -> dict[str, Any]:
 
 def _pairwise_similarity() -> dict[str, Any]:
     return {
-        "graph_kind": "skillflow_ranked_similarity",
+        "graph_kind": "ranked_task_similarity",
         "pair_count": 2,
         "p20_threshold": 0.01,
         "edge_score_threshold": 0.05,

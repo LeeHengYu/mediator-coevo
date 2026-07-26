@@ -15,8 +15,8 @@ from mediated_coevo.agents.mediator import MediatorAgent
 from mediated_coevo.agents.planner import PlannerAgent
 from mediated_coevo.benchmarks import (
     HarborRunner,
-    SkillFlowRepository,
     SkillFlowSyncConfig,
+    TaskPackageRepository,
 )
 from mediated_coevo.core.config import Config
 from mediated_coevo.experiment.baselines import (
@@ -52,7 +52,7 @@ def build_experiment(
     seed: int,
     condition_name: ConditionName,
     experiment_dir: Path | None = None,
-    benchmark_repo: SkillFlowRepository | None = None,
+    benchmark_repo: TaskPackageRepository | None = None,
     harbor_runner: HarborRunner | None = None,
 ) -> ExperimentRuntime:
     if experiment_dir is None:
@@ -100,15 +100,13 @@ def create_matrix_dir(
     return matrix_dir
 
 
-def build_benchmark_repo(project_root: Path, config: Config) -> SkillFlowRepository:
-    return SkillFlowRepository(
+def build_benchmark_repo(project_root: Path, config: Config) -> TaskPackageRepository:
+    return TaskPackageRepository(
         root_dir=project_root / config.paths.benchmarks_dir,
         task_dirs=config.executor_runtime.task_dirs,
         sync=SkillFlowSyncConfig(
-            enabled=config.executor_runtime.sync_enabled,
             dataset=config.executor_runtime.dataset,
             repo_type=config.executor_runtime.dataset_repo_type,
-            local_dir=config.executor_runtime.task_dirs[0],
             remote_task_cache_path=project_root / "docs" / "skillflow_tasks.txt",
         ),
         harbor_base_image=config.executor_runtime.harbor_base_image,
@@ -122,7 +120,7 @@ def build_experiment_runtime(
     condition_name: ConditionName,
     runtime_skills_dir: Path,
     experiment_dir: Path,
-    benchmark_repo: SkillFlowRepository,
+    benchmark_repo: TaskPackageRepository,
     harbor_runner: HarborRunner | None = None,
 ) -> ExperimentRuntime:
     """Build one runtime from already materialized experiment directories."""
@@ -192,7 +190,7 @@ def build_matrix_runtimes(
     base_config: Config,
     seed: int,
     matrix_dir: Path,
-    benchmark_repo: SkillFlowRepository,
+    benchmark_repo: TaskPackageRepository,
     harbor_runner: HarborRunner | None = None,
     preset_names: Sequence[str] | None = None,
     flatten_single_row: bool = False,

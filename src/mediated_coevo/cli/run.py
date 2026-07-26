@@ -70,7 +70,7 @@ _HARNESS_APPLIED_ENV = "MEDCOEVO_HARNESS_APPLIED"
 _HARNESS_BACKUP_ENV = "MEDCOEVO_HARNESS_BACKUP"
 
 
-def run_skillflow_experiment(
+def run_benchmark_experiment(
     *,
     config: Config,
     selection: TaskSelection,
@@ -84,10 +84,10 @@ def run_skillflow_experiment(
     publish_state_ref: str | None = None,
     artifact_store_dir: Path | None = None,
 ) -> Path:
-    """Run a SkillFlow selection locally."""
+    """Run a benchmark task selection locally."""
     random.seed(seed)
     config.experiment.benchmark_selection.tasks = selection.task_ids
-    config.experiment.benchmark_selection.family = selection.family
+    config.experiment.benchmark_selection.family = selection.family_label
     config.experiment.benchmark_selection.split = selection.split
     config.experiment.benchmark_selection.task_stream_seed = selection.task_stream_seed
 
@@ -97,7 +97,7 @@ def run_skillflow_experiment(
         ensure_os_base_image()
 
     resolved_run_id = (
-        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{run_id or f'{seed}-skillflow'}"
+        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{run_id or f'{seed}-benchmark'}"
     )
     experiment_dir = (
         PROJECT_ROOT / config.paths.data_dir / "experiments" / resolved_run_id
@@ -137,7 +137,7 @@ def run_skillflow_experiment(
     )
 
     print_task_selection(selection)
-    if selection.family is not None:
+    if selection.families:
         console.print(f"[bold]Task stream length:[/] {len(selection.task_ids)}")
     else:
         console.print(f"[bold]Iterations:[/] {iterations}")
@@ -203,7 +203,7 @@ def ensure_base_artifact_store(
             expected_store_id=task_id,
         )
         return False
-    experiment_dir = run_skillflow_experiment(
+    experiment_dir = run_benchmark_experiment(
         config=config.model_copy(deep=True),
         selection=TaskSelection(
             task_ids=[task_id],
@@ -290,7 +290,7 @@ def base_artifacts(
         task_ids = repository.list_local_task_ids(family=family_name)
         if not task_ids:
             raise typer.BadParameter(
-                f"no local SkillFlow tasks found for family {family_name!r}"
+                f"no local benchmark tasks found for family {family_name!r}"
             )
         for task_id in task_ids:
             destination = output_dir / task_id
@@ -581,7 +581,7 @@ def run(
             raise typer.BadParameter(
                 "--publish-state-ref may only publish graph state from --split train runs"
             )
-        run_skillflow_experiment(
+        run_benchmark_experiment(
             config=config,
             selection=selection,
             iterations=config.experiment.num_iterations,

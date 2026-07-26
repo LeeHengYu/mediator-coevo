@@ -39,7 +39,7 @@ def test_run_single_task_infers_lifelong_root(
     )
     monkeypatch.setattr(
         run_module,
-        "run_skillflow_experiment",
+        "run_benchmark_experiment",
         lambda **kwargs: captured.update(kwargs),
     )
 
@@ -74,7 +74,7 @@ def test_base_artifacts_infers_lifelong_root_before_loading_repository(
         lambda project_root, config: repository,
     )
 
-    with pytest.raises(typer.BadParameter, match="no local SkillFlow tasks"):
+    with pytest.raises(typer.BadParameter, match="no local benchmark tasks"):
         run_module.base_artifacts(
             family=["os_interaction"],
             config_dir=tmp_path,
@@ -106,7 +106,7 @@ def test_ensure_base_artifact_store_runs_only_when_missing(
     experiment_dir = tmp_path / "base-artifact-run"
     run_experiment = MagicMock(return_value=experiment_dir)
     remove_experiment = MagicMock()
-    monkeypatch.setattr(run_module, "run_skillflow_experiment", run_experiment)
+    monkeypatch.setattr(run_module, "run_benchmark_experiment", run_experiment)
     monkeypatch.setattr(
         run_module,
         "_remove_base_artifact_experiment",

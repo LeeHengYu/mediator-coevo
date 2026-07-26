@@ -69,7 +69,6 @@ class PlannerAgent(BaseAgent):
             )
         section = PromptSection(
             name=heading.lower().replace(" ", "_"),
-            kind="scaffold",
             content=PromptText.system_context(heading, description, content),
         )
         messages.append(
@@ -261,7 +260,6 @@ class PlannerAgent(BaseAgent):
             sections = [
                 PromptSection(
                     "task_header",
-                    "scaffold",
                     task_header,
                     required=True,
                 ).to_budget_section(overflow_strategy="section_pack")
@@ -270,7 +268,6 @@ class PlannerAgent(BaseAgent):
                 sections.append(
                     PromptSection(
                         "benchmark_instruction",
-                        "scaffold",
                         PromptText.benchmark_instruction(instruction),
                         required=True,
                         max_tokens=instruction_budget,
@@ -282,7 +279,6 @@ class PlannerAgent(BaseAgent):
             )
             sections.append(
                 PromptSection(
-                    "response_schema",
                     "response_schema",
                     response_schema,
                     required=True,
@@ -314,7 +310,6 @@ class PlannerAgent(BaseAgent):
         return (
             PromptSection(
                 "prior_context",
-                "same_task_prior",
                 PromptText.prior_context(prior_context),
                 required=True,
             ),

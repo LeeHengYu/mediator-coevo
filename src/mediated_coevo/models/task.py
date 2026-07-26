@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
-from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
@@ -19,45 +18,6 @@ class TaskSpec(BaseModel):
     iteration: int = 0
 
 
-@dataclass(frozen=True, slots=True)
-class ExecutorEnvelope:
-    """Portable runtime context shown to the Executor across benchmarks."""
-
-    task_instruction: str
-    executor_policy: str | None
-    task_resources: tuple[str, ...] = ()
-    verifier_contract: str | None = None
-
-    def render(self) -> str:
-        """Return a stable Markdown envelope for executor runtimes."""
-        task_instruction = (
-            (self.task_instruction or "").strip() or "(no task instruction supplied)"
-        )
-        executor_policy = (
-            (self.executor_policy or "").strip() or "(no executor policy supplied)"
-        )
-        task_resources = (
-            "\n\n".join(
-                block.strip()
-                for block in self.task_resources
-                if block.strip()
-            )
-            or "(no task resources supplied)"
-        )
-        verifier_contract = (
-            (self.verifier_contract or "").strip()
-            or "(no verifier contract supplied)"
-        )
-        return "\n\n".join(
-            [
-                f"# Task Instruction\n\n{task_instruction}",
-                f"# Executor Policy\n\n{executor_policy}",
-                f"# Task Resources\n\n{task_resources}",
-                f"# Verifier Contract\n\n{verifier_contract}",
-            ]
-        )
-
-
 def render_executor_envelope(
     *,
     task_instruction: str,
@@ -66,12 +26,19 @@ def render_executor_envelope(
     verifier_contract: str | None = None,
 ) -> str:
     """Render the shared executor policy envelope used by benchmark adapters."""
-    return ExecutorEnvelope(
-        task_instruction=task_instruction,
-        executor_policy=executor_policy,
-        task_resources=tuple(task_resources),
-        verifier_contract=verifier_contract,
-    ).render()
+    resources = "\n\n".join(
+        block.strip() for block in task_resources if block.strip()
+    )
+    sections = (
+        ("Task Instruction", task_instruction, "no task instruction supplied"),
+        ("Executor Policy", executor_policy, "no executor policy supplied"),
+        ("Task Resources", resources, "no task resources supplied"),
+        ("Verifier Contract", verifier_contract, "no verifier contract supplied"),
+    )
+    return "\n\n".join(
+        f"# {heading}\n\n{(content or '').strip() or f'({fallback})'}"
+        for heading, content, fallback in sections
+    )
 
 
 def executor_policy_hash(executor_policy: str | None) -> str | None:
@@ -99,5 +66,4 @@ def executor_policy_metadata(
         "task_resource_names": ",".join(resource_names),
         "verifier_contract_kind": verifier_contract_kind,
     }
-
 

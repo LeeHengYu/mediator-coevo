@@ -50,11 +50,8 @@ _SENSITIVE_NAMES = {
 
 def sha256_file(path: Path) -> str:
     """Return the SHA-256 digest of one regular file."""
-    digest = hashlib.sha256()
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def sensitive_archive_paths(workspace: Path) -> tuple[Path, ...]:

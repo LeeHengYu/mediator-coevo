@@ -79,7 +79,7 @@ def _write_graph_artifacts(graph_dir: Path, task_ids: list[str]) -> None:
     (graph_dir / "pairwise_similarity.json").write_text(
         json.dumps(
             {
-                "graph_kind": "skillflow_ranked_similarity",
+                "graph_kind": "ranked_task_similarity",
                 "pair_count": len(pairs),
                 "p20_threshold": 0.01,
                 "edge_score_threshold": 0.05,
@@ -130,7 +130,7 @@ def _write_weighted_graph_artifacts(
     (graph_dir / "pairwise_similarity.json").write_text(
         json.dumps(
             {
-                "graph_kind": "skillflow_ranked_similarity",
+                "graph_kind": "ranked_task_similarity",
                 "pair_count": len(pairs),
                 "p20_threshold": 0.01,
                 "edge_score_threshold": 0.05,
@@ -283,24 +283,6 @@ class _TraceHistoryInspectingMediator:
             )
         ]
         return None
-
-
-class _WithholdingMediator:
-    llm_client = _PlannerLLM()
-
-    async def mediate_trace(
-        self,
-        condition: str,
-        trace: ExecutionTrace,
-        task_context: TaskSpec,
-    ) -> MediatorReport:
-        return MediatorReport(
-            task_id=trace.task_id,
-            iteration=trace.iteration,
-            content="withheld content",
-            withheld=True,
-            reasoning="not useful for planner",
-        )
 
 
 class _FailingMediator:
@@ -549,19 +531,19 @@ async def test_prior_context_bundle_sections_follow_condition_matrix(tmp_path):
             current_iteration=1,
         )
 
-    assert [section.kind for section in bundles["no_feedback"].sections()] == []
-    assert [section.kind for section in bundles["shared_notes"].sections()] == [
+    assert [section.name for section in bundles["no_feedback"].sections()] == []
+    assert [section.name for section in bundles["shared_notes"].sections()] == [
         "same_task_prior"
     ]
-    assert [section.kind for section in bundles["full_traces"].sections()] == [
+    assert [section.name for section in bundles["full_traces"].sections()] == [
         "same_task_prior",
         "cross_task_prior",
     ]
-    assert [section.kind for section in bundles["static_mediator"].sections()] == [
+    assert [section.name for section in bundles["static_mediator"].sections()] == [
         "same_task_prior",
         "cross_task_prior",
     ]
-    assert [section.kind for section in bundles["learned_mediator"].sections()] == [
+    assert [section.name for section in bundles["learned_mediator"].sections()] == [
         "same_task_prior",
         "cross_task_prior",
     ]
@@ -594,7 +576,7 @@ async def test_diffusion_context_is_condition_independent_and_priority_routed(
         current_iteration=1,
     )
 
-    assert [section.kind for section in bundle.sections()] == ["diffusion_context"]
+    assert [section.name for section in bundle.sections()] == ["diffusion_context"]
     assert bundle.diffusion_context is not None
     assert "diffused hint" in bundle.diffusion_context
     assert bundle.cross_task_prior is None

@@ -18,7 +18,7 @@ from mediated_coevo.analysis.judge_rewards import (
     judge_reward_metadata,
 )
 from mediated_coevo.analysis.metrics import metric_row
-from mediated_coevo.benchmarks import SkillFlowRepository
+from mediated_coevo.benchmarks import TaskPackageRepository
 from mediated_coevo.core.config import Config
 from mediated_coevo.core.utils import format_optional_reward
 from mediated_coevo.diffusion import (
@@ -87,7 +87,7 @@ class Orchestrator:
         mediator: MediatorAgent,
         skill_store: SkillStore,
         artifact_store: ArtifactStore,
-        benchmark_repo: SkillFlowRepository,
+        benchmark_repo: TaskPackageRepository,
         config: Config,
         experiment_dir: Path,
         judge_llm_client: Any | None = None,
@@ -1337,20 +1337,6 @@ class Orchestrator:
             if llm_client is not None and hasattr(llm_client, "drain_token_events"):
                 events.extend(llm_client.drain_token_events())
         return events
-
-
-def _edge_weight(
-    snapshot: TaskGraphSnapshot,
-    source_task_id: str,
-    target_task_id: str,
-) -> float | None:
-    for edge in snapshot.edge_records:
-        if (
-            edge.source_task_id == source_task_id
-            and edge.target_task_id == target_task_id
-        ):
-            return edge.weight
-    return None
 
 
 def _latest_langchain_snapshot(

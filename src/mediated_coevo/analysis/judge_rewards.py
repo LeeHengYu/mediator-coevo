@@ -13,6 +13,7 @@ from mediated_coevo.analysis.reporting import (
     build_score_summary,
     write_score_summary,
 )
+from mediated_coevo.benchmarks import HARBOR_VERIFIER_TYPE
 from mediated_coevo.core.config import Config
 from mediated_coevo.core.utils import as_optional_float, parse_json_object
 from mediated_coevo.llm.client import LLMClient
@@ -548,7 +549,7 @@ def _candidates_from_traces(*, traces_path: Path) -> list[_JudgeCandidate]:
                 task_category=None,
                 task_difficulty=None,
                 expected_reward_range=(0.0, 1.0),
-                verifier_type="skillflow_harbor",
+                verifier_type=HARBOR_VERIFIER_TYPE,
                 trace=trace,
                 trace_path=traces_path,
                 metrics_path=None,

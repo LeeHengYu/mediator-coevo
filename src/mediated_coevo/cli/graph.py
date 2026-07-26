@@ -8,7 +8,7 @@ from mediated_coevo.analysis.task_similarity import (
     build_task_graph_precompute,
     write_task_graph_artifacts,
 )
-from mediated_coevo.benchmarks import SkillFlowRepository
+from mediated_coevo.benchmarks import TaskPackageRepository
 from mediated_coevo.core.config import Config
 
 TASK_SIMILARITY_GRAPH_NAMES = frozenset({"task_similarity", "precomputed_similarity"})
@@ -19,7 +19,7 @@ def materialize_task_graph_for_diffusion(
     *,
     config: Config,
     experiment_dir: Path,
-    benchmark_repo: SkillFlowRepository,
+    benchmark_repo: TaskPackageRepository,
 ) -> None:
     """Write task graph artifacts when graph-aware diffusion is enabled."""
     if (

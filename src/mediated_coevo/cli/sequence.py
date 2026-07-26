@@ -11,7 +11,7 @@ from typing import Annotated
 
 import typer
 
-from mediated_coevo.benchmarks import SkillFlowRepository
+from mediated_coevo.benchmarks import TaskPackageRepository
 from mediated_coevo.benchmarks.lifelong_agent_bench import (
     KNOWN_FAMILIES as LIFELONG_AGENT_BENCH_FAMILIES,
 )
@@ -80,7 +80,7 @@ def _select_iteration_families(
 
 
 def _select_sequence_tasks(
-    repository: SkillFlowRepository,
+    repository: TaskPackageRepository,
     family: str,
     seed: int,
     length: int,
@@ -164,7 +164,7 @@ def _ensure_os_warmup_stores(
 async def _run_sequence(
     *,
     config: Config,
-    repository: SkillFlowRepository,
+    repository: TaskPackageRepository,
     sequence: SequenceSpec,
     arm: OrchestrationArm,
     sequence_dir: Path,

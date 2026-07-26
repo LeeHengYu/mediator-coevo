@@ -9,7 +9,7 @@ from mediated_coevo.analysis.metrics import (
     metric_verifier_status,
     token_totals_by_agent,
 )
-from mediated_coevo.benchmarks import SKILLFLOW_VERIFIER_TYPE
+from mediated_coevo.benchmarks import HARBOR_VERIFIER_TYPE
 from mediated_coevo.core.config import Config
 from mediated_coevo.core.utils import as_mapping, as_nonempty_string
 from mediated_coevo.experiment.conditions import ConditionName
@@ -149,7 +149,7 @@ def task_metadata_fields(
 
     if task_config:
         expected_reward_range = expected_reward_range or (0.0, 1.0)
-        verifier_type = verifier_type or SKILLFLOW_VERIFIER_TYPE
+        verifier_type = verifier_type or HARBOR_VERIFIER_TYPE
 
     return {
         "task_category": category,

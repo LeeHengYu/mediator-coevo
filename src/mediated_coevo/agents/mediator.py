@@ -108,7 +108,6 @@ class MediatorAgent(BaseAgent):
             sections.append(
                 PromptSection(
                     "task_context",
-                    "scaffold",
                     PromptText.mediator_task_context(task_context.instruction),
                     required=True,
                 )
@@ -146,7 +145,6 @@ class MediatorAgent(BaseAgent):
             "role": "system",
             "content": PromptSection(
                 "relevant_history",
-                "same_task_prior",
                 PromptText.mediator_history(history_lines),
             ).content,
         }
@@ -154,7 +152,6 @@ class MediatorAgent(BaseAgent):
     def _trace_section(self, trace: ExecutionTrace) -> PromptSection:
         return PromptSection(
             "execution_trace",
-            "execution_feedback",
             PromptText.mediator_execution_trace(
                 stdout=trace.stdout,
                 stderr=trace.stderr,

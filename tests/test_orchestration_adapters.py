@@ -931,14 +931,13 @@ def test_artifact_bank_redacts_projected_content_and_metadata(tmp_path):
 
 
 def test_arm_plans_are_the_fixed_four_treatments():
-    assert plan_for_arm(OrchestrationArm.EXECUTION_ONLY).model_dump(
-        exclude={"schema_version", "arm"}
-    ) == {
-        "graph_agent_enabled": False,
-        "diffusion_agent_enabled": False,
-        "policy_component": "none",
-        "pack_context": False,
-    }
+    execution_only = plan_for_arm(OrchestrationArm.EXECUTION_ONLY)
+    assert (
+        execution_only.graph_agent_enabled,
+        execution_only.diffusion_agent_enabled,
+        execution_only.policy_component,
+        execution_only.pack_context,
+    ) == (False, False, "none", False)
     assert (
         plan_for_arm(OrchestrationArm.GRAPH_ONLY).policy_component == "random_uniform"
     )

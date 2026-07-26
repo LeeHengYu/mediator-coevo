@@ -186,11 +186,12 @@ class PathsConfig(BaseModel):
 class ExecutorRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Accepted only so persisted experiment configs remain loadable.
+    sync_enabled: bool = Field(default=False, exclude=True)
     jobs_dir: str = "jobs"
     task_dirs: list[str] = Field(default_factory=lambda: ["tasks"])
     agent_name: str = Field(default="hermes", min_length=1)
     agent_env: dict[str, str] = Field(default_factory=dict)
-    sync_enabled: bool = False
     dataset: str = Field(default=DEFAULT_SKILLFLOW_DATASET, min_length=1)
     dataset_repo_type: str = "dataset"
     harbor_base_image: str = Field(

@@ -1,4 +1,4 @@
-"""Executor agent that runs SkillFlow tasks through Harbor."""
+"""Executor agent that runs benchmark task packages through Harbor."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from mediated_coevo.benchmarks import (
     HarborNotFoundError,
     HarborRunResult,
     HarborTimeoutError,
-    SkillFlowRepository,
-    parse_skillflow_execution_trace,
+    TaskPackageRepository,
+    parse_harbor_execution_trace,
 )
 from mediated_coevo.models.trace import ExecutionTrace
 
@@ -34,12 +34,12 @@ _HARBOR_ERROR_KINDS: tuple[tuple[type[BaseException], str], ...] = (
 
 
 class ExecutorAgent:
-    """Runs SkillFlow tasks in Harbor and normalizes environment failures."""
+    """Runs benchmark tasks in Harbor and normalizes environment failures."""
 
     def __init__(
         self,
         model: str,
-        benchmark_repo: SkillFlowRepository,
+        benchmark_repo: TaskPackageRepository,
         harbor_runner: HarborTaskRunner,
         workspace_root: Path,
     ) -> None:
@@ -93,7 +93,7 @@ class ExecutorAgent:
                 harbor_metadata=envelope_metadata,
             )
 
-        trace = parse_skillflow_execution_trace(
+        trace = parse_harbor_execution_trace(
             run_result=run_result,
             task_id=task_spec.task_id,
             iteration=task_spec.iteration,

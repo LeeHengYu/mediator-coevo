@@ -1,4 +1,4 @@
-"""SkillFlow task loading and Harbor execution helpers."""
+"""Task-package loading, SkillFlow synchronization, and Harbor execution."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from mediated_coevo.models.trace import ExecutionTrace, TokenUsage
 logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLFLOW_DATASET = "zhang-ziao/SkillFlow-Task"
-SKILLFLOW_VERIFIER_TYPE = "skillflow_harbor"
+HARBOR_VERIFIER_TYPE = "harbor_task"
 HERMES_AGENT_NAME = "hermes"
 HF_TEST_TASKS_ROOT = "test_tasks"
 HF_FAMILY_RANKING_FILENAME = "ALL_TASK_DIFFICULTY_RANKING.json"
@@ -129,25 +129,20 @@ def redact_harbor_command_for_log(command: Iterable[str]) -> list[str]:
 class SkillFlowSyncConfig:
     """Hugging Face task-data synchronization settings."""
 
-    enabled: bool = False
     dataset: str = DEFAULT_SKILLFLOW_DATASET
     repo_type: str = "dataset"
-    local_dir: str = "tasks"
     remote_task_cache_path: Path | None = None
 
 
 @dataclass(slots=True)
-class SkillFlowTask:
-    """A locally available SkillFlow task."""
+class TaskPackage:
+    """A locally available Harbor task package."""
 
     task_id: str
     task_dir: Path
-    instruction_path: Path
     instruction: str
     task_config: dict[str, Any]
     family: str | None = None
-    difficulty: str | None = None
-    benchmark_kind: str = "skillflow"
 
 
 @dataclass(slots=True)
@@ -173,8 +168,8 @@ class _ExecutorSessionTokens:
     records: int = 0
 
 
-class SkillFlowRepository:
-    """Resolve local SkillFlow tasks and materialize Harbor workspaces."""
+class TaskPackageRepository:
+    """Resolve local task packages and materialize Harbor workspaces."""
 
     def __init__(
         self,
@@ -188,13 +183,13 @@ class SkillFlowRepository:
         self.task_dirs = task_dirs
         self.sync = sync or SkillFlowSyncConfig()
         self.harbor_base_image = harbor_base_image
-        self.legacy_harbor_base_images = _dedupe_nonempty(legacy_harbor_base_images)
+        self.legacy_harbor_base_images = tuple(_dedupe(legacy_harbor_base_images))
 
     def default_local_cache_dir(self) -> Path:
         """Return the local directory where task folders are cached."""
         return self.root_dir / self.task_dirs[0]
 
-    def resolve(self, task_id: str) -> SkillFlowTask:
+    def resolve(self, task_id: str) -> TaskPackage:
         task_dir = self._resolve_local_task_dir(task_id)
         if task_dir is None:
             searched = [
@@ -202,12 +197,12 @@ class SkillFlowRepository:
                 for task_root in self._existing_task_roots(include_missing=True)
             ]
             raise FileNotFoundError(
-                f"SkillFlow task {task_id!r} not found. Searched: {searched}"
+                f"Benchmark task {task_id!r} not found. Searched: {searched}"
             )
         return self._load_task(task_dir, task_id)
 
     def list_local_task_ids(self, *, family: str | None = None) -> list[str]:
-        """Return available local SkillFlow task IDs."""
+        """Return available local benchmark task IDs."""
         task_ids = []
         for task_dir in self._iter_task_dirs():
             task = self._load_task(task_dir, self._task_id_for_dir(task_dir))
@@ -344,7 +339,7 @@ class SkillFlowRepository:
 
     def prepare_run_workspace(
         self,
-        task: SkillFlowTask,
+        task: TaskPackage,
         destination_root: Path,
         planner_instruction: str,
         injected_skill_text: str | None,
@@ -369,8 +364,8 @@ class SkillFlowRepository:
             render_executor_envelope(
                 task_instruction=planner_instruction,
                 executor_policy=injected_skill_text,
-                task_resources=_skillflow_task_resources(run_dir),
-                verifier_contract=_skillflow_verifier_contract(task),
+                task_resources=_task_resources(run_dir),
+                verifier_contract=_verifier_contract(task),
             )
         )
         return run_dir
@@ -381,17 +376,17 @@ class SkillFlowRepository:
         run_dir: Path,
         executor_policy: str | None,
     ) -> dict[str, str]:
-        """Return trace metadata for the prepared SkillFlow executor envelope."""
+        """Return trace metadata for the prepared task executor envelope."""
         return executor_policy_metadata(
             executor_policy=executor_policy,
             injection_location="instruction_envelope",
-            task_resource_names=_skillflow_task_resource_names(run_dir),
-            verifier_contract_kind=SKILLFLOW_VERIFIER_TYPE,
+            task_resource_names=_task_resource_names(run_dir),
+            verifier_contract_kind=HARBOR_VERIFIER_TYPE,
         )
 
     def _resolve_local_task_dir(self, task_id: str) -> Path | None:
         if not _is_safe_task_id(task_id):
-            raise FileNotFoundError(f"Unsafe SkillFlow task ID: {task_id!r}")
+            raise FileNotFoundError(f"Unsafe benchmark task ID: {task_id!r}")
         for task_root in self._existing_task_roots():
             direct = task_root / task_id
             if _is_task_dir(direct):
@@ -422,39 +417,34 @@ class SkillFlowRepository:
                 return task_dir.relative_to(task_root).as_posix()
         return task_dir.name
 
-    def _load_task(self, task_dir: Path, task_id: str) -> SkillFlowTask:
+    def _load_task(self, task_dir: Path, task_id: str) -> TaskPackage:
         instruction_path = task_dir / "instruction.md"
         task_toml_path = task_dir / "task.toml"
         if not instruction_path.exists():
             raise FileNotFoundError(
-                f"Missing instruction.md for SkillFlow task {task_id!r} at {task_dir}"
+                f"Missing instruction.md for benchmark task {task_id!r} at {task_dir}"
             )
         if not task_toml_path.exists():
             raise FileNotFoundError(
-                f"Missing task.toml for SkillFlow task {task_id!r} at {task_dir}"
+                f"Missing task.toml for benchmark task {task_id!r} at {task_dir}"
             )
         with open(task_toml_path, "rb") as f:
             task_config = tomllib.load(f)
         metadata = as_mapping(task_config.get("metadata"))
-        task_section = as_mapping(task_config.get("task"))
         family = as_nonempty_string(metadata.get("family"))
         if family is None and "/" in task_id:
             family = task_id.split("/", 1)[0]
-        return SkillFlowTask(
+        return TaskPackage(
             task_id=task_id,
             task_dir=task_dir,
-            instruction_path=instruction_path,
             instruction=instruction_path.read_text(),
             task_config=task_config,
             family=family,
-            difficulty=as_nonempty_string(
-                metadata.get("difficulty") or task_section.get("difficulty")
-            ),
         )
 
 
 class HarborRunner:
-    """Run a local SkillFlow task via Harbor and locate its artifacts."""
+    """Run a local task package via Harbor and locate its artifacts."""
 
     def __init__(
         self,
@@ -473,7 +463,7 @@ class HarborRunner:
         self.agent_env = dict(agent_env or {})
         self.agent_setup_timeout_multiplier = agent_setup_timeout_multiplier
         self.harbor_base_image = harbor_base_image
-        self.legacy_harbor_base_images = _dedupe_nonempty(legacy_harbor_base_images)
+        self.legacy_harbor_base_images = tuple(_dedupe(legacy_harbor_base_images))
         self.base_image_build_script = (
             base_image_build_script or _default_base_image_build_script()
         )
@@ -552,7 +542,7 @@ class HarborRunner:
                 ]
             )
         logger.info(
-            "Running SkillFlow Harbor task: %s",
+            "Running Harbor benchmark task: %s",
             " ".join(redact_harbor_command_for_log(command)),
         )
         env = os.environ.copy()
@@ -602,146 +592,7 @@ class HarborRunner:
         )
 
 
-class SkillFlowTraceParser:
-    """Convert one SkillFlow Harbor run into a normalized execution trace."""
-
-    def __init__(
-        self,
-        run_result: HarborRunResult,
-        task_id: str,
-        iteration: int,
-        duration_sec: float,
-    ) -> None:
-        self.run_result = run_result
-        self.task_id = task_id
-        self.iteration = iteration
-        self.duration_sec = duration_sec
-
-    def parse(self) -> ExecutionTrace:
-        if self.run_result.trial_dir is None:
-            return ExecutionTrace(
-                task_id=self.task_id,
-                iteration=self.iteration,
-                duration_sec=self.duration_sec,
-                exit_code=self.run_result.returncode,
-                stdout=self.run_result.stdout,
-                stderr=self.run_result.stderr,
-                harbor_paths=_harbor_paths(self.run_result),
-                status="env_failure",
-                error_kind="missing_trial_dir",
-                error_detail="Harbor did not produce a trial directory.",
-            )
-
-        trial_result_json = _load_json_or_empty(
-            self.run_result.trial_dir / "result.json"
-        )
-        job_result_json = _load_json_or_empty(
-            self.run_result.job_dir / "result.json"
-            if self.run_result.job_dir is not None
-            else None
-        )
-        exception_info = as_mapping(trial_result_json.get("exception_info"))
-        if exception_info:
-            return ExecutionTrace(
-                task_id=self.task_id,
-                iteration=self.iteration,
-                duration_sec=self.duration_sec,
-                exit_code=self.run_result.returncode,
-                stdout=self.run_result.stdout,
-                stderr=self.run_result.stderr,
-                harbor_paths=_harbor_paths(self.run_result),
-                status="env_failure",
-                error_kind=_trial_exception_error_kind(exception_info),
-                error_detail=dict(exception_info),
-                harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
-                run_id=as_nonempty_string(job_result_json.get("id")),
-                harbor_metadata=_harbor_metadata(trial_result_json),
-            )
-        reward_candidates: list[tuple[str, Any]] = []
-        stats = as_mapping(job_result_json.get("stats"))
-        evals = as_mapping(stats.get("evals"))
-        for eval_result in evals.values():
-            metrics = as_mapping(eval_result).get("metrics")
-            if isinstance(metrics, list):
-                for metric in metrics:
-                    reward_candidates.append(
-                        ("job_stats", as_mapping(metric).get("mean"))
-                    )
-        reward_candidates.append(("trial_result", trial_result_json.get("reward")))
-        verifier_result = as_mapping(trial_result_json.get("verifier_result"))
-        reward_candidates.append(
-            ("trial_verifier_result", verifier_result.get("reward"))
-        )
-        reward_candidates.append(
-            (
-                "trial_verifier_rewards",
-                as_mapping(verifier_result.get("rewards")).get("reward"),
-            )
-        )
-        reward_path = self.run_result.trial_dir / "verifier" / "reward.txt"
-        if reward_path.exists():
-            reward_candidates.append(
-                ("verifier_reward_file", reward_path.read_text().strip())
-            )
-
-        reward = None
-        reward_source: str | None = None
-        for source, value in reward_candidates:
-            try:
-                reward = float(value)
-            except (TypeError, ValueError):
-                continue
-            reward_source = source
-            break
-        if reward is None:
-            return ExecutionTrace(
-                task_id=self.task_id,
-                iteration=self.iteration,
-                duration_sec=self.duration_sec,
-                exit_code=self.run_result.returncode,
-                stdout=self.run_result.stdout,
-                stderr=self.run_result.stderr,
-                harbor_paths=_harbor_paths(self.run_result),
-                status="env_failure",
-                error_kind="missing_reward",
-                error_detail="No SkillFlow reward was found in Harbor artifacts.",
-                harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
-                run_id=as_nonempty_string(job_result_json.get("id")),
-                harbor_metadata=_harbor_metadata(trial_result_json),
-            )
-
-        agent_result = as_mapping(trial_result_json.get("agent_result"))
-        token_usage, token_metadata = _executor_token_usage(
-            trial_dir=self.run_result.trial_dir,
-            agent_result=agent_result,
-        )
-        assert reward_source is not None
-        ctrf_path = self.run_result.trial_dir / "verifier" / "ctrf.json"
-        test_results = _load_json_or_empty(ctrf_path) if ctrf_path.exists() else None
-        return ExecutionTrace(
-            task_id=self.task_id,
-            iteration=self.iteration,
-            duration_sec=self.duration_sec,
-            exit_code=self.run_result.returncode,
-            stdout=self.run_result.stdout,
-            stderr=self.run_result.stderr,
-            harbor_paths=_harbor_paths(self.run_result),
-            status="ok",
-            reward=reward,
-            run_id=as_nonempty_string(job_result_json.get("id")),
-            harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
-            harbor_metadata={
-                **_harbor_metadata(trial_result_json),
-                **token_metadata,
-                "verifier_type": SKILLFLOW_VERIFIER_TYPE,
-                "reward_source": reward_source,
-            },
-            token_usage=token_usage,
-            test_results=test_results,
-        )
-
-
-def parse_skillflow_execution_trace(
+def parse_harbor_execution_trace(
     *,
     run_result: HarborRunResult,
     task_id: str,
@@ -749,16 +600,127 @@ def parse_skillflow_execution_trace(
     duration_sec: float,
 ) -> ExecutionTrace:
     """Parse one Harbor run result into the project trace contract."""
-    return SkillFlowTraceParser(
-        run_result=run_result,
+    if run_result.trial_dir is None:
+        return ExecutionTrace(
+            task_id=task_id,
+            iteration=iteration,
+            duration_sec=duration_sec,
+            exit_code=run_result.returncode,
+            stdout=run_result.stdout,
+            stderr=run_result.stderr,
+            harbor_paths=_harbor_paths(run_result),
+            status="env_failure",
+            error_kind="missing_trial_dir",
+            error_detail="Harbor did not produce a trial directory.",
+        )
+
+    trial_result_json = _load_json_or_empty(run_result.trial_dir / "result.json")
+    job_result_json = _load_json_or_empty(
+        run_result.job_dir / "result.json" if run_result.job_dir is not None else None
+    )
+    exception_info = as_mapping(trial_result_json.get("exception_info"))
+    if exception_info:
+        return ExecutionTrace(
+            task_id=task_id,
+            iteration=iteration,
+            duration_sec=duration_sec,
+            exit_code=run_result.returncode,
+            stdout=run_result.stdout,
+            stderr=run_result.stderr,
+            harbor_paths=_harbor_paths(run_result),
+            status="env_failure",
+            error_kind=_trial_exception_error_kind(exception_info),
+            error_detail=dict(exception_info),
+            harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
+            run_id=as_nonempty_string(job_result_json.get("id")),
+            harbor_metadata=_harbor_metadata(trial_result_json),
+        )
+
+    reward_candidates: list[tuple[str, Any]] = []
+    stats = as_mapping(job_result_json.get("stats"))
+    evals = as_mapping(stats.get("evals"))
+    for eval_result in evals.values():
+        metrics = as_mapping(eval_result).get("metrics")
+        if isinstance(metrics, list):
+            reward_candidates.extend(
+                ("job_stats", as_mapping(metric).get("mean")) for metric in metrics
+            )
+    reward_candidates.append(("trial_result", trial_result_json.get("reward")))
+    verifier_result = as_mapping(trial_result_json.get("verifier_result"))
+    reward_candidates.append(
+        ("trial_verifier_result", verifier_result.get("reward"))
+    )
+    reward_candidates.append(
+        (
+            "trial_verifier_rewards",
+            as_mapping(verifier_result.get("rewards")).get("reward"),
+        )
+    )
+    reward_path = run_result.trial_dir / "verifier" / "reward.txt"
+    if reward_path.exists():
+        reward_candidates.append(
+            ("verifier_reward_file", reward_path.read_text().strip())
+        )
+
+    reward = None
+    reward_source: str | None = None
+    for source, value in reward_candidates:
+        try:
+            reward = float(value)
+        except (TypeError, ValueError):
+            continue
+        reward_source = source
+        break
+    if reward is None:
+        return ExecutionTrace(
+            task_id=task_id,
+            iteration=iteration,
+            duration_sec=duration_sec,
+            exit_code=run_result.returncode,
+            stdout=run_result.stdout,
+            stderr=run_result.stderr,
+            harbor_paths=_harbor_paths(run_result),
+            status="env_failure",
+            error_kind="missing_reward",
+            error_detail="No benchmark reward was found in Harbor artifacts.",
+            harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
+            run_id=as_nonempty_string(job_result_json.get("id")),
+            harbor_metadata=_harbor_metadata(trial_result_json),
+        )
+
+    agent_result = as_mapping(trial_result_json.get("agent_result"))
+    token_usage, token_metadata = _executor_token_usage(
+        trial_dir=run_result.trial_dir,
+        agent_result=agent_result,
+    )
+    assert reward_source is not None
+    ctrf_path = run_result.trial_dir / "verifier" / "ctrf.json"
+    test_results = _load_json_or_empty(ctrf_path) if ctrf_path.exists() else None
+    return ExecutionTrace(
         task_id=task_id,
         iteration=iteration,
         duration_sec=duration_sec,
-    ).parse()
+        exit_code=run_result.returncode,
+        stdout=run_result.stdout,
+        stderr=run_result.stderr,
+        harbor_paths=_harbor_paths(run_result),
+        status="ok",
+        reward=reward,
+        run_id=as_nonempty_string(job_result_json.get("id")),
+        harbor_trial_id=as_nonempty_string(trial_result_json.get("id")),
+        harbor_metadata={
+            **_harbor_metadata(trial_result_json),
+            **token_metadata,
+            "verifier_type": HARBOR_VERIFIER_TYPE,
+            "reward_source": reward_source,
+        },
+        token_usage=token_usage,
+        test_results=test_results,
+    )
 
 
-def _skillflow_task_resources(run_dir: Path) -> tuple[str, ...]:
-    resource_names = _skillflow_task_resource_names(run_dir)
+def _task_resources(run_dir: Path) -> tuple[str, ...]:
+    resource_names = _task_resource_names(run_dir)
     if resource_names:
         return (
             "Task-local resources are available under `environment/skills`: "
@@ -769,7 +731,7 @@ def _skillflow_task_resources(run_dir: Path) -> tuple[str, ...]:
     )
 
 
-def _skillflow_task_resource_names(run_dir: Path) -> tuple[str, ...]:
+def _task_resource_names(run_dir: Path) -> tuple[str, ...]:
     skills_dir = run_dir / "environment" / "skills"
     if not skills_dir.exists():
         return ()
@@ -800,7 +762,7 @@ def _ensure_declared_prebuilt_image(
             f"not exist: {dockerfile}"
         )
 
-    legacy_base_images = _dedupe_nonempty(legacy_harbor_base_images)
+    legacy_base_images = tuple(_dedupe(legacy_harbor_base_images))
     _normalize_dockerfile_base_images(
         dockerfile,
         harbor_base_image=harbor_base_image,
@@ -837,7 +799,7 @@ def _ensure_declared_prebuilt_image(
         ],
         failure_message=(
             f"Prebuilt Harbor image `{image_name}` is missing and automatic "
-            f"rebuild failed for SkillFlow task workspace {task_dir}"
+            f"rebuild failed for benchmark task workspace {task_dir}"
         ),
     )
 
@@ -871,7 +833,7 @@ def _ensure_legacy_base_image_alias(
     base_image_build_script: Path | None = None,
 ) -> None:
     base_images = _dockerfile_base_images(dockerfile)
-    for legacy_base_image in _dedupe_nonempty(legacy_harbor_base_images):
+    for legacy_base_image in _dedupe(legacy_harbor_base_images):
         if legacy_base_image not in base_images:
             continue
         if _docker_image_exists(legacy_base_image):
@@ -934,7 +896,7 @@ def _normalize_dockerfile_base_images(
     harbor_base_image: str,
     legacy_harbor_base_images: Iterable[str],
 ) -> bool:
-    legacy_images = set(_dedupe_nonempty(legacy_harbor_base_images))
+    legacy_images = set(_dedupe(legacy_harbor_base_images))
     if not legacy_images:
         return False
 
@@ -989,11 +951,11 @@ def _run_docker_command(command: list[str], *, failure_message: str) -> None:
     )
 
 
-def _skillflow_verifier_contract(task: SkillFlowTask) -> str:
+def _verifier_contract(task: TaskPackage) -> str:
     metadata = as_mapping(task.task_config.get("metadata"))
     verifier = as_mapping(task.task_config.get("verifier"))
     lines = [
-        "Success is judged by the SkillFlow verifier for this task.",
+        "Success is judged by the verifier packaged with this task.",
         "Do not bypass, remove, or weaken verifier scripts, tests, fixtures, or "
         "expected-output checks.",
         "Run the provided tests or verifier command when practical before finalizing.",
@@ -1067,18 +1029,7 @@ def _merge_downloaded_test_tasks(*, source_root: Path, destination: Path) -> Non
 
 
 def _dedupe(task_ids: Iterable[str]) -> list[str]:
-    seen: set[str] = set()
-    unique: list[str] = []
-    for task_id in task_ids:
-        cleaned = task_id.strip()
-        if cleaned and cleaned not in seen:
-            unique.append(cleaned)
-            seen.add(cleaned)
-    return unique
-
-
-def _dedupe_nonempty(values: Iterable[str]) -> tuple[str, ...]:
-    return tuple(_dedupe(values))
+    return list(dict.fromkeys(cleaned for value in task_ids if (cleaned := value.strip())))
 
 
 def _latest_path(paths: Iterable[Path]) -> Path | None:
@@ -1194,14 +1145,13 @@ def harbor_missing_prebuilt_image_message(
             break
     image_text = f" `{image_name}`" if image_name is not None else ""
     return (
-        f"Prebuilt Harbor image{image_text} is missing for SkillFlow task workspace "
-        f"{task_dir}. The official SkillFlow quick start requires the base image "
-        "`./docker/harbor-cli-base/build.sh`; task-image prebuild is optional. "
-        "Run `uv run medcoevo build-base-image` for the required base image. "
+        f"Prebuilt Harbor image{image_text} is missing for benchmark task workspace "
+        f"{task_dir}. The task's declared prebuilt image must already exist locally. "
+        "Run `uv run medcoevo build-base-image` for the repository's shared benchmark "
+        "images, or build or pull the declared image directly. "
         "If this task intentionally declares `[environment].docker_image`, either "
         "remove a stale `docker_image` field so Harbor builds from the task "
-        "Dockerfile, or run SkillFlow's optional task prebuilder manually and "
-        "re-run after `docker image inspect <image>` succeeds."
+        "Dockerfile, or re-run after `docker image inspect <image>` succeeds."
     )
 
 

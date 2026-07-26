@@ -12,13 +12,13 @@ from typer.testing import CliRunner
 import mediated_coevo.benchmarks.skillflow as skillflow_benchmark
 import mediated_coevo.cli.experiment as experiment_cli
 from mediated_coevo.benchmarks import (
-    SKILLFLOW_VERIFIER_TYPE,
+    HARBOR_VERIFIER_TYPE,
     HarborPrebuiltImageMissingError,
     HarborRunner,
     HarborRunResult,
-    SkillFlowRepository,
     SkillFlowSyncConfig,
-    parse_skillflow_execution_trace,
+    TaskPackageRepository,
+    parse_harbor_execution_trace,
 )
 from mediated_coevo.cli import benchmark as benchmark_cli
 from mediated_coevo.cli import lifelong_agent_bench as lifelong_cli
@@ -35,7 +35,7 @@ def test_repository_resolves_tasks_and_lists_family(tmp_path: Path) -> None:
     root = tmp_path / "skillflow"
     _write_task(root / "tasks" / "family-a" / "task-one", family="family-a")
     _write_task(root / "tasks" / "family-b" / "task-two", family="family-b")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
 
     task = repo.resolve("family-a/task-one")
 
@@ -51,7 +51,7 @@ def test_family_selection_evenly_repeats_short_task_pool(
     root = tmp_path / "skillflow"
     _write_task(root / "tasks" / "family-a" / "task-one", family="family-a")
     _write_task(root / "tasks" / "family-a" / "task-two", family="family-a")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     monkeypatch.setattr(experiment_cli.secrets, "randbits", lambda _bits: 7)
 
     selection = resolve_task_selection(
@@ -72,7 +72,7 @@ def test_task_manifest_preserves_order_and_duplicates(tmp_path: Path) -> None:
     root = tmp_path / "skillflow"
     _write_task(root / "tasks" / "family-a" / "task-one", family="family-a")
     _write_task(root / "tasks" / "family-b" / "task-two", family="family-b")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     manifest = tmp_path / "stream.json"
     manifest.write_text(
         json.dumps(
@@ -112,7 +112,7 @@ def test_family_selection_spreads_extra_slots_across_short_task_pool(
     root = tmp_path / "skillflow"
     for index in range(1, 7):
         _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     monkeypatch.setattr(experiment_cli.secrets, "randbits", lambda _bits: 7)
 
     selection = resolve_task_selection(
@@ -133,7 +133,7 @@ def test_family_selection_uses_no_replacement_when_pool_is_large_enough(
     root = tmp_path / "skillflow"
     for index in range(1, 9):
         _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     monkeypatch.setattr(experiment_cli.secrets, "randbits", lambda _bits: 7)
 
     selection = resolve_task_selection(
@@ -154,7 +154,7 @@ def test_family_selection_randomizes_stream_without_changing_split(
     for index in range(1, 7):
         _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
         _write_task(root / "tasks" / "family-b" / f"task-{index}", family="family-b")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     generated_seeds = iter((100, 101, 102))
     monkeypatch.setattr(
         experiment_cli.secrets,
@@ -193,7 +193,7 @@ def test_family_selection_accepts_multiple_families_and_split(tmp_path: Path) ->
     for index in range(1, 5):
         _write_task(root / "tasks" / "family-a" / f"task-{index}", family="family-a")
         _write_task(root / "tasks" / "family-b" / f"task-{index}", family="family-b")
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
 
     validation = resolve_task_selection(
         repository=repo,
@@ -210,7 +210,7 @@ def test_family_selection_accepts_multiple_families_and_split(tmp_path: Path) ->
     )
 
     assert validation.families == ("family-a", "family-b")
-    assert validation.family == "family-a,family-b"
+    assert validation.family_label == "family-a,family-b"
     assert validation.split == "validation"
     assert len(validation.task_ids) == BOOTSTRAP_FAMILY_TASK_COUNT
     assert set(validation.task_ids) <= all_tasks
@@ -226,7 +226,7 @@ def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None
     (environment_dir / "Dockerfile").write_text(
         f"FROM {skillflow_benchmark.LEGACY_HARBOR_BASE_IMAGE}\n",
     )
-    repo = SkillFlowRepository(
+    repo = TaskPackageRepository(
         root_dir=root,
         task_dirs=["tasks"],
         harbor_base_image="local/harbor-base:test",
@@ -249,7 +249,7 @@ def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None
     assert "Do the planned work." in instruction
     assert "# Executor Policy" in instruction
     assert metadata["executor_policy_injected"] == "true"
-    assert metadata["verifier_contract_kind"] == SKILLFLOW_VERIFIER_TYPE
+    assert metadata["verifier_contract_kind"] == HARBOR_VERIFIER_TYPE
     assert (run_dir / "environment" / "Dockerfile").read_text() == (
         "FROM local/harbor-base:test\n"
     )
@@ -257,7 +257,7 @@ def test_prepare_run_workspace_injects_executor_envelope(tmp_path: Path) -> None
 
 def test_repository_lists_remote_task_ids(monkeypatch, tmp_path: Path) -> None:
     root = tmp_path / "skillflow"
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     calls = []
 
     def fake_run(command, **kwargs):
@@ -315,7 +315,7 @@ def test_repository_lists_cached_remote_task_ids_before_hf(
             ]
         )
     )
-    repo = SkillFlowRepository(
+    repo = TaskPackageRepository(
         root_dir=root,
         task_dirs=["tasks"],
         sync=SkillFlowSyncConfig(remote_task_cache_path=task_cache_path),
@@ -342,7 +342,7 @@ def test_sync_tasks_downloads_all_test_tasks_to_configured_task_cache(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "skillflow"
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     calls = []
 
     def fake_run(command, **kwargs):
@@ -375,7 +375,7 @@ def test_sync_tasks_downloads_selected_tasks_and_family_ranking(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "skillflow"
-    repo = SkillFlowRepository(root_dir=root, task_dirs=["tasks"])
+    repo = TaskPackageRepository(root_dir=root, task_dirs=["tasks"])
     calls = []
 
     def fake_run(command, **kwargs):
@@ -585,7 +585,7 @@ def test_sync_tasks_normalizes_legacy_dockerfiles(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    repo = SkillFlowRepository(
+    repo = TaskPackageRepository(
         root_dir=tmp_path / "skillflow",
         task_dirs=["tasks"],
         sync=SkillFlowSyncConfig(dataset="demo/dataset"),
@@ -629,7 +629,7 @@ def test_sync_cli_accepts_family_selector(monkeypatch, tmp_path: Path) -> None:
             ]
         )
     )
-    repo = SkillFlowRepository(
+    repo = TaskPackageRepository(
         root_dir=tmp_path / "skillflow",
         task_dirs=["tasks"],
         sync=SkillFlowSyncConfig(
@@ -750,7 +750,7 @@ def test_list_cli_uses_cached_remote_tasks(monkeypatch, tmp_path: Path) -> None:
             ]
         )
     )
-    repo = SkillFlowRepository(
+    repo = TaskPackageRepository(
         root_dir=tmp_path / "skillflow",
         task_dirs=["tasks"],
         sync=SkillFlowSyncConfig(
@@ -822,7 +822,7 @@ def test_trace_parser_reads_harbor_stats_reward(tmp_path: Path) -> None:
         stderr="",
     )
 
-    trace = parse_skillflow_execution_trace(
+    trace = parse_harbor_execution_trace(
         run_result=run_result,
         task_id="demo",
         iteration=2,
@@ -876,7 +876,7 @@ def test_trace_parser_reports_source_that_supplied_parsed_reward(
         stderr="",
     )
 
-    trace = parse_skillflow_execution_trace(
+    trace = parse_harbor_execution_trace(
         run_result=run_result,
         task_id="demo",
         iteration=0,
@@ -944,7 +944,7 @@ def test_trace_parser_falls_back_to_hermes_session_tokens(
         stderr="",
     )
 
-    trace = parse_skillflow_execution_trace(
+    trace = parse_harbor_execution_trace(
         run_result=run_result,
         task_id="demo",
         iteration=2,
@@ -1002,7 +1002,7 @@ def test_trace_parser_treats_harbor_trial_exception_as_env_failure(
         stderr="",
     )
 
-    trace = parse_skillflow_execution_trace(
+    trace = parse_harbor_execution_trace(
         run_result=run_result,
         task_id="demo",
         iteration=0,
@@ -1033,7 +1033,7 @@ def test_trace_parser_reads_reward_file(tmp_path: Path) -> None:
         stderr="",
     )
 
-    trace = parse_skillflow_execution_trace(
+    trace = parse_harbor_execution_trace(
         run_result=run_result,
         task_id="demo",
         iteration=0,
@@ -1079,7 +1079,7 @@ def test_trace_parser_reads_observed_trial_verifier_rewards_shape(
         stderr="",
     )
 
-    trace = parse_skillflow_execution_trace(
+    trace = parse_harbor_execution_trace(
         run_result=run_result,
         task_id="demo",
         iteration=0,
@@ -1253,11 +1253,9 @@ async def test_harbor_runner_raises_for_missing_prebuilt(
         await runner.run(task_dir, "provider/model")
 
     assert "harbor-prebuilt:task-demo" in str(exc_info.value)
-    assert "official SkillFlow quick start requires the base image" in str(
-        exc_info.value
-    )
+    assert "declared prebuilt image must already exist locally" in str(exc_info.value)
     assert "uv run medcoevo build-base-image" in str(exc_info.value)
-    assert "task-image prebuild is optional" in str(exc_info.value)
+    assert "build or pull the declared image directly" in str(exc_info.value)
     assert captured_commands == [
         [
             "/usr/local/bin/harbor",

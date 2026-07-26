@@ -11,7 +11,7 @@ import typer
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from mediated_coevo.benchmarks import SkillFlowRepository
+from mediated_coevo.benchmarks import TaskPackageRepository
 from mediated_coevo.cli import sequence as sequence_module
 from mediated_coevo.core.config import SequenceConfig
 from mediated_coevo.execution.models import TaskProfile
@@ -25,7 +25,7 @@ _FAMILY_ARGS = ["--family", _FAMILY]
 
 def _repository(
     family_counts: dict[str, int] | None = None,
-) -> SkillFlowRepository:
+) -> TaskPackageRepository:
     family_counts = family_counts or {_FAMILY: 8}
     tasks = {
         f"{family}-{index}": SimpleNamespace(
@@ -37,7 +37,7 @@ def _repository(
         for family, count in family_counts.items()
         for index in range(count)
     }
-    repository = MagicMock(spec=SkillFlowRepository)
+    repository = MagicMock(spec=TaskPackageRepository)
     repository.list_local_task_ids.side_effect = lambda *, family: [
         task_id for task_id, task in tasks.items() if task.family == family
     ]

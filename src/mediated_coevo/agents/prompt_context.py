@@ -3,18 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from mediated_coevo.runtime.token_budget import BudgetSection, OverflowStrategy
-
-PromptSectionKind = Literal[
-    "scaffold",
-    "same_task_prior",
-    "cross_task_prior",
-    "diffusion_context",
-    "execution_feedback",
-    "response_schema",
-]
 
 
 @dataclass(frozen=True)
@@ -22,7 +12,6 @@ class PromptSection:
     """One logical prompt section before rendering or token packing."""
 
     name: str
-    kind: PromptSectionKind
     content: str
     required: bool = False
     max_tokens: int | None = None
@@ -57,7 +46,6 @@ class PlannerPriorContextBundle:
             sections.append(
                 PromptSection(
                     name="same_task_prior",
-                    kind="same_task_prior",
                     content=self.same_task_prior,
                     required=True,
                 )
@@ -66,7 +54,6 @@ class PlannerPriorContextBundle:
             sections.append(
                 PromptSection(
                     name="diffusion_context",
-                    kind="diffusion_context",
                     content=self.diffusion_context,
                     required=True,
                 )
@@ -75,7 +62,6 @@ class PlannerPriorContextBundle:
             sections.append(
                 PromptSection(
                     name="cross_task_prior",
-                    kind="cross_task_prior",
                     content=self.cross_task_prior,
                     required=True,
                 )
